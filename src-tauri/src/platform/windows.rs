@@ -669,8 +669,45 @@ pub fn get_dns_servers() -> anyhow::Result<Vec<String>> {
     }
 }
 
-/// Set DNS servers on Windows using netsh
+/// Validate interface name to prevent command injection
+fn validate_interface_name(name: &str) -> Result<(), anyhow::Error> {
+    // Interface names should be alphanumeric with limited special characters
+    // Windows interface names are typically Ethernet, Wi-Fi, or similar
+    // Allow: alphanumeric, spaces, hyphens, underscores, and common non-ASCII characters
+    if name.is_empty() || name.len() > 100 {
+        return Err(anyhow::anyhow!("Invalid interface name length"));
+    }
+
+    // Reject dangerous characters that could enable command injection
+    let dangerous_chars = ['&', '|', ';', '$', '`', '(', ')', '<', '>', '\0', '\n', '\r', '\t'];
+    if name.chars().any(|c| dangerous_chars.contains(&c)) {
+        return Err(anyhow::anyhow!("Interface name contains dangerous characters"));
+    }
+
+    // Only allow safe characters: alphanumeric, spaces, hyphens, underscores, dots, and common Unicode
+    if !name.chars().all(|c| {
+        c.is_alphanumeric() || c.is_whitespace() || c == '-' || c == '_' || c == '.' ||
+        // Allow common non-ASCII characters in localized Windows
+        matches!(c as u32, 0x4E00..=0x9FFF | 0x3040..=0x309F | 0x30A0..=0x30FF) // CJK, Hiragana, Katakana
+    }) {
+        return Err(anyhow::anyhow!("Interface name contains invalid characters"));
+    }
+
+    Ok(())
+}
+
+/// Set DNS servers on Windows using netsh with proper input validation
 pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result<()> {
+    // Validate DNS server addresses first
+    if primary.is_empty() || primary.len() > 253 {
+        return Err(anyhow::anyhow!("Invalid primary DNS server address"));
+    }
+    if let Some(sec) = secondary {
+        if sec.is_empty() || sec.len() > 253 {
+            return Err(anyhow::anyhow!("Invalid secondary DNS server address"));
+        }
+    }
+
     // Get the active interface name
     let output = std::process::Command::new("netsh")
         .args(&["interface", "show", "interface"])
@@ -685,16 +722,30 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
             if !parts.is_empty() {
                 let interface_name = parts[0];
 
+                // Validate interface name before using it in command
+                validate_interface_name(interface_name)?;
+
+                // Use properly quoted arguments to prevent injection
+                let name_arg = format!("name=\"{}\"", interface_name);
+
                 // Set primary DNS
-                std::process::Command::new("netsh")
-                    .args(&["interface", "ip", "set", "dns", "name=", interface_name, "static", primary])
-                    .output()?;
+                let status = std::process::Command::new("netsh")
+                    .args(&["interface", "ip", "set", "dns", &name_arg, "static", primary])
+                    .status()?;
+
+                if !status.success() {
+                    return Err(anyhow::anyhow!("Failed to set primary DNS server"));
+                }
 
                 // Set secondary DNS if provided
                 if let Some(secondary) = secondary {
-                    std::process::Command::new("netsh")
-                        .args(&["interface", "ip", "add", "dns", "name=", interface_name, secondary, "index=2"])
-                        .output()?;
+                    let status = std::process::Command::new("netsh")
+                        .args(&["interface", "ip", "add", "dns", &name_arg, secondary, "index=2"])
+                        .status()?;
+
+                    if !status.success() {
+                        return Err(anyhow::anyhow!("Failed to set secondary DNS server"));
+                    }
                 }
 
                 return Ok(());

@@ -364,6 +364,16 @@ async fn ping_macos(target: &str, ipv6: bool, count: u32) -> Result<PingResult, 
 /// Traceroute to a host to discover the path
 #[tauri::command]
 pub async fn traceroute(target: String, max_hops: Option<u32>) -> Result<TracerouteResult, String> {
+    // Validate target length to prevent command injection
+    if target.is_empty() || target.len() > 253 {
+        return Err("Invalid target: length must be between 1 and 253 characters".to_string());
+    }
+
+    // Validate it's a valid hostname or IP address
+    if target.parse::<std::net::IpAddr>().is_err() && !is_valid_hostname(&target) {
+        return Err("Target must be a valid IP address or hostname".to_string());
+    }
+
     let max_hops = max_hops.unwrap_or(30).min(64);
 
     #[cfg(target_os = "windows")]

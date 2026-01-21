@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 /// Dual-stack status and management
 pub struct DualStackManager {
     enabled: bool,

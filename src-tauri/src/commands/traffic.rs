@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::models::{TrafficStats, AppTraffic};
 use std::sync::Arc;
 use tokio::sync::Mutex;

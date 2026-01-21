@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::fs;
 use std::path::PathBuf;
 
@@ -57,26 +55,55 @@ impl std::fmt::Display for ValidationError {
     }
 }
 
-/// Validate DNS server address format
+/// Validate DNS server address format with comprehensive security checks
 fn validate_dns_server(addr: &str) -> Result<(), ValidationError> {
     if addr.is_empty() {
         return Err(ValidationError::InvalidDnsServer("DNS server cannot be empty".to_string()));
     }
 
-    // Check if it's a valid IP address or hostname
-    // Allow IPv4, IPv6, and simple hostnames
+    // Check for NULL bytes and other dangerous characters
+    if addr.contains('\0') || addr.contains('\n') || addr.contains('\r') {
+        return Err(ValidationError::InvalidDnsServer("DNS server contains invalid characters".to_string()));
+    }
+
+    // Check if it's a valid IP address (IPv4 or IPv6)
     if addr.parse::<std::net::IpAddr>().is_ok() {
         return Ok(());
     }
 
-    // Basic hostname validation (alphanumeric, dots, hyphens)
+    // Strict hostname validation according to RFC 1123
     if addr.len() > 253 {
-        return Err(ValidationError::InvalidDnsServer("DNS server hostname too long".to_string()));
+        return Err(ValidationError::InvalidDnsServer("DNS server hostname too long (max 253 chars)".to_string()));
     }
 
-    let hostname_valid = addr.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-');
-    if !hostname_valid {
-        return Err(ValidationError::InvalidDnsServer(format!("Invalid hostname format: {}", addr)));
+    if addr.len() < 1 {
+        return Err(ValidationError::InvalidDnsServer("DNS server hostname too short".to_string()));
+    }
+
+    // Check each label (segment between dots)
+    let labels: Vec<&str> = addr.split('.').collect();
+    if labels.len() < 2 {
+        return Err(ValidationError::InvalidDnsServer("DNS server hostname must have at least 2 labels".to_string()));
+    }
+
+    for label in labels {
+        if label.is_empty() {
+            return Err(ValidationError::InvalidDnsServer("DNS server hostname contains empty label (consecutive dots)".to_string()));
+        }
+        if label.len() > 63 {
+            return Err(ValidationError::InvalidDnsServer("DNS server hostname label too long (max 63 chars)".to_string()));
+        }
+        // Labels must start and end with alphanumeric, can contain hyphens in between
+        if !label.chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false) {
+            return Err(ValidationError::InvalidDnsServer("DNS server hostname label must start with alphanumeric".to_string()));
+        }
+        if !label.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false) {
+            return Err(ValidationError::InvalidDnsServer("DNS server hostname label must end with alphanumeric".to_string()));
+        }
+        // Only allow alphanumeric and hyphens in labels
+        if !label.chars().all(|c| c.is_alphanumeric() || c == '-') {
+            return Err(ValidationError::InvalidDnsServer(format!("DNS server hostname contains invalid characters in label: {}", label)));
+        }
     }
 
     Ok(())

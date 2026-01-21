@@ -50,7 +50,7 @@ fn parse_connection_state(state: &str) -> ConnectionState {
     }
 }
 
-/// Kill a specific connection (with validation)
+/// Kill a specific connection (with comprehensive security checks)
 #[tauri::command]
 pub async fn kill_connection(
     pid: u32,
@@ -86,7 +86,7 @@ pub async fn kill_connection(
         return Err("Connection not found or PID mismatch".to_string());
     }
 
-    // Additional safety: refuse to kill system-critical PIDs on Windows
+    // Platform-specific critical process protection
     #[cfg(windows)]
     {
         // Extended list of Windows system-critical PIDs
@@ -102,7 +102,79 @@ pub async fn kill_connection(
         if CRITICAL_PIDS.contains(&pid) {
             return Err(format!("Cannot kill system-critical process (PID {})", pid));
         }
+
+        // Also check process name to protect system processes
+        if let Some(conn) = connections.iter().find(|c| c.pid == Some(pid)) {
+            if let Some(ref name) = conn.process_name {
+                let protected_processes = [
+                    "System", "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe",
+                    "services.exe", "lsass.exe", "svchost.exe", "explorer.exe",
+                    "spoolsv.exe", "svchost.exe", "MsMpEng.exe", "SecurityHealthService.exe",
+                ];
+                let name_lower = name.to_lowercase();
+                for protected in protected_processes {
+                    if name_lower == protected.to_lowercase() || name_lower.ends_with(&format!("/{}", protected.to_lowercase())) {
+                        return Err(format!("Cannot kill protected system process: {}", name));
+                    }
+                }
+            }
+        }
     }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Linux critical PIDs - kernel threads and essential system processes
+        // Range check for kernel threads (2-500)
+        if pid == 1 || (pid >= 2 && pid <= 500) {
+            return Err(format!("Cannot kill system-critical process (PID {})", pid));
+        }
+
+        // Also check process name to protect system processes
+        if let Some(conn) = connections.iter().find(|c| c.pid == Some(pid)) {
+            if let Some(ref name) = conn.process_name {
+                let protected_processes = [
+                    "systemd", "init", "kthreadd", "ksoftirqd",
+                    "migration", "rcu_", "chronyd", "NetworkManager",
+                    "sshd", "dbus", "polkitd", "udisks2", "systemd-",
+                ];
+                let name_lower = name.to_lowercase();
+                for protected in protected_processes {
+                    if name_lower == protected.to_lowercase() || name_lower.starts_with(&format!("{}[", protected.to_lowercase())) {
+                        return Err(format!("Cannot kill protected system process: {}", name));
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS critical PIDs
+        // Range check for kernel and early system processes (2-200)
+        if pid == 1 || (pid >= 2 && pid <= 200) {
+            return Err(format!("Cannot kill system-critical process (PID {})", pid));
+        }
+
+        // Also check process name to protect system processes
+        if let Some(conn) = connections.iter().find(|c| c.pid == Some(pid)) {
+            if let Some(ref name) = conn.process_name {
+                let protected_processes = [
+                    "launchd", "kernel_task", "syslogd", "configd",
+                    "securityd", "distnoted", "mDNSResponder", "powerd",
+                ];
+                let name_lower = name.to_lowercase();
+                for protected in protected_processes {
+                    if name_lower == protected.to_lowercase() {
+                        return Err(format!("Cannot kill protected system process: {}", name));
+                    }
+                }
+            }
+        }
+    }
+
+    // Log the termination attempt for audit purposes
+    tracing::warn!("Attempting to terminate process PID={} for connection {}:{}",
+        pid, remote_addr, remote_port);
 
     #[cfg(target_os = "windows")]
     {
