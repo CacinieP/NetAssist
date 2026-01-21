@@ -1,0 +1,166 @@
+use crate::models::{ConnectionInfo, ConnectionState};
+use std::net::IpAddr;
+
+/// Get all active network connections
+#[tauri::command]
+pub async fn get_active_connections() -> Result<Vec<ConnectionInfo>, String> {
+    // Use platform abstraction layer
+    let raw_connections = crate::platform::get_active_connections()
+        .map_err(|e| e.to_string())?;
+
+    tracing::info!("Got {} raw connections from platform layer", raw_connections.len());
+
+    let mut connections = Vec::new();
+    for raw in &raw_connections {
+        let process_name = raw.process_name.as_ref().map(|s| s.as_str()).unwrap_or("-");
+        tracing::debug!("Connection: PID={:?}, process_name={}, remote={}",
+            raw.pid, process_name, raw.remote_addr);
+
+        connections.push(ConnectionInfo {
+            pid: raw.pid.unwrap_or(0),
+            process_name: raw.process_name.clone().unwrap_or_else(|| "-".to_string()),
+            protocol: raw.protocol.clone(),
+            local_address: raw.local_addr.to_string(),
+            local_port: raw.local_port,
+            remote_address: raw.remote_addr.to_string(),
+            remote_port: raw.remote_port,
+            state: parse_connection_state(&raw.state),
+            remote_geoip: None,
+            data_rate_bps: 0.0,
+            total_bytes: 0,
+        });
+    }
+
+    // Log first 5 connections for debugging
+    for (i, conn) in connections.iter().take(5).enumerate() {
+        tracing::info!("Connection {}: process_name='{}', PID={}, remote={}",
+            i, conn.process_name, conn.pid, conn.remote_address);
+    }
+
+    Ok(connections)
+}
+
+fn parse_connection_state(state: &str) -> ConnectionState {
+    match state.to_uppercase().as_str() {
+        "ESTABLISHED" => ConnectionState::Established,
+        "LISTEN" => ConnectionState::Listening,
+        "TIME_WAIT" => ConnectionState::TimeWait,
+        "CLOSE_WAIT" => ConnectionState::CloseWait,
+        _ => ConnectionState::Unknown,
+    }
+}
+
+/// Kill a specific connection (with validation)
+#[tauri::command]
+pub async fn kill_connection(
+    pid: u32,
+    remote_addr: String,
+    remote_port: u16,
+) -> Result<bool, String> {
+    // Validate PID range (prevent overflow and restrict reasonable range)
+    const MAX_PID: u32 = 4194304; // Reasonable max PID for most systems
+    if pid == 0 || pid > MAX_PID {
+        return Err(format!("Invalid PID: out of valid range (1-{})", MAX_PID));
+    }
+
+    // Validate remote address
+    let parsed_addr: IpAddr = remote_addr.parse()
+        .map_err(|_| "Invalid remote address format".to_string())?;
+
+    // Validate port is not zero
+    if remote_port == 0 {
+        return Err("Invalid remote port".to_string());
+    }
+
+    // Verify the connection exists before killing
+    let connections = crate::platform::get_active_connections()
+        .map_err(|e| format!("Failed to get connections: {}", e))?;
+
+    let connection_exists = connections.iter().any(|conn| {
+        conn.pid == Some(pid) &&
+        conn.remote_addr == parsed_addr &&
+        conn.remote_port == remote_port
+    });
+
+    if !connection_exists {
+        return Err("Connection not found or PID mismatch".to_string());
+    }
+
+    // Additional safety: refuse to kill system-critical PIDs on Windows
+    #[cfg(windows)]
+    {
+        // Extended list of Windows system-critical PIDs
+        const CRITICAL_PIDS: &[u32] = &[
+            0, 4,    // System Idle Process, System
+            8,       // Registry
+            12, 16,  // Various system processes
+            20,      // Session Manager
+            500, 600, // Additional system processes
+            764, 780, // Windows Defender related
+            1024,    // Some system services
+        ];
+        if CRITICAL_PIDS.contains(&pid) {
+            return Err(format!("Cannot kill system-critical process (PID {})", pid));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let output = Command::new("taskkill")
+            .args(&["/PID", &pid.to_string(), "/F"])
+            .output()
+            .map_err(|e| format!("Failed to execute taskkill: {}", e))?;
+
+        if output.status.success() {
+            tracing::info!("Killed connection: PID={}, remote={}:{}", pid, remote_addr, remote_port);
+            Ok(true)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Failed to kill process: {}", stderr))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        let output = Command::new("kill")
+            .args(&["-15", &pid.to_string()])  // Try SIGTERM first (less aggressive)
+            .output()
+            .map_err(|e| format!("Failed to execute kill: {}", e))?;
+
+        if output.status.success() {
+            tracing::info!("Terminated connection: PID={}, remote={}:{}", pid, remote_addr, remote_port);
+            Ok(true)
+        } else {
+            // Fall back to SIGKILL if SIGTERM fails
+            let output = Command::new("kill")
+                .args(&["-9", &pid.to_string()])
+                .output()
+                .map_err(|e| format!("Failed to execute kill -9: {}", e))?;
+
+            if output.status.success() {
+                tracing::warn!("Force killed connection: PID={}, remote={}:{}", pid, remote_addr, remote_port);
+                Ok(true)
+            } else {
+                Err("Failed to kill process".to_string())
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let output = Command::new("kill")
+            .args(&["-15", &pid.to_string()])  // Try SIGTERM first
+            .output()
+            .map_err(|e| format!("Failed to execute kill: {}", e))?;
+
+        if output.status.success() {
+            tracing::info!("Terminated connection: PID={}, remote={}:{}", pid, remote_addr, remote_port);
+            Ok(true)
+        } else {
+            Err("Failed to kill process".to_string())
+        }
+    }
+}
