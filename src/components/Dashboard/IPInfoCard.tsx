@@ -1,0 +1,161 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { RefreshCw } from "lucide-react";
+import { useSettingsStore } from "../../store/settingsStore";
+
+interface IPInfo {
+  ipv4?: string;
+  ipv4_type?: string;
+  ipv4_geoip?: {
+    country: string;
+    city: string;
+    region: string;
+  };
+  ipv6?: string;
+  ipv6_type?: string;
+  ipv6_geoip?: {
+    country: string;
+    city: string;
+    region: string;
+  };
+  local_ipv4?: string;
+  local_ipv6?: string;
+}
+
+export default function IPInfoCard() {
+  const { settings } = useSettingsStore();
+
+  const [ipInfo, setIpInfo] = useState<IPInfo>({});
+  const [refreshing, setRefreshing] = useState(false);
+
+  useEffect(() => {
+    // Initial fetch
+    fetchIPInfo();
+
+    // Avoid over-polling public IP / geoip
+    const intervalMs = Math.max(5000, (settings.refresh_interval_secs || 10) * 1000);
+    const interval = setInterval(fetchIPInfo, intervalMs);
+
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.refresh_interval_secs, settings.show_geoip]);
+
+  const fetchIPInfo = async () => {
+    setRefreshing(true);
+    try {
+      const info = await invoke<any>("get_ip_info", {
+        include_geoip: settings.show_geoip,
+      });
+      setIpInfo({
+        ipv4: info.ipv4 || undefined,
+        ipv4_type: info.ipv4_type,
+        ipv4_geoip: info.ipv4_geoip,
+        ipv6: info.ipv6 || undefined,
+        ipv6_type: info.ipv6_type,
+        ipv6_geoip: info.ipv6_geoip,
+        local_ipv4: info.local_ipv4 || undefined,
+        local_ipv6: info.local_ipv6 || undefined,
+      });
+    } catch (error) {
+      console.error("Failed to fetch IP info:", error);
+      // Clear geoip to avoid showing stale data
+      setIpInfo(prev => ({
+        ...prev,
+        ipv4: undefined,
+        ipv6: undefined,
+        ipv4_geoip: undefined,
+        ipv6_geoip: undefined,
+      }));
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // Format location for display
+  const formatLocation = (geoip?: { country: string; city: string; region: string }, type?: string) => {
+    if (geoip && geoip.country && geoip.country !== "本地网络" && geoip.country !== "未知") {
+      const parts = [geoip.country, geoip.city].filter(Boolean);
+      return parts.join(" ");
+    }
+    return type === "Public" ? "公网" : type === "Private" ? "内网" : type || "未知";
+  };
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-medium text-gray-700">IP 信息</h3>
+        <button
+          onClick={fetchIPInfo}
+          disabled={refreshing}
+          className="p-1 hover:bg-gray-100 rounded transition-colors disabled:opacity-50"
+          title="刷新IP信息"
+        >
+          <RefreshCw className={`w-4 h-4 text-gray-600 ${refreshing ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+
+      {/* IPv4 - Public */}
+      <div className="mb-4">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-blue-600 font-medium text-sm">公网 IPv4:</span>
+          <span className="font-mono text-sm text-gray-800">
+            {ipInfo.ipv4 || "加载中..."}
+          </span>
+        </div>
+        {settings.show_geoip && ipInfo.ipv4_geoip && (
+          <div className="flex items-center gap-2 pl-6">
+            <span className="text-gray-500 text-sm">位置:</span>
+            <span className="text-gray-600 text-sm">
+              {formatLocation(ipInfo.ipv4_geoip)}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* IPv4 - Local */}
+      <div className="mb-4">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-green-600 font-medium text-sm">本地 IPv4:</span>
+          <span className="font-mono text-sm text-gray-800">
+            {ipInfo.local_ipv4 || "未检测到"}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 pl-6">
+          <span className="text-gray-500 text-sm">类型:</span>
+          <span className="text-gray-600 text-sm">局域网 (内网)</span>
+        </div>
+      </div>
+
+      {/* IPv6 */}
+      {ipInfo.ipv6 && (
+        <div className="mt-4 pt-4 border-t border-gray-100">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-purple-600 font-medium text-sm">IPv6:</span>
+            <span className="font-mono text-sm text-gray-800">{ipInfo.ipv6}</span>
+          </div>
+          <div className="flex items-center gap-2 pl-6">
+            <span className="text-gray-500 text-sm">类型:</span>
+            <span className="text-gray-600 text-sm">{ipInfo.ipv6_type || "未知"}</span>
+          </div>
+          {settings.show_geoip && ipInfo.ipv6_geoip && (
+            <div className="flex items-center gap-2 pl-6">
+              <span className="text-gray-500 text-sm">位置:</span>
+              <span className="text-gray-600 text-sm">
+                {formatLocation(ipInfo.ipv6_geoip)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* No IPv6 message */}
+      {!ipInfo.ipv6 && (
+        <div className="mt-4 pt-4 border-t border-gray-100">
+          <div className="flex items-center gap-2 text-gray-500 text-sm">
+            <span>IPv6: 未检测到</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
