@@ -89,7 +89,9 @@ jobs:
             # macOS sed requires empty string for -i extension
             sed -i '' "s/YOUR_TEAM_ID/$APPLE_TEAM_ID/g" src-tauri/tauri.conf.json
           else
-            echo "APPLE_TEAM_ID not set, skipping replacement."
+            echo "APPLE_TEAM_ID not set. Removing signingIdentity to allow ad-hoc build."
+            # Remove the signingIdentity line entirely to prevent build errors
+            sed -i '' '/"signingIdentity":/d' src-tauri/tauri.conf.json
           fi
 
       - name: Build Tauri App
