@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::models::GeoIPInfo;
 use std::collections::HashMap;
 
@@ -51,13 +49,14 @@ async fn lookup_geoip_online(ip: &str) -> Result<GeoIPInfo, String> {
     tracing::info!("Looking up GeoIP for {}", ip);
 
     // List of GeoIP services with different APIs for redundancy
+    // All using HTTPS for security
     let services: Vec<(&str, &str)> = vec![
-        // ip-api.com - HTTP for free tier (HTTPS is paid only)
-        ("http://ip-api.com/json/", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
-        // ipapi.co - Free tier, no key required
+        // ipapi.co - Free tier, no key required, HTTPS supported
         ("https://ipapi.co/json/", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
         // ipwhois.app as fallback
         ("https://ipwhois.app/json/", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
+        // ip-api.com - Note: free tier has rate limits on HTTPS
+        ("https://ip-api.com/json/", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
     ];
 
     for (idx, (base_url, user_agent)) in services.iter().enumerate() {

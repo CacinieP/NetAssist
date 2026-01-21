@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::models::{IPInfo, IPType};
 
 /// IP information detector

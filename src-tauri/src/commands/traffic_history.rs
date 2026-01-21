@@ -27,14 +27,50 @@ impl TrafficHistoryStorage {
         })
     }
 
-    /// Get file path for a specific date
-    fn get_date_file_path(&self, date_str: &str) -> PathBuf {
-        self.data_dir.join(format!("{}.json", date_str))
+    /// Validate date string format (YYYY-MM-DD) to prevent path traversal
+    fn validate_date_format(date_str: &str) -> Result<(), String> {
+        // Check length (YYYY-MM-DD = 10 chars)
+        if date_str.len() != 10 {
+            return Err("Invalid date format: must be YYYY-MM-DD".to_string());
+        }
+
+        // Check for NULL bytes and other dangerous characters
+        if date_str.contains('\0') || date_str.contains('\n') || date_str.contains('\r') {
+            return Err("Invalid date format: contains control characters".to_string());
+        }
+
+        // Check for path traversal attempts
+        if date_str.contains("..") || date_str.contains('/') || date_str.contains('\\') {
+            return Err("Invalid date format: contains path separators".to_string());
+        }
+
+        // Validate format using chrono
+        use chrono::NaiveDate;
+        if NaiveDate::parse_from_str(date_str, "%Y-%m-%d").is_err() {
+            return Err("Invalid date format: must be valid YYYY-MM-DD date".to_string());
+        }
+
+        // Reasonable date range check (years 2000-2100)
+        let year = date_str[0..4].parse::<i32>()
+            .map_err(|_| "Invalid year".to_string())?;
+        if year < 2000 || year > 2100 {
+            return Err("Date out of valid range (2000-2100)".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Get file path for a specific date (with validation)
+    fn get_date_file_path(&self, date_str: &str) -> Result<PathBuf, String> {
+        // Validate date string before using it in file path
+        Self::validate_date_format(date_str)?;
+
+        Ok(self.data_dir.join(format!("{}.json", date_str)))
     }
 
     /// Load traffic history for a specific date
     fn load_day_history(&self, date_str: &str) -> Result<Vec<TrafficHistoryPoint>, String> {
-        let file_path = self.get_date_file_path(date_str);
+        let file_path = self.get_date_file_path(date_str)?;
 
         if file_path.exists() {
             let content = fs::read_to_string(&file_path)
@@ -48,7 +84,7 @@ impl TrafficHistoryStorage {
 
     /// Save traffic history for a specific date
     fn save_day_history(&self, date_str: &str, data: &[TrafficHistoryPoint]) -> Result<(), String> {
-        let file_path = self.get_date_file_path(date_str);
+        let file_path = self.get_date_file_path(date_str)?;
         let content = serde_json::to_string_pretty(data)
             .map_err(|e| format!("Failed to serialize history: {}", e))?;
         fs::write(&file_path, content)
