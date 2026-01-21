@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 // Common utilities available on all platforms
 
 use std::net::IpAddr;

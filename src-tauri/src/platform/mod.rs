@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 // Platform-specific implementations
 
 // Platform-specific modules

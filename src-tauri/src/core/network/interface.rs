@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 /// Network interface information
 #[derive(Debug, Clone)]
 pub struct NetworkInterface {

@@ -28,7 +28,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Networking
 pnet = "0.35"
 socket2 = "0.5"
-trust-dns-client = "0.23"
+trust-dns-client = "0.23" # Deprecated: consider migrating to trust-dns-resolver 0.24
 reqwest = { version = "0.12", features = ["json"] }
 
 # System information
@@ -42,8 +42,8 @@ rusqlite = "0.32"
 
 # Utilities
 cfg-if = "1.0"
-rand = "0.8"
-lazy_static = "1.5"
+rand = "0.9"
+lazy_static = "1.5" # Deprecated: consider migrating to std::sync::OnceLock (Rust 1.70+)
 dirs = "5.0"
 
 [features]
