@@ -17,10 +17,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest # Apple Silicon (M1/M2/...) - runs on macos-14 arm64 usually
+          - os: macos-latest
             target: aarch64-apple-darwin
             platform: 'macos-aarch64'
-          - os: macos-13     # Intel (x86_64)
+          - os: macos-latest
             target: x86_64-apple-darwin
             platform: 'macos-x86_64'
 
@@ -80,27 +80,18 @@ jobs:
           # Cleanup
           rm certificate.p12
 
-      - name: Update Team ID in tauri.conf.json
+      - name: Adjust macOS signing config
         env:
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
         run: |
-          if [ -n "$APPLE_TEAM_ID" ]; then
-            echo "Replacing YOUR_TEAM_ID with $APPLE_TEAM_ID"
-            # macOS sed requires empty string for -i extension
-            sed -i '' "s/YOUR_TEAM_ID/$APPLE_TEAM_ID/g" src-tauri/tauri.conf.json
-          else
-            echo "APPLE_TEAM_ID not set. Removing signingIdentity to allow ad-hoc build."
-            # Remove the signingIdentity line entirely to prevent build errors
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "No APPLE_CERTIFICATE provided. Removing signingIdentity to allow ad-hoc build."
             sed -i '' '/"signingIdentity":/d' src-tauri/tauri.conf.json
+          else
+            echo "APPLE_CERTIFICATE provided. Keeping signingIdentity config."
           fi
 
       - name: Build Tauri App
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           # Pass arguments to tauri CLI
           npm run tauri -- build --target ${{ matrix.target }} --bundles dmg
