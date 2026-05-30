@@ -79,8 +79,8 @@ export default function Dashboard() {
     try {
       const traffic = await invoke<TrafficStats>("get_realtime_traffic");
       await invoke("record_traffic_point", {
-        downloadBps: traffic.download_bps,
-        uploadBps: traffic.upload_bps,
+        download_bps: traffic.download_bps,
+        upload_bps: traffic.upload_bps,
       });
       console.log("Recorded traffic point:", traffic);
       // After recording, refresh cumulative data
@@ -251,8 +251,8 @@ export default function Dashboard() {
         <MetricCard
           title="网络延迟"
           value={latency}
-          status={errors.latency || latency === "Timeout" ? "abnormal" : "normal"}
-          unit={latency === "Timeout" || errors.latency ? "" : "ms"}
+          status={errors.latency || latency === "超时" ? "abnormal" : "normal"}
+          unit={latency === "超时" || errors.latency ? "" : "ms"}
         />
         <MetricCard
           title="DNS响应"

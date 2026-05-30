@@ -47,9 +47,13 @@ pub enum ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationError::InvalidRefreshInterval(msg) => write!(f, "Invalid refresh interval: {}", msg),
+            ValidationError::InvalidRefreshInterval(msg) => {
+                write!(f, "Invalid refresh interval: {}", msg)
+            }
             ValidationError::InvalidDnsServer(msg) => write!(f, "Invalid DNS server: {}", msg),
-            ValidationError::InvalidTrafficLimit(msg) => write!(f, "Invalid traffic limit: {}", msg),
+            ValidationError::InvalidTrafficLimit(msg) => {
+                write!(f, "Invalid traffic limit: {}", msg)
+            }
             ValidationError::InvalidLanguage(msg) => write!(f, "Invalid language: {}", msg),
         }
     }
@@ -58,12 +62,16 @@ impl std::fmt::Display for ValidationError {
 /// Validate DNS server address format with comprehensive security checks
 fn validate_dns_server(addr: &str) -> Result<(), ValidationError> {
     if addr.is_empty() {
-        return Err(ValidationError::InvalidDnsServer("DNS server cannot be empty".to_string()));
+        return Err(ValidationError::InvalidDnsServer(
+            "DNS server cannot be empty".to_string(),
+        ));
     }
 
     // Check for NULL bytes and other dangerous characters
     if addr.contains('\0') || addr.contains('\n') || addr.contains('\r') {
-        return Err(ValidationError::InvalidDnsServer("DNS server contains invalid characters".to_string()));
+        return Err(ValidationError::InvalidDnsServer(
+            "DNS server contains invalid characters".to_string(),
+        ));
     }
 
     // Check if it's a valid IP address (IPv4 or IPv6)
@@ -73,36 +81,63 @@ fn validate_dns_server(addr: &str) -> Result<(), ValidationError> {
 
     // Strict hostname validation according to RFC 1123
     if addr.len() > 253 {
-        return Err(ValidationError::InvalidDnsServer("DNS server hostname too long (max 253 chars)".to_string()));
+        return Err(ValidationError::InvalidDnsServer(
+            "DNS server hostname too long (max 253 chars)".to_string(),
+        ));
     }
 
     if addr.len() < 1 {
-        return Err(ValidationError::InvalidDnsServer("DNS server hostname too short".to_string()));
+        return Err(ValidationError::InvalidDnsServer(
+            "DNS server hostname too short".to_string(),
+        ));
     }
 
     // Check each label (segment between dots)
     let labels: Vec<&str> = addr.split('.').collect();
     if labels.len() < 2 {
-        return Err(ValidationError::InvalidDnsServer("DNS server hostname must have at least 2 labels".to_string()));
+        return Err(ValidationError::InvalidDnsServer(
+            "DNS server hostname must have at least 2 labels".to_string(),
+        ));
     }
 
     for label in labels {
         if label.is_empty() {
-            return Err(ValidationError::InvalidDnsServer("DNS server hostname contains empty label (consecutive dots)".to_string()));
+            return Err(ValidationError::InvalidDnsServer(
+                "DNS server hostname contains empty label (consecutive dots)".to_string(),
+            ));
         }
         if label.len() > 63 {
-            return Err(ValidationError::InvalidDnsServer("DNS server hostname label too long (max 63 chars)".to_string()));
+            return Err(ValidationError::InvalidDnsServer(
+                "DNS server hostname label too long (max 63 chars)".to_string(),
+            ));
         }
         // Labels must start and end with alphanumeric, can contain hyphens in between
-        if !label.chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false) {
-            return Err(ValidationError::InvalidDnsServer("DNS server hostname label must start with alphanumeric".to_string()));
+        if !label
+            .chars()
+            .next()
+            .map(|c| c.is_alphanumeric())
+            .unwrap_or(false)
+        {
+            return Err(ValidationError::InvalidDnsServer(
+                "DNS server hostname label must start with alphanumeric".to_string(),
+            ));
         }
-        if !label.chars().last().map(|c| c.is_alphanumeric()).unwrap_or(false) {
-            return Err(ValidationError::InvalidDnsServer("DNS server hostname label must end with alphanumeric".to_string()));
+        if !label
+            .chars()
+            .last()
+            .map(|c| c.is_alphanumeric())
+            .unwrap_or(false)
+        {
+            return Err(ValidationError::InvalidDnsServer(
+                "DNS server hostname label must end with alphanumeric".to_string(),
+            ));
         }
         // Only allow alphanumeric and hyphens in labels
         if !label.chars().all(|c| c.is_alphanumeric() || c == '-') {
-            return Err(ValidationError::InvalidDnsServer(format!("DNS server hostname contains invalid characters in label: {}", label)));
+            return Err(ValidationError::InvalidDnsServer(format!(
+                "DNS server hostname contains invalid characters in label: {}",
+                label
+            )));
         }
     }
 
@@ -113,9 +148,10 @@ fn validate_dns_server(addr: &str) -> Result<(), ValidationError> {
 fn validate_settings(settings: &Settings) -> Result<(), ValidationError> {
     // Validate refresh interval (1-3600 seconds)
     if settings.refresh_interval_secs < 1 || settings.refresh_interval_secs > 3600 {
-        return Err(ValidationError::InvalidRefreshInterval(
-            format!("must be between 1 and 3600 seconds, got {}", settings.refresh_interval_secs)
-        ));
+        return Err(ValidationError::InvalidRefreshInterval(format!(
+            "must be between 1 and 3600 seconds, got {}",
+            settings.refresh_interval_secs
+        )));
     }
 
     // Validate DNS servers
@@ -124,17 +160,21 @@ fn validate_settings(settings: &Settings) -> Result<(), ValidationError> {
 
     // Validate traffic limit (0.1-10000 GB)
     if settings.traffic_limit_gb < 0.1 || settings.traffic_limit_gb > 10000.0 {
-        return Err(ValidationError::InvalidTrafficLimit(
-            format!("must be between 0.1 and 10000 GB, got {}", settings.traffic_limit_gb)
-        ));
+        return Err(ValidationError::InvalidTrafficLimit(format!(
+            "must be between 0.1 and 10000 GB, got {}",
+            settings.traffic_limit_gb
+        )));
     }
 
     // Validate language (basic check)
-    let valid_languages = ["zh-CN", "en-US", "ja-JP", "ko-KR", "es-ES", "fr-FR", "de-DE", "ru-RU"];
+    let valid_languages = [
+        "zh-CN", "en-US", "ja-JP", "ko-KR", "es-ES", "fr-FR", "de-DE", "ru-RU",
+    ];
     if !valid_languages.contains(&settings.language.as_str()) {
-        return Err(ValidationError::InvalidLanguage(
-            format!("unsupported language code: {}", settings.language)
-        ));
+        return Err(ValidationError::InvalidLanguage(format!(
+            "unsupported language code: {}",
+            settings.language
+        )));
     }
 
     Ok(())
@@ -142,8 +182,8 @@ fn validate_settings(settings: &Settings) -> Result<(), ValidationError> {
 
 /// Get settings file path
 fn get_settings_path() -> anyhow::Result<PathBuf> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
+    let config_dir =
+        dirs::config_dir().ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
 
     let app_config_dir = config_dir.join("NetAssist");
     fs::create_dir_all(&app_config_dir)?;
@@ -162,11 +202,15 @@ fn load_settings_from_file() -> anyhow::Result<Settings> {
         // Validate loaded settings and apply defaults for invalid values
         let mut validated_settings = settings.clone();
         if let Err(e) = validate_settings(&settings) {
-            tracing::warn!("Settings validation failed, applying defaults for invalid values: {}", e);
+            tracing::warn!(
+                "Settings validation failed, applying defaults for invalid values: {}",
+                e
+            );
 
             // Apply defaults for invalid fields
             if settings.refresh_interval_secs < 1 || settings.refresh_interval_secs > 3600 {
-                validated_settings.refresh_interval_secs = Settings::default().refresh_interval_secs;
+                validated_settings.refresh_interval_secs =
+                    Settings::default().refresh_interval_secs;
             }
             if validate_dns_server(&settings.primary_dns).is_err() {
                 validated_settings.primary_dns = Settings::default().primary_dns;
@@ -177,7 +221,11 @@ fn load_settings_from_file() -> anyhow::Result<Settings> {
             if settings.traffic_limit_gb < 0.1 || settings.traffic_limit_gb > 10000.0 {
                 validated_settings.traffic_limit_gb = Settings::default().traffic_limit_gb;
             }
-            if !["zh-CN", "en-US", "ja-JP", "ko-KR", "es-ES", "fr-FR", "de-DE", "ru-RU"].contains(&settings.language.as_str()) {
+            if ![
+                "zh-CN", "en-US", "ja-JP", "ko-KR", "es-ES", "fr-FR", "de-DE", "ru-RU",
+            ]
+            .contains(&settings.language.as_str())
+            {
                 validated_settings.language = Settings::default().language;
             }
         }
@@ -254,35 +302,6 @@ pub async fn reset_settings() -> Result<Settings, String> {
     Ok(settings)
 }
 
-/// Export settings to JSON string
-#[tauri::command]
-pub async fn export_settings() -> Result<String, String> {
-    let settings = load_settings_from_file()
-        .map_err(|e| format!("Failed to load settings: {}", e))?;
-
-    serde_json::to_string_pretty(&settings)
-        .map_err(|e| format!("Failed to serialize settings: {}", e))
-}
-
-/// Import settings from JSON string (with validation)
-#[tauri::command]
-pub async fn import_settings(json: String) -> Result<Settings, String> {
-    // Parse JSON
-    let settings: Settings = serde_json::from_str(&json)
-        .map_err(|e| format!("Failed to parse settings JSON: {}", e))?;
-
-    // Validate imported settings
-    validate_settings(&settings)
-        .map_err(|e| format!("Settings validation failed: {}", e))?;
-
-    // Save validated settings
-    save_settings_to_file(&settings)
-        .map_err(|e| format!("Failed to save settings: {}", e))?;
-
-    tracing::info!("Settings imported successfully");
-    Ok(settings)
-}
-
 /// Check platform-specific permissions
 #[tauri::command]
 pub async fn check_platform_permissions() -> Result<serde_json::Value, String> {
@@ -309,14 +328,13 @@ pub async fn check_platform_permissions() -> Result<serde_json::Value, String> {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn get_macos_diagnostics() -> Result<crate::platform::macos::MacOSDiagnostics, String> {
-    crate::platform::run_macos_diagnostics()
-        .map_err(|e| e.to_string())
+    crate::platform::run_macos_diagnostics().map_err(|e| e.to_string())
 }
 
 /// Get network interface changes
 #[cfg(target_os = "macos")]
 #[tauri::command]
-pub async fn get_interface_changes() -> Result<crate::platform::macos::InterfaceChangeEvent, String> {
-    crate::platform::detect_interface_changes()
-        .map_err(|e| e.to_string())
+pub async fn get_interface_changes() -> Result<crate::platform::macos::InterfaceChangeEvent, String>
+{
+    crate::platform::detect_interface_changes().map_err(|e| e.to_string())
 }

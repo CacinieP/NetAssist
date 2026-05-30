@@ -1,15 +1,14 @@
 use crate::models::DNSStats;
-use std::time::Instant;
-use trust_dns_client::rr::Name;
-use tokio::net::UdpSocket;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::time::Instant;
+use tokio::net::UdpSocket;
+use trust_dns_client::rr::Name;
 
 /// Get system DNS servers
 #[tauri::command]
 pub async fn get_dns_servers() -> Result<Vec<String>, String> {
-    crate::platform::get_dns_servers()
-        .map_err(|e| e.to_string())
+    crate::platform::get_dns_servers().map_err(|e| e.to_string())
 }
 
 /// Test DNS server response time using actual DNS queries
@@ -22,12 +21,21 @@ pub async fn test_dns(server: String) -> Result<DNSStats, String> {
 
     // Parse server address, add default port if needed
     let server_addr = if server.contains(':') {
-        server.clone()
+        // Could be IPv6 (contains colons) or already has port
+        if server.starts_with('[') || server.rsplit(':').count() == 2 {
+            // Already bracketed or "host:port" format — use as-is
+            server.clone()
+        } else {
+            // Bare IPv6 address — wrap in brackets and add port
+            format!("[{}]:53", server)
+        }
     } else {
+        // IPv4 or hostname — just append port
         format!("{}:53", server)
     };
 
-    let socket_addr: SocketAddr = server_addr.parse()
+    let socket_addr: SocketAddr = server_addr
+        .parse()
         .map_err(|e| format!("Invalid DNS server address: {}", e))?;
 
     // Test multiple queries for accuracy
@@ -36,11 +44,7 @@ pub async fn test_dns(server: String) -> Result<DNSStats, String> {
     let total_queries = 5u64;
 
     // Test domains to query
-    let test_domains = vec![
-        "google.com",
-        "cloudflare.com",
-        "example.com",
-    ];
+    let test_domains = vec!["google.com", "cloudflare.com", "example.com"];
 
     for i in 0..total_queries {
         let domain = test_domains[i as usize % test_domains.len()];
@@ -84,8 +88,7 @@ async fn perform_dns_query(server: SocketAddr, domain: &str) -> Result<f64, Stri
     let start = Instant::now();
 
     // Validate domain name format
-    let _name = Name::from_str(domain)
-        .map_err(|e| format!("Invalid domain name: {}", e))?;
+    let _name = Name::from_str(domain).map_err(|e| format!("Invalid domain name: {}", e))?;
 
     // Create UDP socket for DNS query
     let socket = UdpSocket::bind("0.0.0.0:0")
@@ -93,7 +96,8 @@ async fn perform_dns_query(server: SocketAddr, domain: &str) -> Result<f64, Stri
         .map_err(|e| format!("Failed to bind socket: {}", e))?;
 
     // Set timeout
-    socket.set_ttl(64)
+    socket
+        .set_ttl(64)
         .map_err(|e| format!("Failed to set TTL: {}", e))?;
 
     // Connect to DNS server
@@ -108,14 +112,16 @@ async fn perform_dns_query(server: SocketAddr, domain: &str) -> Result<f64, Stri
     let query_len = build_dns_query(&mut query_packet, domain)?;
 
     // Send query
-    socket.send(&query_packet[..query_len])
+    socket
+        .send(&query_packet[..query_len])
         .await
         .map_err(|e| format!("Failed to send DNS query: {}", e))?;
 
     // Receive response
     let mut response_buffer = vec![0u8; 512];
     let timeout_future = tokio::time::timeout(timeout_duration, socket.recv(&mut response_buffer));
-    let bytes_received = timeout_future.await
+    let bytes_received = timeout_future
+        .await
         .map_err(|_| "DNS response timeout".to_string())?
         .map_err(|e| format!("Failed to receive DNS response: {}", e))?;
 
@@ -127,7 +133,10 @@ async fn perform_dns_query(server: SocketAddr, domain: &str) -> Result<f64, Stri
     // Check DNS response header
     let response_code = response_buffer[3] & 0x0F;
     if response_code != 0 {
-        return Err(format!("DNS query failed with response code: {}", response_code));
+        return Err(format!(
+            "DNS query failed with response code: {}",
+            response_code
+        ));
     }
 
     // Check if we have answers (safely access buffer)
