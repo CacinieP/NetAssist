@@ -1,6 +1,6 @@
 // Linux-specific implementations
 
-use super::{NetworkInterfaceInfo, ConnectionRawInfo};
+use super::{ConnectionRawInfo, NetworkInterfaceInfo};
 use std::net::IpAddr;
 
 /// Get default gateway on Linux
@@ -65,14 +65,18 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
                     if line.contains("inet ") {
                         let parts: Vec<&str> = line.split_whitespace().collect();
                         if let Some(addr_str) = parts.get(1) {
-                            if let Ok(addr) = addr_str.split('/').next().unwrap_or("").parse::<IpAddr>() {
+                            if let Ok(addr) =
+                                addr_str.split('/').next().unwrap_or("").parse::<IpAddr>()
+                            {
                                 ipv4_addrs.push(addr);
                             }
                         }
                     } else if line.contains("inet6 ") && !line.contains("scope link") {
                         let parts: Vec<&str> = line.split_whitespace().collect();
                         if let Some(addr_str) = parts.get(1) {
-                            if let Ok(addr) = addr_str.split('/').next().unwrap_or("").parse::<IpAddr>() {
+                            if let Ok(addr) =
+                                addr_str.split('/').next().unwrap_or("").parse::<IpAddr>()
+                            {
                                 ipv6_addrs.push(addr);
                             }
                         }
@@ -103,7 +107,8 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
 
     // First try to get process info using ss (modern Linux)
     let ss_output = super::common::exec_command("ss", &["-tunap"]).unwrap_or_default();
-    let mut process_map: std::collections::HashMap<String, (u32, String)> = std::collections::HashMap::new();
+    let mut process_map: std::collections::HashMap<String, (u32, String)> =
+        std::collections::HashMap::new();
 
     for line in ss_output.lines().skip(1) {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -115,7 +120,12 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
         // Example: ESTAB 0 0 192.168.1.1:1234 192.168.1.2:5678 users:(("chrome",pid=1234,fd=45))
         let proc_info = parts.last().unwrap_or(&"");
         if let Some(pid_str) = proc_info.split("pid=").nth(1) {
-            let pid: u32 = pid_str.split(',').next().unwrap_or("0").parse().unwrap_or(0);
+            let pid: u32 = pid_str
+                .split(',')
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
             if pid > 0 {
                 if let Some(name) = proc_info.split('"').nth(1) {
                     // Extract local and remote addresses
@@ -133,8 +143,10 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
         for line in tcp_output.lines().skip(1) {
             if let Some(mut conn) = parse_proc_net_line(line, "TCP") {
                 // Try to find process info
-                let key = format!("{}:{}->{}:{}",
-                    conn.local_addr, conn.local_port, conn.remote_addr, conn.remote_port);
+                let key = format!(
+                    "{}:{}->{}:{}",
+                    conn.local_addr, conn.local_port, conn.remote_addr, conn.remote_port
+                );
                 if let Some((pid, name)) = process_map.get(&key) {
                     conn.pid = Some(*pid);
                     conn.process_name = Some(name.clone());
@@ -149,8 +161,10 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
         for line in udp_output.lines().skip(1) {
             if let Some(mut conn) = parse_proc_net_line(line, "UDP") {
                 // Try to find process info
-                let key = format!("{}:{}->{}:{}",
-                    conn.local_addr, conn.local_port, conn.remote_addr, conn.remote_port);
+                let key = format!(
+                    "{}:{}->{}:{}",
+                    conn.local_addr, conn.local_port, conn.remote_addr, conn.remote_port
+                );
                 if let Some((pid, name)) = process_map.get(&key) {
                     conn.pid = Some(*pid);
                     conn.process_name = Some(name.clone());
@@ -222,10 +236,7 @@ pub fn flush_dns_cache() -> anyhow::Result<()> {
 /// Release and renew IP on Linux
 pub fn release_renew_ip() -> anyhow::Result<()> {
     // Use dhclient or dhcpcd
-    if let Ok(_) = std::process::Command::new("dhclient")
-        .arg("-r")
-        .status()
-    {
+    if let Ok(_) = std::process::Command::new("dhclient").arg("-r").status() {
         std::process::Command::new("dhclient").status()?;
     }
 
@@ -327,6 +338,10 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
     }
 
     std::fs::write(resolv_path, content)?;
-    tracing::info!("DNS servers updated successfully: primary={}, secondary={:?}", primary, secondary);
+    tracing::info!(
+        "DNS servers updated successfully: primary={}, secondary={:?}",
+        primary,
+        secondary
+    );
     Ok(())
 }

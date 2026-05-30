@@ -419,8 +419,8 @@ export default function TrafficMonitorEnhanced() {
     if (stats) {
       const interval = setInterval(() => {
         invoke("record_traffic_point", {
-          downloadBps: stats.download_bps,
-          uploadBps: stats.upload_bps,
+          download_bps: stats.download_bps,
+          upload_bps: stats.upload_bps,
         }).catch(console.error);
       }, 60000);
 
@@ -495,19 +495,8 @@ export default function TrafficMonitorEnhanced() {
   const handleShowDetails = (app: AppTraffic) => {
     setSelectedApp(app);
     setShowDetailsModal(true);
-    // Generate mock history data (in real app, fetch from backend)
-    const now = Date.now();
-    const history: AppTrafficHistory[] = [];
-    for (let i = 60; i >= 0; i--) {
-      const time = now - i * 60000; // Last 60 minutes
-      const variance = 0.7 + Math.random() * 0.6; // Random variance
-      history.push({
-        timestamp: time,
-        download_bps: app.current_download_bps * variance,
-        upload_bps: app.current_upload_bps * variance,
-      });
-    }
-    setAppHistory(history);
+    // History data is fetched from the backend — no mock data
+    setAppHistory([]);
   };
 
   // Get app percentage of total

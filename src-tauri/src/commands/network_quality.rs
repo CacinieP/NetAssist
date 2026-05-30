@@ -47,6 +47,7 @@ pub struct HttpConnectivityResult {
 /// Test HTTP connectivity to a reliable endpoint
 #[tauri::command]
 pub async fn test_http_connectivity(url: Option<String>) -> Result<HttpConnectivityResult, String> {
+    use std::net::IpAddr;
     use std::time::Instant;
 
     let url = url.unwrap_or_else(|| "https://www.google.com".to_string());
@@ -60,6 +61,40 @@ pub async fn test_http_connectivity(url: Option<String>) -> Result<HttpConnectiv
             status_code: None,
             error: Some("Invalid URL".to_string()),
         });
+    }
+
+    // Enforce HTTP/HTTPS scheme only
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Ok(HttpConnectivityResult {
+            url: url.clone(),
+            success: false,
+            latency_ms: 0.0,
+            status_code: None,
+            error: Some("Only http:// and https:// URLs are allowed".to_string()),
+        });
+    }
+
+    // Block private/local IP addresses to prevent SSRF
+    if let Ok(parsed) = reqwest::Url::parse(&url) {
+        if let Some(host) = parsed.host_str() {
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                let is_restricted = match &ip {
+                    IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+                    IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
+                };
+                if is_restricted {
+                    return Ok(HttpConnectivityResult {
+                        url: url.clone(),
+                        success: false,
+                        latency_ms: 0.0,
+                        status_code: None,
+                        error: Some(
+                            "Cannot test connectivity to private/local addresses".to_string(),
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     let start = Instant::now();
@@ -81,7 +116,11 @@ pub async fn test_http_connectivity(url: Option<String>) -> Result<HttpConnectiv
                 success: false,
                 latency_ms: start.elapsed().as_millis() as f64,
                 status_code: None,
-                error: Some(if is_timeout { "Request timed out".to_string() } else { error_msg }),
+                error: Some(if is_timeout {
+                    "Request timed out".to_string()
+                } else {
+                    error_msg
+                }),
             });
         }
     };
@@ -94,7 +133,11 @@ pub async fn test_http_connectivity(url: Option<String>) -> Result<HttpConnectiv
         success: status.is_success(),
         latency_ms: latency,
         status_code: Some(status.as_u16()),
-        error: if status.is_success() { None } else { Some(format!("HTTP {}", status.as_u16())) },
+        error: if status.is_success() {
+            None
+        } else {
+            Some(format!("HTTP {}", status.as_u16()))
+        },
     })
 }
 
@@ -138,12 +181,15 @@ async fn ping_windows(target: &str, _ipv6: bool, count: u32) -> Result<PingResul
     let target_clone = target.clone();
 
     // Run ping in a blocking thread with timeout (10 seconds max)
-    let output = timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || {
-        tracing::trace!("Spawned ping command for {}", target_clone);
-        Command::new("ping")
-            .args(&["-n", &count_str, &target_clone])
-            .output()
-    }))
+    let output = timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            tracing::trace!("Spawned ping command for {}", target_clone);
+            Command::new("ping")
+                .args(&["-n", &count_str, &target_clone])
+                .output()
+        }),
+    )
     .await
     .map_err(|_e| {
         tracing::warn!("Ping to {} timed out after 10 seconds", target);
@@ -215,8 +261,14 @@ async fn ping_windows(target: &str, _ipv6: bool, count: u32) -> Result<PingResul
         packets_received,
     };
 
-    tracing::info!("Ping to {} result: success={}, avg_latency={}ms, packets_received={}/{}",
-        target, result.success, avg_latency, packets_received, count);
+    tracing::info!(
+        "Ping to {} result: success={}, avg_latency={}ms, packets_received={}/{}",
+        target,
+        result.success,
+        avg_latency,
+        packets_received,
+        count
+    );
 
     Ok(result)
 }
@@ -232,11 +284,10 @@ async fn ping_linux(target: &str, ipv6: bool, count: u32) -> Result<PingResult, 
     args.push(target.to_string());
 
     // Run ping in a blocking thread with timeout (10 seconds max)
-    let output = timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || {
-        Command::new("ping")
-            .args(&args)
-            .output()
-    }))
+    let output = timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || Command::new("ping").args(&args).output()),
+    )
     .await
     .map_err(|_| "Ping timed out after 10 seconds".to_string())?
     .map_err(|e| format!("Ping task join error: {}", e))?
@@ -303,11 +354,10 @@ async fn ping_macos(target: &str, ipv6: bool, count: u32) -> Result<PingResult, 
     args.push(target.to_string());
 
     // Run ping in a blocking thread with timeout (10 seconds max)
-    let output = timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || {
-        Command::new("ping")
-            .args(&args)
-            .output()
-    }))
+    let output = timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || Command::new("ping").args(&args).output()),
+    )
     .await
     .map_err(|_| "Ping timed out after 10 seconds".to_string())?
     .map_err(|e| format!("Ping task join error: {}", e))?
@@ -394,125 +444,143 @@ pub async fn traceroute(target: String, max_hops: Option<u32>) -> Result<Tracero
 
 #[cfg(target_os = "windows")]
 async fn traceroute_windows(target: &str, max_hops: u32) -> Result<TracerouteResult, String> {
-    let output = Command::new("tracert")
-        .args(&["-d", "-h", &max_hops.to_string(), target])
-        .output()
-        .map_err(|e| format!("Traceroute failed: {}", e))?;
+    let target = target.to_string();
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("tracert")
+            .args(&["-d", "-h", &max_hops.to_string(), &target])
+            .output()
+            .map_err(|e| format!("Traceroute failed: {}", e))?;
 
-    let content = String::from_utf8_lossy(&output.stdout);
-    let mut hops = Vec::new();
+        let content = String::from_utf8_lossy(&output.stdout);
+        let mut hops = Vec::new();
 
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("Tracing route") ||
-           trimmed.starts_with("Trace complete") || trimmed.contains("* * *") {
-            continue;
-        }
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with("Tracing route")
+                || trimmed.starts_with("Trace complete")
+                || trimmed.contains("* * *")
+            {
+                continue;
+            }
 
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if let Ok(hop_num) = parts[0].parse::<u32>() {
-                let mut ip_addr = None;
-                for part in &parts {
-                    if part.contains('.') && part.parse::<std::net::Ipv4Addr>().is_ok() {
-                        ip_addr = Some(part.to_string());
-                        break;
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let Ok(hop_num) = parts[0].parse::<u32>() {
+                    let mut ip_addr = None;
+                    for part in &parts {
+                        if part.contains('.') && part.parse::<std::net::Ipv4Addr>().is_ok() {
+                            ip_addr = Some(part.to_string());
+                            break;
+                        }
                     }
-                }
 
-                let success = ip_addr.is_some();
-                hops.push(TracerouteHop {
-                    hop_number: hop_num,
-                    ip: ip_addr,
-                    hostname: None,
-                    avg_latency_ms: 0.0,
-                    success,
-                });
+                    let success = ip_addr.is_some();
+                    hops.push(TracerouteHop {
+                        hop_number: hop_num,
+                        ip: ip_addr,
+                        hostname: None,
+                        avg_latency_ms: 0.0,
+                        success,
+                    });
+                }
             }
         }
-    }
 
-    let success = !hops.is_empty();
-    let total_hops = hops.len() as u32;
-    Ok(TracerouteResult {
-        target: target.to_string(),
-        hops,
-        success,
-        total_hops,
+        let success = !hops.is_empty();
+        let total_hops = hops.len() as u32;
+        Ok(TracerouteResult {
+            target: target.clone(),
+            hops,
+            success,
+            total_hops,
+        })
     })
+    .await
+    .map_err(|e| format!("Traceroute task failed: {}", e))?
 }
 
 #[cfg(target_os = "linux")]
 async fn traceroute_linux(target: &str, max_hops: u32) -> Result<TracerouteResult, String> {
-    let output = Command::new("traceroute")
-        .args(&["-n", "-m", &max_hops.to_string(), target])
-        .output()
-        .map_err(|e| format!("Traceroute failed: {}", e))?;
+    let target = target.to_string();
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("traceroute")
+            .args(&["-n", "-m", &max_hops.to_string(), &target])
+            .output()
+            .map_err(|e| format!("Traceroute failed: {}", e))?;
 
-    let content = String::from_utf8_lossy(&output.stdout);
-    let mut hops = Vec::new();
+        let content = String::from_utf8_lossy(&output.stdout);
+        let mut hops = Vec::new();
 
-    for line in content.lines().skip(1) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if let Ok(hop_num) = parts[0].parse::<u32>() {
-                let ip_addr = parts.get(1).map(|s| s.to_string());
-                let success = ip_addr.is_some();
-                hops.push(TracerouteHop {
-                    hop_number: hop_num,
-                    ip: ip_addr,
-                    hostname: None,
-                    avg_latency_ms: 0.0,
-                    success,
-                });
+        for line in content.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let Ok(hop_num) = parts[0].parse::<u32>() {
+                    let ip_addr = parts.get(1).map(|s| s.to_string());
+                    let success = ip_addr.is_some();
+                    hops.push(TracerouteHop {
+                        hop_number: hop_num,
+                        ip: ip_addr,
+                        hostname: None,
+                        avg_latency_ms: 0.0,
+                        success,
+                    });
+                }
             }
         }
-    }
 
-    let success = !hops.is_empty();
-    let total_hops = hops.len() as u32;
-    Ok(TracerouteResult {
-        target: target.to_string(),
-        hops,
-        success,
-        total_hops,
+        let success = !hops.is_empty();
+        let total_hops = hops.len() as u32;
+        Ok(TracerouteResult {
+            target: target.clone(),
+            hops,
+            success,
+            total_hops,
+        })
     })
+    .await
+    .map_err(|e| format!("Traceroute task failed: {}", e))?
 }
 
 #[cfg(target_os = "macos")]
 async fn traceroute_macos(target: &str, max_hops: u32) -> Result<TracerouteResult, String> {
-    let output = Command::new("traceroute")
-        .args(&["-n", "-m", &max_hops.to_string(), target])
-        .output()
-        .map_err(|e| format!("Traceroute failed: {}", e))?;
+    let target = target.to_string();
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("traceroute")
+            .args(&["-n", "-m", &max_hops.to_string(), &target])
+            .output()
+            .map_err(|e| format!("Traceroute failed: {}", e))?;
 
-    let content = String::from_utf8_lossy(&output.stdout);
-    let mut hops = Vec::new();
+        let content = String::from_utf8_lossy(&output.stdout);
+        let mut hops = Vec::new();
 
-    for line in content.lines().skip(1) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if let Ok(hop_num) = parts[0].parse::<u32>() {
-                let ip_addr = parts.get(1).map(|s| s.to_string());
-                let has_ip = ip_addr.is_some();
-                hops.push(TracerouteHop {
-                    hop_number: hop_num,
-                    ip: ip_addr,
-                    hostname: None,
-                    avg_latency_ms: 0.0,
-                    success: has_ip,
-                });
+        for line in content.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let Ok(hop_num) = parts[0].parse::<u32>() {
+                    let ip_addr = parts.get(1).map(|s| s.to_string());
+                    let has_ip = ip_addr.is_some();
+                    hops.push(TracerouteHop {
+                        hop_number: hop_num,
+                        ip: ip_addr,
+                        hostname: None,
+                        avg_latency_ms: 0.0,
+                        success: has_ip,
+                    });
+                }
             }
         }
-    }
 
-    let hop_count = hops.len();
-    Ok(TracerouteResult {
-        target: target.to_string(),
-        hops,
-        success: hop_count > 0,
-        total_hops: hop_count as u32,
+        let hop_count = hops.len();
+        Ok(TracerouteResult {
+            target: target.clone(),
+            hops,
+            success: hop_count > 0,
+            total_hops: hop_count as u32,
+        })
     })
+    .await
+    .map_err(|e| format!("Traceroute task failed: {}", e))?
 }
 
 /// Validate hostname format to prevent command injection

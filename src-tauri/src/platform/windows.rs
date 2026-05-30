@@ -1,15 +1,18 @@
 // Windows-specific implementations
 #![allow(unused_assignments)]
 
-use super::{NetworkInterfaceInfo, ConnectionRawInfo};
+use super::{ConnectionRawInfo, NetworkInterfaceInfo};
 use std::net::IpAddr;
+use windows::core::PCSTR;
+use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::NetworkManagement::IpHelper::*;
 use windows::Win32::Networking::WinSock::*;
-use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RegOpenKeyExA, RegCloseKey, KEY_READ};
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_QUERY_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::System::Diagnostics::ToolHelp::*;
-use windows::Win32::Foundation::CloseHandle;
-use windows::core::PCSTR;
+use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExA, HKEY_LOCAL_MACHINE, KEY_READ};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 /// Get default gateway on Windows
 pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
@@ -28,7 +31,8 @@ pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
             &mut size,
         );
 
-        if result != 111 { // ERROR_BUFFER_OVERFLOW
+        if result != 111 {
+            // ERROR_BUFFER_OVERFLOW
             return Ok(None);
         }
 
@@ -45,7 +49,8 @@ pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
             &mut size,
         );
 
-        if result != 0 { // NO_ERROR is 0
+        if result != 0 {
+            // NO_ERROR is 0
             return Ok(None);
         }
 
@@ -62,9 +67,15 @@ pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
 
                 let family = sockaddr.sa_family.0 as i32;
                 if family == AF_INET.0 as i32 {
-                    let inet_sockaddr = &*(addr.Address.lpSockaddr as *const _ as *const SOCKADDR_IN);
+                    let inet_sockaddr =
+                        &*(addr.Address.lpSockaddr as *const _ as *const SOCKADDR_IN);
                     let ip_bytes = inet_sockaddr.sin_addr.S_un.S_addr.to_ne_bytes();
-                    let ip = IpAddr::V4(std::net::Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]));
+                    let ip = IpAddr::V4(std::net::Ipv4Addr::new(
+                        ip_bytes[0],
+                        ip_bytes[1],
+                        ip_bytes[2],
+                        ip_bytes[3],
+                    ));
                     return Ok(Some(ip));
                 }
 
@@ -95,7 +106,8 @@ pub fn get_default_interface() -> anyhow::Result<String> {
             &mut size,
         );
 
-        if result != 111 { // ERROR_BUFFER_OVERFLOW
+        if result != 111 {
+            // ERROR_BUFFER_OVERFLOW
             return Ok("Ethernet0".to_string());
         }
 
@@ -112,7 +124,8 @@ pub fn get_default_interface() -> anyhow::Result<String> {
             &mut size,
         );
 
-        if result != 0 { // NO_ERROR is 0
+        if result != 0 {
+            // NO_ERROR is 0
             return Ok("Ethernet0".to_string());
         }
 
@@ -122,9 +135,10 @@ pub fn get_default_interface() -> anyhow::Result<String> {
             let adapter = &*current;
 
             // Convert FriendlyName to String
-            let name = String::from_utf16_lossy(
-                std::slice::from_raw_parts(adapter.FriendlyName.as_ptr(), adapter.FriendlyName.len())
-            );
+            let name = String::from_utf16_lossy(std::slice::from_raw_parts(
+                adapter.FriendlyName.as_ptr(),
+                adapter.FriendlyName.len(),
+            ));
 
             // Check if adapter is operational and has a gateway
             let gateway = adapter.FirstGatewayAddress;
@@ -156,7 +170,8 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
             &mut size,
         );
 
-        if result != 111 { // ERROR_BUFFER_OVERFLOW
+        if result != 111 {
+            // ERROR_BUFFER_OVERFLOW
             return Ok(vec![]);
         }
 
@@ -173,7 +188,8 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
             &mut size,
         );
 
-        if result != 0 { // NO_ERROR is 0
+        if result != 0 {
+            // NO_ERROR is 0
             return Ok(vec![]);
         }
 
@@ -225,14 +241,24 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
                 let family = sockaddr.sa_family.0 as i32;
 
                 if family == AF_INET.0 as i32 {
-                    let inet_sockaddr = &*(addr.Address.lpSockaddr as *const _ as *const SOCKADDR_IN);
+                    let inet_sockaddr =
+                        &*(addr.Address.lpSockaddr as *const _ as *const SOCKADDR_IN);
                     let ip_bytes = inet_sockaddr.sin_addr.S_un.S_addr.to_ne_bytes();
-                    let ip = IpAddr::V4(std::net::Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]));
+                    let ip = IpAddr::V4(std::net::Ipv4Addr::new(
+                        ip_bytes[0],
+                        ip_bytes[1],
+                        ip_bytes[2],
+                        ip_bytes[3],
+                    ));
                     ipv4_addrs.push(ip);
                 } else if family == AF_INET6.0 as i32 {
-                    let inet6_sockaddr = &*(addr.Address.lpSockaddr as *const _ as *const SOCKADDR_IN6);
+                    let inet6_sockaddr =
+                        &*(addr.Address.lpSockaddr as *const _ as *const SOCKADDR_IN6);
                     // Access IPv6 bytes through the u field which is a union
-                    let ip_bytes = std::slice::from_raw_parts(&inet6_sockaddr.sin6_addr.u.Byte as *const u8, 16);
+                    let ip_bytes = std::slice::from_raw_parts(
+                        &inet6_sockaddr.sin6_addr.u.Byte as *const u8,
+                        16,
+                    );
                     let ip = IpAddr::V6(std::net::Ipv6Addr::new(
                         u16::from_be_bytes([ip_bytes[0], ip_bytes[1]]),
                         u16::from_be_bytes([ip_bytes[2], ip_bytes[3]]),
@@ -293,7 +319,8 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
             0,
         );
 
-        if result == 122 { // ERROR_INSUFFICIENT_BUFFER
+        if result == 122 {
+            // ERROR_INSUFFICIENT_BUFFER
             let mut buffer = vec![0u8; size as usize];
             tcp_table = buffer.as_mut_ptr() as *mut MIB_TCPTABLE_OWNER_PID;
 
@@ -317,9 +344,11 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
                     // Ipv4Addr::from(u32) expects network byte order, but on little-endian systems
                     // we need to convert because DWORD is stored in host byte order
                     let local_ip = IpAddr::V4(std::net::Ipv4Addr::from(row.dwLocalAddr.to_be()));
-                    let local_port = (row.dwLocalPort as u16 >> 8) | ((row.dwLocalPort as u16 & 0xFF) << 8);
+                    let local_port =
+                        (row.dwLocalPort as u16 >> 8) | ((row.dwLocalPort as u16 & 0xFF) << 8);
                     let remote_ip = IpAddr::V4(std::net::Ipv4Addr::from(row.dwRemoteAddr.to_be()));
-                    let remote_port = (row.dwRemotePort as u16 >> 8) | ((row.dwRemotePort as u16 & 0xFF) << 8);
+                    let remote_port =
+                        (row.dwRemotePort as u16 >> 8) | ((row.dwRemotePort as u16 & 0xFF) << 8);
                     let state = match row.dwState {
                         1 => "ESTABLISHED",
                         2 => "SYN_SENT",
@@ -363,7 +392,8 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
             0,
         );
 
-        if result == 122 { // ERROR_INSUFFICIENT_BUFFER
+        if result == 122 {
+            // ERROR_INSUFFICIENT_BUFFER
             let mut buffer = vec![0u8; size as usize];
             udp_table = buffer.as_mut_ptr() as *mut MIB_UDPTABLE_OWNER_PID;
 
@@ -384,7 +414,8 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
                     let row_ptr = table.table.as_ptr().add(i);
                     let row = &*row_ptr;
                     let local_ip = IpAddr::V4(std::net::Ipv4Addr::from(row.dwLocalAddr.to_be()));
-                    let local_port = (row.dwLocalPort as u16 >> 8) | ((row.dwLocalPort as u16 & 0xFF) << 8);
+                    let local_port =
+                        (row.dwLocalPort as u16 >> 8) | ((row.dwLocalPort as u16 & 0xFF) << 8);
 
                     pids.insert(row.dwOwningPid);
                     connections.push(ConnectionRawInfo {
@@ -416,7 +447,9 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
 }
 
 /// Get process names for multiple PIDs using Windows native APIs (public for traffic module)
-pub fn get_process_names_batch(pids: &std::collections::HashSet<u32>) -> std::collections::HashMap<u32, String> {
+pub fn get_process_names_batch(
+    pids: &std::collections::HashSet<u32>,
+) -> std::collections::HashMap<u32, String> {
     use std::collections::HashMap;
 
     let mut result = HashMap::new();
@@ -462,7 +495,9 @@ pub fn get_process_names_batch(pids: &std::collections::HashSet<u32>) -> std::co
                     // First, try to decode as Latin1 (common for Western systems)
                     // If that fails, use lossy conversion
                     let bytes: Vec<u8> = entry.szExeFile[..len].iter().map(|&c| c as u8).collect();
-                    String::from_utf8_lossy(&bytes).trim_end_matches('\0').to_string()
+                    String::from_utf8_lossy(&bytes)
+                        .trim_end_matches('\0')
+                        .to_string()
                 };
                 pid_to_exe.insert(entry.th32ProcessID, exe_name);
 
@@ -487,7 +522,10 @@ pub fn get_process_names_batch(pids: &std::collections::HashSet<u32>) -> std::co
                 tracing::debug!("PID {} -> {} (from snapshot)", pid, exe_name);
                 result.insert(pid, exe_name.clone());
             } else {
-                tracing::warn!("PID {} -> not found in snapshot or image lookup failed", pid);
+                tracing::warn!(
+                    "PID {} -> not found in snapshot or image lookup failed",
+                    pid
+                );
                 result.insert(pid, "-".to_string());
             }
         }
@@ -513,7 +551,11 @@ fn try_get_process_image_name(pid: u32) -> Option<String> {
                 match OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) {
                     Ok(h) => h,
                     Err(e) => {
-                        tracing::trace!("Failed to open process PID {} with QUERY_INFO: {}", pid, e);
+                        tracing::trace!(
+                            "Failed to open process PID {} with QUERY_INFO: {}",
+                            pid,
+                            e
+                        );
                         return None;
                     }
                 }
@@ -528,7 +570,7 @@ fn try_get_process_image_name(pid: u32) -> Option<String> {
             process_handle,
             windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0),
             PWSTR(buffer.as_mut_ptr()),
-            &mut size
+            &mut size,
         );
 
         let _ = CloseHandle(process_handle);
@@ -542,12 +584,20 @@ fn try_get_process_image_name(pid: u32) -> Option<String> {
                 // Extract just the filename from the path
                 if let Some(filename) = full_path.split('\\').last() {
                     if !filename.is_empty() {
-                        tracing::trace!("PID {} -> {} (from QueryFullProcessImageNameW)", pid, filename);
+                        tracing::trace!(
+                            "PID {} -> {} (from QueryFullProcessImageNameW)",
+                            pid,
+                            filename
+                        );
                         return Some(filename.to_string());
                     }
                 }
 
-                tracing::trace!("PID {} -> {} (full path from QueryFullProcessImageNameW)", pid, full_path);
+                tracing::trace!(
+                    "PID {} -> {} (full path from QueryFullProcessImageNameW)",
+                    pid,
+                    full_path
+                );
                 Some(full_path)
             }
             Ok(_) => {
@@ -628,10 +678,7 @@ pub fn get_dns_servers() -> anyhow::Result<Vec<String>> {
 
         if result.is_err() {
             // Return default DNS servers
-            return Ok(vec![
-                "8.8.8.8".to_string(),
-                "8.8.4.4".to_string(),
-            ]);
+            return Ok(vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]);
         }
 
         // Use ipconfig as fallback to get DNS servers
@@ -662,10 +709,7 @@ pub fn get_dns_servers() -> anyhow::Result<Vec<String>> {
 
         let _ = RegCloseKey(hkey);
 
-        Ok(vec![
-            "8.8.8.8".to_string(),
-            "8.8.4.4".to_string(),
-        ])
+        Ok(vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()])
     }
 }
 
@@ -679,9 +723,13 @@ fn validate_interface_name(name: &str) -> Result<(), anyhow::Error> {
     }
 
     // Reject dangerous characters that could enable command injection
-    let dangerous_chars = ['&', '|', ';', '$', '`', '(', ')', '<', '>', '\0', '\n', '\r', '\t'];
+    let dangerous_chars = [
+        '&', '|', ';', '$', '`', '(', ')', '<', '>', '\0', '\n', '\r', '\t',
+    ];
     if name.chars().any(|c| dangerous_chars.contains(&c)) {
-        return Err(anyhow::anyhow!("Interface name contains dangerous characters"));
+        return Err(anyhow::anyhow!(
+            "Interface name contains dangerous characters"
+        ));
     }
 
     // Only allow safe characters: alphanumeric, spaces, hyphens, underscores, dots, and common Unicode
@@ -690,7 +738,9 @@ fn validate_interface_name(name: &str) -> Result<(), anyhow::Error> {
         // Allow common non-ASCII characters in localized Windows
         matches!(c as u32, 0x4E00..=0x9FFF | 0x3040..=0x309F | 0x30A0..=0x30FF) // CJK, Hiragana, Katakana
     }) {
-        return Err(anyhow::anyhow!("Interface name contains invalid characters"));
+        return Err(anyhow::anyhow!(
+            "Interface name contains invalid characters"
+        ));
     }
 
     Ok(())
@@ -717,7 +767,11 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
 
     // Find the connected interface
     for line in content.lines() {
-        if line.contains("connected") || line.contains("专有") || line.contains("Ethernet") || line.contains("Wi-Fi") {
+        if line.contains("connected")
+            || line.contains("专有")
+            || line.contains("Ethernet")
+            || line.contains("Wi-Fi")
+        {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if !parts.is_empty() {
                 let interface_name = parts[0];
@@ -730,7 +784,15 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
 
                 // Set primary DNS
                 let status = std::process::Command::new("netsh")
-                    .args(&["interface", "ip", "set", "dns", &name_arg, "static", primary])
+                    .args(&[
+                        "interface",
+                        "ip",
+                        "set",
+                        "dns",
+                        &name_arg,
+                        "static",
+                        primary,
+                    ])
                     .status()?;
 
                 if !status.success() {
@@ -740,7 +802,15 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
                 // Set secondary DNS if provided
                 if let Some(secondary) = secondary {
                     let status = std::process::Command::new("netsh")
-                        .args(&["interface", "ip", "add", "dns", &name_arg, secondary, "index=2"])
+                        .args(&[
+                            "interface",
+                            "ip",
+                            "add",
+                            "dns",
+                            &name_arg,
+                            secondary,
+                            "index=2",
+                        ])
                         .status()?;
 
                     if !status.success() {
@@ -757,7 +827,12 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
 }
 
 /// Kill connection on Windows by terminating the process
-pub fn kill_connection(_local_addr: IpAddr, local_port: u16, _remote_addr: IpAddr, remote_port: u16) -> anyhow::Result<bool> {
+pub fn kill_connection(
+    _local_addr: IpAddr,
+    local_port: u16,
+    _remote_addr: IpAddr,
+    remote_port: u16,
+) -> anyhow::Result<bool> {
     use windows::Win32::NetworkManagement::IpHelper::*;
 
     unsafe {
@@ -793,8 +868,10 @@ pub fn kill_connection(_local_addr: IpAddr, local_port: u16, _remote_addr: IpAdd
                 for i in 0..num_entries {
                     let row_ptr = table.table.as_ptr().add(i);
                     let row = &*row_ptr;
-                    let row_local_port = (row.dwLocalPort as u16 >> 8) | ((row.dwLocalPort as u16 & 0xFF) << 8);
-                    let row_remote_port = (row.dwRemotePort as u16 >> 8) | ((row.dwRemotePort as u16 & 0xFF) << 8);
+                    let row_local_port =
+                        (row.dwLocalPort as u16 >> 8) | ((row.dwLocalPort as u16 & 0xFF) << 8);
+                    let row_remote_port =
+                        (row.dwRemotePort as u16 >> 8) | ((row.dwRemotePort as u16 & 0xFF) << 8);
 
                     if local_port == row_local_port && remote_port == row_remote_port {
                         // Kill the process owning this connection

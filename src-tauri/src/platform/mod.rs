@@ -199,7 +199,8 @@ pub struct PermissionStatusGeneric {
 
 /// Get process traffic stats (platform-specific)
 #[cfg(target_os = "macos")]
-pub fn get_process_traffic_stats() -> anyhow::Result<std::collections::HashMap<u32, macos::ProcessTrafficStats>> {
+pub fn get_process_traffic_stats(
+) -> anyhow::Result<std::collections::HashMap<u32, macos::ProcessTrafficStats>> {
     macos::get_process_traffic_stats()
 }
 

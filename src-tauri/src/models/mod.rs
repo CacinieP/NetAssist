@@ -1,14 +1,19 @@
 // Data models for network monitoring
 
-pub mod network;
-pub mod traffic;
-pub mod dns;
 pub mod connection;
 pub mod diagnostic;
+pub mod dns;
+pub mod network;
+pub mod traffic;
 
 // Re-export commonly used types
-pub use network::{IPInfo, IPType, GeoIPInfo, NetworkStatus};
-pub use traffic::{TrafficStats, AppTraffic, CumulativeTraffic, TrafficHistory, TrafficHistoryPoint, TrafficAlert, AlertStatus};
-pub use dns::DNSStats;
 pub use connection::{ConnectionInfo, ConnectionState};
-pub use diagnostic::{DiagnosticResult, DiagnosticItem, DiagnosticStatus, RepairAction, RepairType};
+pub use diagnostic::{
+    DiagnosticItem, DiagnosticResult, DiagnosticStatus, RepairAction, RepairType,
+};
+pub use dns::DNSStats;
+pub use network::{GeoIPInfo, IPInfo, IPType, NetworkStatus};
+pub use traffic::{
+    AlertStatus, AppTraffic, CumulativeTraffic, TrafficAlert, TrafficHistory, TrafficHistoryPoint,
+    TrafficStats,
+};

@@ -1,6 +1,6 @@
 // Network information module
 
-pub mod ip_info;
+pub mod dual_stack;
 pub mod geoip;
 pub mod interface;
-pub mod dual_stack;
+pub mod ip_info;

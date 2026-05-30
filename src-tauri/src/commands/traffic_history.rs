@@ -1,10 +1,12 @@
 //! Traffic history and alert management commands
 
-use crate::models::{CumulativeTraffic, TrafficHistory, TrafficHistoryPoint, TrafficAlert, AlertStatus};
+use crate::models::{
+    AlertStatus, CumulativeTraffic, TrafficAlert, TrafficHistory, TrafficHistoryPoint,
+};
+use chrono::{DateTime, Datelike, Utc};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::collections::HashMap;
-use chrono::{DateTime, Utc, Datelike};
 
 /// Traffic history storage state
 struct TrafficHistoryStorage {
@@ -14,8 +16,8 @@ struct TrafficHistoryStorage {
 
 impl TrafficHistoryStorage {
     fn new() -> Result<Self, String> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| "Could not find config directory".to_string())?;
+        let config_dir =
+            dirs::config_dir().ok_or_else(|| "Could not find config directory".to_string())?;
 
         let data_dir = config_dir.join("NetAssist").join("traffic");
         fs::create_dir_all(&data_dir)
@@ -51,7 +53,8 @@ impl TrafficHistoryStorage {
         }
 
         // Reasonable date range check (years 2000-2100)
-        let year = date_str[0..4].parse::<i32>()
+        let year = date_str[0..4]
+            .parse::<i32>()
             .map_err(|_| "Invalid year".to_string())?;
         if year < 2000 || year > 2100 {
             return Err("Date out of valid range (2000-2100)".to_string());
@@ -126,25 +129,32 @@ impl TrafficHistoryStorage {
         let now = Utc::now();
         let (start_time, end_time, period_label) = match period {
             "day" => {
-                let start = now.date_naive().and_hms_opt(0, 0, 0)
+                let start = now
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
                     .and_then(|d| d.and_local_timezone(Utc).single())
                     .unwrap_or_else(|| Utc::now());
                 (start.timestamp(), now.timestamp(), "day".to_string())
-            },
+            }
             "week" => {
                 let weekday = now.weekday().num_days_from_monday();
-                let start = now.date_naive().and_hms_opt(0, 0, 0)
+                let start = now
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
                     .and_then(|d| d.and_local_timezone(Utc).single())
                     .unwrap_or_else(|| Utc::now());
                 let start = start - chrono::Duration::days(weekday as i64);
                 (start.timestamp(), now.timestamp(), "week".to_string())
-            },
+            }
             "month" => {
-                let start = now.date_naive().with_day(1).and_then(|d| d.and_hms_opt(0, 0, 0))
+                let start = now
+                    .date_naive()
+                    .with_day(1)
+                    .and_then(|d| d.and_hms_opt(0, 0, 0))
                     .and_then(|d| d.and_local_timezone(Utc).single())
                     .unwrap_or_else(|| Utc::now());
                 (start.timestamp(), now.timestamp(), "month".to_string())
-            },
+            }
             _ => return Err(format!("Invalid period: {}", period)),
         };
 
@@ -201,14 +211,17 @@ impl TrafficHistoryStorage {
 
         let mut all_data = Vec::new();
 
-        let start_date = DateTime::from_timestamp(start_time.timestamp(), 0).unwrap_or_else(|| Utc::now());
+        let start_date =
+            DateTime::from_timestamp(start_time.timestamp(), 0).unwrap_or_else(|| Utc::now());
         let mut current_date = start_date;
 
         while current_date <= now {
             let date_str = current_date.format("%Y-%m-%d").to_string();
             if let Ok(day_data) = self.load_day_history(&date_str) {
                 for point in day_data {
-                    if point.timestamp >= start_time.timestamp_millis() && point.timestamp <= now.timestamp_millis() {
+                    if point.timestamp >= start_time.timestamp_millis()
+                        && point.timestamp <= now.timestamp_millis()
+                    {
                         all_data.push(point);
                     }
                 }
@@ -233,8 +246,8 @@ struct TrafficAlertManager {
 
 impl TrafficAlertManager {
     fn new() -> Result<Self, String> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| "Could not find config directory".to_string())?;
+        let config_dir =
+            dirs::config_dir().ok_or_else(|| "Could not find config directory".to_string())?;
 
         let data_dir = config_dir.join("NetAssist");
         fs::create_dir_all(&data_dir)
@@ -310,7 +323,9 @@ impl TrafficAlertManager {
     /// Update an alert
     fn update_alert(&self, alert: TrafficAlert) -> Result<(), String> {
         let mut alerts = self.load_alerts()?;
-        let pos = alerts.iter().position(|a| a.id == alert.id)
+        let pos = alerts
+            .iter()
+            .position(|a| a.id == alert.id)
             .ok_or_else(|| format!("Alert not found: {}", alert.id))?;
         alerts[pos] = alert;
         self.save_alerts(&alerts)
@@ -396,21 +411,27 @@ lazy_static::lazy_static! {
 /// Get cumulative traffic for a time period
 #[tauri::command]
 pub async fn get_cumulative_traffic(period: String) -> Result<CumulativeTraffic, String> {
-    let storage = HISTORY_STORAGE.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let storage = HISTORY_STORAGE
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
     storage.get_cumulative_traffic(&period)
 }
 
 /// Get traffic history for a time range (hours)
 #[tauri::command]
 pub async fn get_traffic_history(hours: i64) -> Result<TrafficHistory, String> {
-    let storage = HISTORY_STORAGE.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let storage = HISTORY_STORAGE
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
     storage.get_traffic_history(hours)
 }
 
 /// Record a traffic data point
 #[tauri::command]
 pub async fn record_traffic_point(download_bps: f64, upload_bps: f64) -> Result<(), String> {
-    let mut storage = HISTORY_STORAGE.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut storage = HISTORY_STORAGE
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
     storage.add_data_point(download_bps, upload_bps)
 }
 
@@ -441,7 +462,9 @@ pub async fn delete_traffic_alert(alert_id: String) -> Result<(), String> {
 /// Check alert status
 #[tauri::command]
 pub async fn check_traffic_alerts(period: String) -> Result<Vec<AlertStatus>, String> {
-    let storage = HISTORY_STORAGE.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let storage = HISTORY_STORAGE
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
     let cumulative = storage.get_cumulative_traffic(&period)?;
     ALERT_MANAGER.check_alerts(&cumulative)
 }
