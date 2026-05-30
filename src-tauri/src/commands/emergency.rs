@@ -1,4 +1,4 @@
-use crate::models::{DiagnosticResult, DiagnosticItem, DiagnosticStatus, RepairAction, RepairType};
+use crate::models::{DiagnosticItem, DiagnosticResult, DiagnosticStatus, RepairAction, RepairType};
 use tokio::time::{timeout, Duration};
 
 /// Apply a quick fix action
@@ -8,20 +8,17 @@ pub async fn apply_quick_fix(fix_type: String) -> Result<bool, String> {
     match fix_type.as_str() {
         "flush_dns_cache" => {
             tracing::info!("Executing fix: flush_dns_cache");
-            crate::platform::flush_dns_cache()
-                .map_err(|e| e.to_string())?;
+            crate::platform::flush_dns_cache().map_err(|e| e.to_string())?;
             Ok(true)
         }
         "release_renew_ip" => {
             tracing::info!("Executing fix: release_renew_ip");
-            crate::platform::release_renew_ip()
-                .map_err(|e| e.to_string())?;
+            crate::platform::release_renew_ip().map_err(|e| e.to_string())?;
             Ok(true)
         }
         "reset_network_stack" => {
             tracing::info!("Executing fix: reset_network_stack");
-            crate::platform::reset_network_stack()
-                .map_err(|e| e.to_string())?;
+            crate::platform::reset_network_stack().map_err(|e| e.to_string())?;
             Ok(true)
         }
         "switch_dns" => {
@@ -32,17 +29,19 @@ pub async fn apply_quick_fix(fix_type: String) -> Result<bool, String> {
             Ok(true)
         }
         "toggle_ipv6" => {
-            tracing::info!("Executing fix: toggle_ipv6");
-            // Toggle IPv6 - reinitialize IP configuration
+            tracing::warn!(
+                "fix toggle_ipv6: not fully implemented, falling back to release/renew IP"
+            );
             crate::platform::release_renew_ip()
-                .map_err(|e| format!("Failed to toggle IPv6: {}", e))?;
+                .map_err(|e| format!("IPv6 切换尚未实现（已执行 IP 刷新作为替代）: {}", e))?;
             Ok(true)
         }
         "reset_adapter" => {
-            tracing::info!("Executing fix: reset_adapter");
-            // Reset network adapter by renewing IP
+            tracing::warn!(
+                "fix reset_adapter: not fully implemented, falling back to release/renew IP"
+            );
             crate::platform::release_renew_ip()
-                .map_err(|e| format!("Failed to reset adapter: {}", e))?;
+                .map_err(|e| format!("网络适配器重置尚未实现（已执行 IP 刷新作为替代）: {}", e))?;
             Ok(true)
         }
         "restart_network_service" => {
@@ -71,14 +70,24 @@ pub async fn run_diagnostics() -> Result<DiagnosticResult, String> {
     let network_quality = check_network_quality().await;
 
     // Determine overall status
-    let overall = if [&network_connectivity, &ip_configuration, &dns_resolution, &network_quality]
-        .iter()
-        .all(|d| d.status == DiagnosticStatus::Pass)
+    let overall = if [
+        &network_connectivity,
+        &ip_configuration,
+        &dns_resolution,
+        &network_quality,
+    ]
+    .iter()
+    .all(|d| d.status == DiagnosticStatus::Pass)
     {
         DiagnosticStatus::Pass
-    } else if [&network_connectivity, &ip_configuration, &dns_resolution, &network_quality]
-        .iter()
-        .any(|d| d.status == DiagnosticStatus::Fail)
+    } else if [
+        &network_connectivity,
+        &ip_configuration,
+        &dns_resolution,
+        &network_quality,
+    ]
+    .iter()
+    .any(|d| d.status == DiagnosticStatus::Fail)
     {
         DiagnosticStatus::Fail
     } else {
@@ -86,10 +95,18 @@ pub async fn run_diagnostics() -> Result<DiagnosticResult, String> {
     };
 
     // Generate recommendations based on failures
-    let recommendations = generate_recommendations(&network_connectivity, &ip_configuration, &dns_resolution, &network_quality);
+    let recommendations = generate_recommendations(
+        &network_connectivity,
+        &ip_configuration,
+        &dns_resolution,
+        &network_quality,
+    );
 
-    tracing::info!("Diagnostics completed: overall_status={:?}, {} recommendations",
-        overall, recommendations.len());
+    tracing::info!(
+        "Diagnostics completed: overall_status={:?}, {} recommendations",
+        overall,
+        recommendations.len()
+    );
 
     Ok(DiagnosticResult {
         overall_status: overall,
@@ -107,72 +124,74 @@ async fn check_network_connectivity() -> DiagnosticItem {
     let start = std::time::Instant::now();
 
     // Try to ping a reliable server with timeout (5 seconds)
-    let ping_result = timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| {
-        #[cfg(target_os = "windows")]
-        let result = std::process::Command::new("ping")
-            .args(&["-n", "1", "-w", "3000", "8.8.8.8"])
-            .output();
+    let ping_result = timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(|| {
+            #[cfg(target_os = "windows")]
+            let result = std::process::Command::new("ping")
+                .args(&["-n", "1", "-w", "3000", "8.8.8.8"])
+                .output();
 
-        #[cfg(target_os = "linux")]
-        let result = std::process::Command::new("ping")
-            .args(&["-c", "1", "-W", "3", "8.8.8.8"])
-            .output();
+            #[cfg(target_os = "linux")]
+            let result = std::process::Command::new("ping")
+                .args(&["-c", "1", "-W", "3", "8.8.8.8"])
+                .output();
 
-        #[cfg(target_os = "macos")]
-        let result = std::process::Command::new("ping")
-            .args(&["-c", "1", "-W", "3000", "8.8.8.8"])
-            .output();
+            #[cfg(target_os = "macos")]
+            let result = std::process::Command::new("ping")
+                .args(&["-c", "1", "-W", "3000", "8.8.8.8"])
+                .output();
 
-        result
-    })).await;
+            result
+        }),
+    )
+    .await;
 
     match ping_result {
-        Ok(join_result) => {
-            match join_result {
-                Ok(output_result) => {
-                    match output_result {
-                        Ok(output) => {
-                            let content = String::from_utf8_lossy(&output.stdout);
-                            let success = content.contains("TTL=") || content.contains("ttl=") || content.contains("bytes from");
+        Ok(join_result) => match join_result {
+            Ok(output_result) => match output_result {
+                Ok(output) => {
+                    let content = String::from_utf8_lossy(&output.stdout);
+                    let success = content.contains("TTL=")
+                        || content.contains("ttl=")
+                        || content.contains("bytes from");
 
-                            if success {
-                                DiagnosticItem {
-                                    status: DiagnosticStatus::Pass,
-                                    message: "网络连接正常".to_string(),
-                                    details: serde_json::json!({ "gateway_reachable": true }),
-                                    duration_ms: start.elapsed().as_millis() as u64,
-                                }
-                            } else {
-                                DiagnosticItem {
-                                    status: DiagnosticStatus::Fail,
-                                    message: "无法连接到网关".to_string(),
-                                    details: serde_json::json!({}),
-                                    duration_ms: start.elapsed().as_millis() as u64,
-                                }
-                            }
+                    if success {
+                        DiagnosticItem {
+                            status: DiagnosticStatus::Pass,
+                            message: "网络连接正常".to_string(),
+                            details: serde_json::json!({ "gateway_reachable": true }),
+                            duration_ms: start.elapsed().as_millis() as u64,
                         }
-                        Err(_) => {
-                            tracing::warn!("Ping command execution failed");
-                            DiagnosticItem {
-                                status: DiagnosticStatus::Fail,
-                                message: "Ping命令执行失败".to_string(),
-                                details: serde_json::json!({}),
-                                duration_ms: start.elapsed().as_millis() as u64,
-                            }
+                    } else {
+                        DiagnosticItem {
+                            status: DiagnosticStatus::Fail,
+                            message: "无法连接到网关".to_string(),
+                            details: serde_json::json!({}),
+                            duration_ms: start.elapsed().as_millis() as u64,
                         }
                     }
                 }
                 Err(_) => {
-                    tracing::warn!("Ping task join failed");
+                    tracing::warn!("Ping command execution failed");
                     DiagnosticItem {
                         status: DiagnosticStatus::Fail,
-                        message: "Ping任务失败".to_string(),
+                        message: "Ping命令执行失败".to_string(),
                         details: serde_json::json!({}),
                         duration_ms: start.elapsed().as_millis() as u64,
                     }
                 }
+            },
+            Err(_) => {
+                tracing::warn!("Ping task join failed");
+                DiagnosticItem {
+                    status: DiagnosticStatus::Fail,
+                    message: "Ping任务失败".to_string(),
+                    details: serde_json::json!({}),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                }
             }
-        }
+        },
         Err(_) => {
             tracing::warn!("Network connectivity check timed out after 5 seconds");
             DiagnosticItem {
@@ -190,7 +209,11 @@ async fn check_ip_configuration() -> DiagnosticItem {
     let start = std::time::Instant::now();
 
     // Add timeout to IP info check (20 seconds - needs to fetch public IP)
-    let ip_info_result = timeout(Duration::from_secs(20), crate::commands::ip_info::get_ip_info()).await;
+    let ip_info_result = timeout(
+        Duration::from_secs(20),
+        crate::commands::ip_info::get_ip_info(None),
+    )
+    .await;
 
     match ip_info_result {
         Ok(Ok(info)) => {
@@ -277,17 +300,23 @@ async fn check_network_quality() -> DiagnosticItem {
     match crate::commands::network_quality::ping("8.8.8.8".to_string(), false).await {
         Ok(ping_result) => {
             if ping_result.success {
-                let quality = if ping_result.avg_latency_ms < 50.0 && ping_result.packet_loss_percent < 1.0 {
-                    DiagnosticStatus::Pass
-                } else if ping_result.avg_latency_ms < 200.0 && ping_result.packet_loss_percent < 5.0 {
-                    DiagnosticStatus::Warning
-                } else {
-                    DiagnosticStatus::Fail
-                };
+                let quality =
+                    if ping_result.avg_latency_ms < 50.0 && ping_result.packet_loss_percent < 1.0 {
+                        DiagnosticStatus::Pass
+                    } else if ping_result.avg_latency_ms < 200.0
+                        && ping_result.packet_loss_percent < 5.0
+                    {
+                        DiagnosticStatus::Warning
+                    } else {
+                        DiagnosticStatus::Fail
+                    };
 
                 DiagnosticItem {
                     status: quality,
-                    message: format!("网络质量: {:.1}ms, 丢包{:.1}%", ping_result.avg_latency_ms, ping_result.packet_loss_percent),
+                    message: format!(
+                        "网络质量: {:.1}ms, 丢包{:.1}%",
+                        ping_result.avg_latency_ms, ping_result.packet_loss_percent
+                    ),
                     details: serde_json::json!({
                         "latency_ms": ping_result.avg_latency_ms,
                         "packet_loss_percent": ping_result.packet_loss_percent

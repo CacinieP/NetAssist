@@ -1,9 +1,11 @@
 use crate::models::{IPInfo, IPType};
 use std::net::IpAddr;
 
-/// Get current IP information with GeoIP
+/// Get current IP information with optional GeoIP
 #[tauri::command]
-pub async fn get_ip_info() -> Result<IPInfo, String> {
+pub async fn get_ip_info(include_geoip: Option<bool>) -> Result<IPInfo, String> {
+    let do_geoip = include_geoip.unwrap_or(true);
+
     // Get public IP (external, visible from internet)
     let public_ipv4 = get_public_ip().await;
 
@@ -22,37 +24,43 @@ pub async fn get_ip_info() -> Result<IPInfo, String> {
     let display_ipv6 = local_ipv6_addrs.first().cloned();
 
     // Classify IP types based on what we're displaying
-    let ipv4_type = display_ipv4.as_ref().map_or(IPType::Unknown, |ip| {
-        match ip.parse::<IpAddr>() {
-            Ok(addr) => classify_ip_type(&addr),
-            Err(_) => {
-                tracing::warn!("Failed to parse IPv4 address: {}", ip);
-                IPType::Unknown
-            }
-        }
-    });
+    let ipv4_type =
+        display_ipv4
+            .as_ref()
+            .map_or(IPType::Unknown, |ip| match ip.parse::<IpAddr>() {
+                Ok(addr) => classify_ip_type(&addr),
+                Err(_) => {
+                    tracing::warn!("Failed to parse IPv4 address: {}", ip);
+                    IPType::Unknown
+                }
+            });
 
-    let ipv6_type = display_ipv6.as_ref().map_or(IPType::Unknown, |ip| {
-        match ip.parse::<IpAddr>() {
-            Ok(addr) => classify_ip_type(&addr),
-            Err(_) => {
-                tracing::warn!("Failed to parse IPv6 address: {}", ip);
-                IPType::Unknown
-            }
-        }
-    });
+    let ipv6_type =
+        display_ipv6
+            .as_ref()
+            .map_or(IPType::Unknown, |ip| match ip.parse::<IpAddr>() {
+                Ok(addr) => classify_ip_type(&addr),
+                Err(_) => {
+                    tracing::warn!("Failed to parse IPv6 address: {}", ip);
+                    IPType::Unknown
+                }
+            });
 
-    // Get GeoIP data for the public IPs (use public IP for accurate location)
-    let ipv4_geoip = if let Some(ref ipv4) = display_ipv4 {
-        crate::core::network::geoip::lookup_geoip(ipv4).await
+    // Get GeoIP data only when requested (saves network calls)
+    let (ipv4_geoip, ipv6_geoip) = if do_geoip {
+        let v4 = if let Some(ref ipv4) = display_ipv4 {
+            crate::core::network::geoip::lookup_geoip(ipv4).await
+        } else {
+            None
+        };
+        let v6 = if let Some(ref ipv6) = display_ipv6 {
+            crate::core::network::geoip::lookup_geoip(ipv6).await
+        } else {
+            None
+        };
+        (v4, v6)
     } else {
-        None
-    };
-
-    let ipv6_geoip = if let Some(ref ipv6) = display_ipv6 {
-        crate::core::network::geoip::lookup_geoip(ipv6).await
-    } else {
-        None
+        (None, None)
     };
 
     // Check if we have both IPv4 and IPv6 connectivity
@@ -148,12 +156,15 @@ async fn get_public_ip() -> Option<String> {
 
     // IPv4-only services for better GeoIP coverage
     let services = vec![
-        "https://api4.ipify.org",  // IPv4-only endpoint
-        "https://ipv4.icanhazip.com",  // IPv4-only endpoint
-        "https://ifconfig.me/ip",  // Returns IPv4 when available
+        "https://api4.ipify.org",     // IPv4-only endpoint
+        "https://ipv4.icanhazip.com", // IPv4-only endpoint
+        "https://ifconfig.me/ip",     // Returns IPv4 when available
     ];
 
-    tracing::info!("Attempting to fetch public IPv4 from {} services", services.len());
+    tracing::info!(
+        "Attempting to fetch public IPv4 from {} services",
+        services.len()
+    );
 
     // Increase overall timeout to 15 seconds to account for proxy delays
     let overall_timeout = timeout(Duration::from_secs(15), async {
@@ -161,7 +172,11 @@ async fn get_public_ip() -> Option<String> {
             tracing::debug!("Trying service {}/{}: {}", idx + 1, services.len(), service);
 
             // Increase per-service timeout to 5 seconds for proxy scenarios
-            let result = timeout(Duration::from_secs(5), fetch_public_ipv4_from_service(service)).await;
+            let result = timeout(
+                Duration::from_secs(5),
+                fetch_public_ipv4_from_service(service),
+            )
+            .await;
 
             match result {
                 Ok(Ok(ip)) => {
@@ -178,7 +193,8 @@ async fn get_public_ip() -> Option<String> {
         }
         tracing::error!("All IPv4 services failed");
         None as Option<String>
-    }).await;
+    })
+    .await;
 
     match &overall_timeout {
         Ok(Some(ip)) => tracing::info!("Public IPv4 retrieved: {}", ip),
@@ -190,7 +206,9 @@ async fn get_public_ip() -> Option<String> {
 }
 
 /// Fetch public IPv4 from a specific service with validation
-async fn fetch_public_ipv4_from_service(service: &str) -> Result<String, Box<dyn std::error::Error>> {
+async fn fetch_public_ipv4_from_service(
+    service: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     // Build client with proxy bypass and increased timeout
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -200,31 +218,32 @@ async fn fetch_public_ipv4_from_service(service: &str) -> Result<String, Box<dyn
 
     tracing::debug!("Sending request to {}", service);
 
-    let response = client.get(service)
+    let response = client
+        .get(service)
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {}", e))?;
 
     let status = response.status();
-    let ip = response.text()
+    let ip = response
+        .text()
         .await
         .map_err(|e| format!("Failed to read response body: {}", e))?;
 
     let ip = ip.trim();
 
-    tracing::debug!("Got response from {}: status={}, body={}", service, status, ip);
+    tracing::debug!(
+        "Got response from {}: status={}, body={}",
+        service,
+        status,
+        ip
+    );
 
     // Validate it's a valid IPv4 address (not IPv6)
     match ip.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(_)) => {
-            Ok(ip.to_string())
-        }
-        Ok(std::net::IpAddr::V6(_)) => {
-            Err(format!("Expected IPv4 but got IPv6: {}", ip).into())
-        }
-        Err(_) => {
-            Err(format!("Invalid IP address returned: {}", ip).into())
-        }
+        Ok(std::net::IpAddr::V4(_)) => Ok(ip.to_string()),
+        Ok(std::net::IpAddr::V6(_)) => Err(format!("Expected IPv4 but got IPv6: {}", ip).into()),
+        Err(_) => Err(format!("Invalid IP address returned: {}", ip).into()),
     }
 }
 

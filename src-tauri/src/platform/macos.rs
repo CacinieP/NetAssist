@@ -1,8 +1,8 @@
 // macOS-specific implementations
 
-use super::{NetworkInterfaceInfo, ConnectionRawInfo};
-use std::net::IpAddr;
+use super::{ConnectionRawInfo, NetworkInterfaceInfo};
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 /// Get default gateway on macOS
 pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
@@ -76,7 +76,12 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
             } else if line.contains("inet6 ") && !line.contains("scopeid") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if let Some(addr_str) = parts.get(1) {
-                    if let Ok(addr) = addr_str.split('%').next().unwrap_or(addr_str).parse::<IpAddr>() {
+                    if let Ok(addr) = addr_str
+                        .split('%')
+                        .next()
+                        .unwrap_or(addr_str)
+                        .parse::<IpAddr>()
+                    {
                         intf.ipv6_addresses.push(addr);
                     }
                 }
@@ -96,8 +101,10 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
 /// Get active connections on macOS
 pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
     // Use: lsof -i -n -P to get connections with process info
-    let lsof_output = super::common::exec_command("lsof", &["-i", "-n", "-P"]).unwrap_or_else(|_| String::new());
-    let mut process_map: std::collections::HashMap<String, (u32, String)> = std::collections::HashMap::new();
+    let lsof_output =
+        super::common::exec_command("lsof", &["-i", "-n", "-P"]).unwrap_or_else(|_| String::new());
+    let mut process_map: std::collections::HashMap<String, (u32, String)> =
+        std::collections::HashMap::new();
 
     // Parse lsof output to get process info per connection
     // Format: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
@@ -144,10 +151,13 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
         if let Some((local_addr, local_port)) = parse_sock_addr(parts[3]) {
             if let Some((remote_addr, remote_port)) = parse_sock_addr(parts[4]) {
                 // Create connection key to lookup process info
-                let conn_key = format!("{}:{}->{}:{}",
-                    local_addr, local_port, remote_addr, remote_port);
+                let conn_key = format!(
+                    "{}:{}->{}:{}",
+                    local_addr, local_port, remote_addr, remote_port
+                );
 
-                let (pid, process_name) = process_map.get(&conn_key)
+                let (pid, process_name) = process_map
+                    .get(&conn_key)
                     .or_else(|| process_map.get(&format!("{}:{}->*", local_addr, local_port)))
                     .cloned()
                     .unwrap_or((0, String::new()));
@@ -160,7 +170,11 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
                     remote_port,
                     state: parts.get(5).unwrap_or(&"").to_string(),
                     pid: if pid > 0 { Some(pid) } else { None },
-                    process_name: if !process_name.is_empty() { Some(process_name) } else { None },
+                    process_name: if !process_name.is_empty() {
+                        Some(process_name)
+                    } else {
+                        None
+                    },
                 });
             }
         }
@@ -187,22 +201,39 @@ fn extract_connection_key(endpoint: &str) -> Option<String> {
 }
 
 fn parse_sock_addr(addr: &str) -> Option<(IpAddr, u16)> {
-    let parts: Vec<&str> = addr.split('.').collect();
-    if parts.len() < 2 {
-        return None;
+    // netstat output uses "." as separator for hex IPv4 (e.g. "C0A80101.04D2")
+    // but ":" for IPv6 (e.g. "[::1]:1234" or hex "::1:04D2")
+    let (ip_part, port_part) = if addr.contains('.') {
+        let parts: Vec<&str> = addr.split('.').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        (parts.first()?.to_string(), parts.last()?.to_string())
+    } else {
+        let parts: Vec<&str> = addr.split(':').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        (parts.first()?.to_string(), parts.last()?.to_string())
+    };
+
+    // Try hex IPv4 first
+    if let Ok(ip_hex) = u32::from_str_radix(&ip_part, 16) {
+        let ip = IpAddr::from(std::net::Ipv4Addr::from(ip_hex));
+        let port = u16::from_str_radix(&port_part, 16).ok()?;
+        return Some((ip, port));
     }
 
-    let ip_str = parts.first()?;
-    let port_str = parts.last()?;
+    // Try standard IP parse (for IPv6 or dotted-decimal IPv4)
+    if let Ok(ip) = ip_part.parse::<IpAddr>() {
+        let port = port_part
+            .parse::<u16>()
+            .or_else(|_| u16::from_str_radix(&port_part, 16))
+            .ok()?;
+        return Some((ip, port));
+    }
 
-    // Parse IP (hex format)
-    let ip_hex = u32::from_str_radix(ip_str, 16).ok()?;
-    let ip = IpAddr::from(std::net::Ipv4Addr::from(ip_hex));
-
-    // Parse port (hex format)
-    let port = u16::from_str_radix(port_str, 16).ok()?;
-
-    Some((ip, port))
+    None
 }
 
 /// Flush DNS cache on macOS
@@ -331,14 +362,17 @@ pub fn check_permissions() -> anyhow::Result<PermissionStatus> {
     }
 
     // Check if we can read network interface stats
-    match std::process::Command::new("netstat").args(&["-b", "-I", "en0"]).output() {
+    match std::process::Command::new("netstat")
+        .args(&["-b", "-I", "en0"])
+        .output()
+    {
         Ok(_) => {
             status.network_monitor = true;
         }
         Err(_) => {
-            status.warnings.push(
-                "无法获取网络接口统计信息。请确保应用有网络访问权限。".to_string()
-            );
+            status
+                .warnings
+                .push("无法获取网络接口统计信息。请确保应用有网络访问权限。".to_string());
         }
     }
 
@@ -355,7 +389,8 @@ pub struct PermissionStatus {
 }
 
 /// Get per-process network traffic statistics on macOS
-pub fn get_process_traffic_stats() -> anyhow::Result<std::collections::HashMap<u32, ProcessTrafficStats>> {
+pub fn get_process_traffic_stats(
+) -> anyhow::Result<std::collections::HashMap<u32, ProcessTrafficStats>> {
     use std::collections::HashMap;
     let mut stats = HashMap::new();
 
@@ -390,20 +425,19 @@ pub fn get_process_traffic_stats() -> anyhow::Result<std::collections::HashMap<u
                     }
 
                     // Extract traffic info
-                    let bytes_in = entry.get("bytes_in")
-                        .and_then(|b| b.as_u64())
-                        .unwrap_or(0);
+                    let bytes_in = entry.get("bytes_in").and_then(|b| b.as_u64()).unwrap_or(0);
 
-                    let bytes_out = entry.get("bytes_out")
-                        .and_then(|b| b.as_u64())
-                        .unwrap_or(0);
+                    let bytes_out = entry.get("bytes_out").and_then(|b| b.as_u64()).unwrap_or(0);
 
-                    stats.insert(pid, ProcessTrafficStats {
+                    stats.insert(
                         pid,
-                        name: process_name,
-                        bytes_in,
-                        bytes_out,
-                    });
+                        ProcessTrafficStats {
+                            pid,
+                            name: process_name,
+                            bytes_in,
+                            bytes_out,
+                        },
+                    );
                 }
             }
         }
@@ -441,8 +475,17 @@ pub fn get_all_processes() -> anyhow::Result<HashMap<u32, String>> {
                     .args(&["-p", &parts[0], "-o", "comm="])
                     .output()
                 {
-                    let full_name = String::from_utf8_lossy(&path_output.stdout).trim().to_string();
-                    processes.insert(pid, if !full_name.is_empty() { full_name } else { name });
+                    let full_name = String::from_utf8_lossy(&path_output.stdout)
+                        .trim()
+                        .to_string();
+                    processes.insert(
+                        pid,
+                        if !full_name.is_empty() {
+                            full_name
+                        } else {
+                            name
+                        },
+                    );
                 }
             }
         }
@@ -505,15 +548,22 @@ pub fn run_network_diagnostics() -> anyhow::Result<MacOSDiagnostics> {
     };
 
     // 1. Check networksetup list of services
-    if let Ok(output) = std::process::Command::new("networksetup").arg("-listallnetworkservices").output() {
+    if let Ok(output) = std::process::Command::new("networksetup")
+        .arg("-listallnetworkservices")
+        .output()
+    {
         let content = String::from_utf8_lossy(&output.stdout);
-        for line in content.lines().skip(1) { // Skip header
+        for line in content.lines().skip(1) {
+            // Skip header
             diagnostics.network_setup.push(line.trim().to_string());
         }
     }
 
     // 2. Check DNS configuration with scutil
-    if let Ok(output) = std::process::Command::new("scutil").args(&["--dns"]).output() {
+    if let Ok(output) = std::process::Command::new("scutil")
+        .args(&["--dns"])
+        .output()
+    {
         let content = String::from_utf8_lossy(&output.stdout);
         for line in content.lines() {
             if line.contains("nameserver") || line.contains("domain") {
@@ -523,23 +573,38 @@ pub fn run_network_diagnostics() -> anyhow::Result<MacOSDiagnostics> {
     }
 
     // 3. Check proxy settings
-    if let Ok(output) = std::process::Command::new("scutil").args(&["--proxy"]).output() {
+    if let Ok(output) = std::process::Command::new("scutil")
+        .args(&["--proxy"])
+        .output()
+    {
         let content = String::from_utf8_lossy(&output.stdout);
         for line in content.lines() {
-            if line.contains("HTTPProxy") || line.contains("HTTPSProxy") || line.contains("SOCKSProxy") {
+            if line.contains("HTTPProxy")
+                || line.contains("HTTPSProxy")
+                || line.contains("SOCKSProxy")
+            {
                 diagnostics.proxy_config.push(line.trim().to_string());
             }
         }
     }
 
     // 4. Check firewall status
-    if let Ok(output) = std::process::Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw").arg("--getglobalstate").output() {
+    if let Ok(output) =
+        std::process::Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
+            .arg("--getglobalstate")
+            .output()
+    {
         let content = String::from_utf8_lossy(&output.stdout);
         diagnostics.firewall_status.push(content.trim().to_string());
     }
 
     // 5. Get WiFi info if connected to WiFi
-    if let Ok(output) = std::process::Command::new("/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport").args(&["-I"]).output() {
+    if let Ok(output) = std::process::Command::new(
+        "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport",
+    )
+    .args(&["-I"])
+    .output()
+    {
         let content = String::from_utf8_lossy(&output.stdout);
         let mut wifi_info = WiFiInfo::default();
 

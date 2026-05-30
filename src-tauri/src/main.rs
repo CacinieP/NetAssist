@@ -47,9 +47,8 @@ fn main() {
             commands::settings::get_interface_changes,
         ])
         .run(tauri::generate_context!())
-        .map_err(|e| {
+        .unwrap_or_else(|e| {
             eprintln!("Tauri application error: {}", e);
-            std::process::ExitCode::from(1)
-        })
-        .expect("Failed to run Tauri application");
+            std::process::exit(1);
+        });
 }

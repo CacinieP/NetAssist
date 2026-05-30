@@ -1,7 +1,7 @@
-use crate::models::{TrafficStats, AppTraffic};
+use crate::models::{AppTraffic, TrafficStats};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use sysinfo::System;
+use tokio::sync::Mutex;
 
 /// Traffic monitoring state
 struct TrafficState {
@@ -9,6 +9,7 @@ struct TrafficState {
     last_tx_bytes: u64,
     last_update: std::time::Instant,
     app_traffic: std::collections::HashMap<u32, AppTrafficData>,
+    cached_system: Option<System>,
 }
 
 struct AppTrafficData {
@@ -33,6 +34,7 @@ impl TrafficMonitor {
                 last_tx_bytes: tx_bytes,
                 last_update: std::time::Instant::now(),
                 app_traffic: std::collections::HashMap::new(),
+                cached_system: None,
             })),
         }
     }
@@ -46,13 +48,15 @@ impl TrafficMonitor {
         let (current_rx, current_tx) = self.get_interface_stats()?;
 
         // Calculate rates with minimum elapsed time check
-        let download_bps = if elapsed > 0.001 {  // Minimum 1ms to prevent extreme values
+        let download_bps = if elapsed > 0.001 {
+            // Minimum 1ms to prevent extreme values
             (current_rx.saturating_sub(state.last_rx_bytes)) as f64 / elapsed
         } else {
             0.0
         };
 
-        let upload_bps = if elapsed > 0.001 {  // Minimum 1ms to prevent extreme values
+        let upload_bps = if elapsed > 0.001 {
+            // Minimum 1ms to prevent extreme values
             (current_tx.saturating_sub(state.last_tx_bytes)) as f64 / elapsed
         } else {
             0.0
@@ -72,7 +76,10 @@ impl TrafficMonitor {
 
     /// Get application traffic ranking
     pub async fn get_app_ranking(&self) -> Result<Vec<AppTraffic>, String> {
-        let mut sys = System::new_all();
+        let mut state = self.state.lock().await;
+
+        // Reuse cached System instance to avoid expensive re-creation
+        let sys = state.cached_system.get_or_insert_with(System::new_all);
         sys.refresh_all();
 
         let mut app_traffic = Vec::new();
@@ -92,7 +99,8 @@ impl TrafficMonitor {
             match crate::platform::windows::get_active_connections() {
                 Ok(conns) => {
                     // Count connections per PID
-                    let mut conn_count: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+                    let mut conn_count: std::collections::HashMap<u32, usize> =
+                        std::collections::HashMap::new();
                     for conn in conns {
                         if let Some(pid) = conn.pid {
                             *conn_count.entry(pid).or_insert(0) += 1;
@@ -109,7 +117,8 @@ impl TrafficMonitor {
         let connection_info = {
             match crate::platform::linux::get_active_connections() {
                 Ok(conns) => {
-                    let mut conn_count: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+                    let mut conn_count: std::collections::HashMap<u32, usize> =
+                        std::collections::HashMap::new();
                     for conn in conns {
                         if let Some(pid) = conn.pid {
                             *conn_count.entry(pid).or_insert(0) += 1;
@@ -177,11 +186,15 @@ impl TrafficMonitor {
                 }
             };
 
-            // On Windows/Linux, use connection count as proxy
+            // On Windows/Linux, use connection count as proxy (estimated, not real traffic data)
             #[cfg(not(target_os = "macos"))]
             let (download_bps, upload_bps) = {
                 let conn_count = connection_info.get(&pid_u32).copied().unwrap_or(0);
                 let estimated_bps = conn_count as f64 * 100.0;
+                tracing::debug!(
+                    "PID {}: using estimated traffic based on {} connections (not real traffic data)",
+                    pid_u32, conn_count
+                );
                 (estimated_bps, estimated_bps * 0.3)
             };
 
@@ -212,7 +225,9 @@ impl TrafficMonitor {
         app_traffic.sort_by(|a, b| {
             let total_a = a.current_download_bps + a.current_upload_bps;
             let total_b = b.current_download_bps + b.current_upload_bps;
-            total_b.partial_cmp(&total_a).unwrap_or(std::cmp::Ordering::Equal)
+            total_b
+                .partial_cmp(&total_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         Ok(app_traffic)
@@ -290,8 +305,8 @@ impl TrafficMonitor {
         use std::process::Command;
 
         // Get the active interface dynamically
-        let interface = crate::platform::get_default_interface()
-            .unwrap_or_else(|_| "en0".to_string());
+        let interface =
+            crate::platform::get_default_interface().unwrap_or_else(|_| "en0".to_string());
 
         // Use netstat to get interface statistics on macOS
         let output = Command::new("netstat")

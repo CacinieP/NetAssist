@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.ipify.org https://ifconfig.me https://icanhazip.com; font-src 'self' data:; object-src 'none'; frame-src 'none'; form-action 'self';"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.ipify.org https://ifconfig.me https://icanhazip.com https://ipapi.co https://ipwhois.app https://ip-api.com; font-src 'self' data:; object-src 'none'; frame-src 'none'; form-action 'self';"
     }
   },
   "bundle": {
@@ -38,7 +38,6 @@
       "entitlements": null,
       "exceptionDomain": "",
       "frameworks": [],
-      "signingIdentity": "Developer ID Application: YOUR_TEAM_ID",
       "hardenedRuntime": true
     }
   },
