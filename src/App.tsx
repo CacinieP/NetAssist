@@ -1,7 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { invoke } from "@tauri-apps/api/core";
 import { useSettingsStore } from "./store/settingsStore";
+import { useRealtimeTraffic } from "./hooks/useTrafficData";
+import { useNetworkData } from "./hooks/useNetworkData";
 import StatusBar from "./components/StatusBar/StatusBar";
 import Navigation from "./components/Navigation/Navigation";
 import Dashboard from "./components/Dashboard/Dashboard";
@@ -10,115 +11,52 @@ import ConnectionManager from "./components/ConnectionManager/ConnectionManager"
 import EmergencyKit from "./components/EmergencyKit/EmergencyKit";
 import Settings from "./components/Settings/Settings";
 
-// Interfaces matching Rust models
-interface NetworkStatus {
-  status: string;
-  message: string;
-  timestamp: number;
-}
-
-interface GeoIPInfo {
-  country: string;
-  region: string;
-  city: string;
-}
-
-interface IPInfo {
-  ipv4: string | null;
-  ipv6: string | null;
-  ipv4_geoip: GeoIPInfo | null;
-  ipv6_geoip: GeoIPInfo | null;
-}
-
-interface TrafficStats {
-  download_bps: number;
-  upload_bps: number;
-  timestamp: number;
-}
-
 function App() {
   const { settings, loadSettings } = useSettingsStore();
 
-  const [networkStatus, setNetworkStatus] = useState<NetworkStatus | null>(null);
-  const [ipInfo, setIpInfo] = useState<IPInfo | null>(null);
-  const [traffic, setTraffic] = useState<TrafficStats | null>(null);
-
-  // Error states with user feedback
+  // Error state with user feedback
   const [error, setError] = useState<string | null>(null);
-  const [retryCount, setRetryCount] = useState(0);
+  const retryCountRef = useRef(0);
+  const errorRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Use shared traffic hook — single global 1s poll
+  const { stats: traffic } = useRealtimeTraffic(1000);
+
+  // Use shared network data hook — single global poll with settings interval
+  const intervalSecs = Math.max(
+    5,
+    Math.min(settings.refresh_interval_secs || 10, 60)
+  );
+  const { networkStatus, ipInfo } = useNetworkData(intervalSecs, settings.show_geoip);
 
   // Load persisted settings
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
 
-  // Initial data fetch and periodic refresh with retry
+  // Derive error state from network data (replaces old retry logic)
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        setError(null);
+    if (networkStatus === null && ipInfo === null) {
+      // Still loading or both failed — no action needed, hook handles polling
+    }
+    // Clear error when we get successful data
+    if (networkStatus || ipInfo) {
+      setError(null);
+      retryCountRef.current = 0;
+    }
+  }, [networkStatus, ipInfo]);
 
-        // Fetch both in parallel for better performance
-        const [status, ip] = await Promise.all([
-          invoke<NetworkStatus>("get_network_status"),
-          invoke<IPInfo>("get_ip_info", {
-            include_geoip: settings.show_geoip,
-          }),
-        ]);
-
-        setNetworkStatus(status);
-        setIpInfo(ip);
-
-        // Reset retry count on success
-        setRetryCount(0);
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : "获取网络状态失败";
-        console.error("Failed to fetch initial data:", err);
-        setError(errorMsg);
-
-        // Exponential backoff retry (max 3 retries)
-        if (retryCount < 3) {
-          const delay = Math.pow(2, retryCount) * 1000;
-          setTimeout(() => {
-            setRetryCount(prev => prev + 1);
-          }, delay);
-        }
+  // Cleanup retry timer on unmount
+  useEffect(() => {
+    return () => {
+      if (errorRetryTimerRef.current) {
+        clearTimeout(errorRetryTimerRef.current);
       }
     };
-
-    // Initial fetch
-    fetchData();
-
-    // Avoid over-polling public IP / geoip with bounds checking
-    const intervalMs = Math.max(
-      5000,
-      Math.min(
-        (settings.refresh_interval_secs || 10) * 1000,
-        60000 // Max 60 seconds
-      )
-    );
-    const interval = setInterval(fetchData, intervalMs);
-
-    return () => clearInterval(interval);
-  }, [settings.refresh_interval_secs, settings.show_geoip, retryCount]);
-
-  // Poll for real-time traffic
-  useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const stats = await invoke<TrafficStats>("get_realtime_traffic");
-        setTraffic(stats);
-      } catch (error) {
-        console.error("Failed to fetch traffic stats:", error);
-        // Don't show error for traffic as it's realtime and can recover
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
   }, []);
 
   // Format location string
-  const getLocationString = () => {
+  const getLocationString = useCallback(() => {
     if (!settings.show_geoip) return "已关闭";
 
     const geoip = ipInfo?.ipv4_geoip;
@@ -126,7 +64,7 @@ function App() {
       return `${geoip.country} ${geoip.region} ${geoip.city}`;
     }
     return "正在获取位置...";
-  };
+  }, [settings.show_geoip, ipInfo?.ipv4_geoip]);
 
   const statusBarProps = {
     networkStatus: (networkStatus?.status === "normal" ? "normal" : "abnormal") as "normal" | "abnormal",

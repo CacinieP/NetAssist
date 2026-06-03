@@ -10,14 +10,16 @@ export interface NetworkStatus {
 
 export interface IPInfo {
   ipv4?: string;
-  ipv4_type: string;
-  ipv4_geoip: any;
+  ipv4_type?: string;
+  ipv4_geoip?: any;
   ipv6?: string;
-  ipv6_type: string;
-  ipv6_geoip: any;
-  has_ipv4: boolean;
-  has_ipv6: boolean;
-  dual_stack: boolean;
+  ipv6_type?: string;
+  ipv6_geoip?: any;
+  local_ipv4?: string;
+  local_ipv6?: string;
+  has_ipv4?: boolean;
+  has_ipv6?: boolean;
+  dual_stack?: boolean;
 }
 
 let globalNetworkListeners: Set<(status: NetworkStatus, ipInfo: IPInfo) => void> = new Set();

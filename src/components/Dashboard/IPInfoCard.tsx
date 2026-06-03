@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw } from "lucide-react";
 import { useSettingsStore } from "../../store/settingsStore";
@@ -27,20 +27,9 @@ export default function IPInfoCard() {
 
   const [ipInfo, setIpInfo] = useState<IPInfo>({});
   const [refreshing, setRefreshing] = useState(false);
+  const errorCountRef = useRef(0);
 
-  useEffect(() => {
-    // Initial fetch
-    fetchIPInfo();
-
-    // Avoid over-polling public IP / geoip
-    const intervalMs = Math.max(5000, (settings.refresh_interval_secs || 10) * 1000);
-    const interval = setInterval(fetchIPInfo, intervalMs);
-
-    return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.refresh_interval_secs, settings.show_geoip]);
-
-  const fetchIPInfo = async () => {
+  const fetchIPInfo = useCallback(async () => {
     setRefreshing(true);
     try {
       const info = await invoke<any>("get_ip_info", {
@@ -56,20 +45,29 @@ export default function IPInfoCard() {
         local_ipv4: info.local_ipv4 || undefined,
         local_ipv6: info.local_ipv6 || undefined,
       });
+      errorCountRef.current = 0;
     } catch (error) {
       console.error("Failed to fetch IP info:", error);
-      // Clear geoip to avoid showing stale data
-      setIpInfo(prev => ({
-        ...prev,
-        ipv4: undefined,
-        ipv6: undefined,
-        ipv4_geoip: undefined,
-        ipv6_geoip: undefined,
-      }));
+      // Only clear data after 3 consecutive failures (avoid flash on transient errors)
+      errorCountRef.current += 1;
+      if (errorCountRef.current >= 3) {
+        setIpInfo({});
+      }
     } finally {
       setRefreshing(false);
     }
-  };
+  }, [settings.show_geoip]);
+
+  useEffect(() => {
+    // Initial fetch
+    fetchIPInfo();
+
+    // Avoid over-polling public IP / geoip
+    const intervalMs = Math.max(5000, (settings.refresh_interval_secs || 10) * 1000);
+    const interval = setInterval(fetchIPInfo, intervalMs);
+
+    return () => clearInterval(interval);
+  }, [settings.refresh_interval_secs, settings.show_geoip, fetchIPInfo]);
 
   // Format location for display
   const formatLocation = (geoip?: { country: string; city: string; region: string }, type?: string) => {
