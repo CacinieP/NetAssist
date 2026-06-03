@@ -40,10 +40,17 @@ export default function Settings() {
   // Handle refresh interval change with validation
   const handleRefreshIntervalChange = (value: string) => {
     const num = parseInt(value, 10);
+    if (isNaN(num)) {
+      setValidationErrors(prev => ({
+        ...prev,
+        refresh_interval_secs: '请输入有效的数字'
+      }));
+      return; // Don't update state with NaN
+    }
     setLocalSettings(prev => ({ ...prev, refresh_interval_secs: num }));
     setSaveSuccess(false);
 
-    if (isNaN(num) || num < 1 || num > 3600) {
+    if (num < 1 || num > 3600) {
       setValidationErrors(prev => ({
         ...prev,
         refresh_interval_secs: '刷新间隔必须在 1-3600 秒之间'
@@ -56,10 +63,17 @@ export default function Settings() {
   // Handle traffic limit change with validation
   const handleTrafficLimitChange = (value: string) => {
     const num = parseFloat(value);
+    if (isNaN(num)) {
+      setValidationErrors(prev => ({
+        ...prev,
+        traffic_limit_gb: '请输入有效的数字'
+      }));
+      return; // Don't update state with NaN
+    }
     setLocalSettings(prev => ({ ...prev, traffic_limit_gb: num }));
     setSaveSuccess(false);
 
-    if (isNaN(num) || num < 0.1 || num > 10000) {
+    if (num < 0.1 || num > 10000) {
       setValidationErrors(prev => ({
         ...prev,
         traffic_limit_gb: '流量限制必须在 0.1-10000 GB 之间'

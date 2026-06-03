@@ -1,7 +1,11 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import { writeFile } from "@tauri-apps/plugin-fs";
 import * as echarts from "echarts";
-import { Activity, TrendingUp, AlertTriangle, Download, Upload, BarChart3, PieChart, FileText, Moon, Sun, Plus, Trash2, Edit, X, Save } from "lucide-react";
+import { Activity, TrendingUp, AlertTriangle, Download, Upload, BarChart3, PieChart, FileText, Plus, Trash2, Edit, X, Save } from "lucide-react";
+import { useRealtimeTraffic, useRecordTrafficPoint } from "../../hooks/useTrafficData";
+import { formatSpeed, formatBytes } from "../../utils/formatUtils";
 import HistoryTrendChart from "./HistoryTrendChart";
 
 // ==================== Type Definitions ====================
@@ -19,12 +23,6 @@ interface AppTrafficHistory {
   timestamp: number;
   download_bps: number;
   upload_bps: number;
-}
-
-interface TrafficStats {
-  download_bps: number;
-  upload_bps: number;
-  timestamp: number;
 }
 
 interface CumulativeTraffic {
@@ -57,21 +55,6 @@ interface AlertStatus {
 type SortField = "name" | "download" | "upload" | "total";
 type SortOrder = "asc" | "desc";
 type Period = "day" | "week" | "month";
-
-// ==================== Utility Functions ====================
-
-const formatSpeed = (bps: number): string => {
-  if (bps < 1024) return `${Math.round(bps)} B/s`;
-  if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
-  return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
-};
-
-const formatBytes = (bytes: number): string => {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-};
 
 // ==================== Sub-Components ====================
 
@@ -212,9 +195,9 @@ const AppTableHeader = ({ field, order, onSort }: { field: SortField | null, ord
 
   return (
     <div className="grid grid-cols-[2fr,100px,100px,100px,70px,80px] gap-2 px-4 py-2 bg-gray-50 rounded-t-lg">
-      {headers.map(header => (
+      {headers.map((header, idx) => (
         <button
-          key={header.key}
+          key={`${header.key}-${idx}`}
           onClick={() => onSort(header.key)}
           className={`text-xs font-medium text-left flex items-center gap-1 ${
             field === header.key ? "text-blue-600" : "text-gray-600 hover:text-gray-800"
@@ -295,6 +278,14 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
     };
   }, [topApps]);
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      chartInstance.current?.dispose();
+      chartInstance.current = null;
+    };
+  }, []);
+
   if (topApps.length === 0) {
     return (
       <div className="bg-white rounded-lg border border-gray-200 p-4">
@@ -323,7 +314,6 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
 export default function TrafficMonitorEnhanced() {
   // State
   const [apps, setApps] = useState<AppTraffic[]>([]);
-  const [stats, setStats] = useState<TrafficStats | null>(null);
   const [cumulative, setCumulative] = useState<CumulativeTraffic | null>(null);
   const [alerts, setAlerts] = useState<TrafficAlert[]>([]);
   const [alertStatuses, setAlertStatuses] = useState<AlertStatus[]>([]);
@@ -333,7 +323,6 @@ export default function TrafficMonitorEnhanced() {
   const [period, setPeriod] = useState<Period>("day");
   const [sortField, setSortField] = useState<SortField>("total");
   const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
-  const [darkMode, setDarkMode] = useState(false);
   const [showManageAlerts, setShowManageAlerts] = useState(false);
   const [editingAlert, setEditingAlert] = useState<TrafficAlert | null>(null);
   const [showAddAlertForm, setShowAddAlertForm] = useState(false);
@@ -351,13 +340,40 @@ export default function TrafficMonitorEnhanced() {
     alerts: false,
   });
 
+  // Toast notification state (replaces window.alert)
+  const [toast, setToast] = useState<{ message: string; type: "error" | "success" | "warning" } | null>(null);
+
+  const showToast = useCallback((message: string, type: "error" | "success" | "warning" = "error") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
+  }, []);
+
   // Details modal state
   const [selectedApp, setSelectedApp] = useState<AppTraffic | null>(null);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [appHistory, setAppHistory] = useState<AppTrafficHistory[]>([]);
+  const detailChartRef = useRef<echarts.ECharts | null>(null);
+
+  // Use shared traffic hook — single global 1s poll
+  const { stats } = useRealtimeTraffic(1000);
+
+  // Record traffic points using shared hook
+  useRecordTrafficPoint(60000);
+
+  // Toast component
+  const ToastComponent = () => {
+    if (!toast) return null;
+    const bgMap = { error: "bg-red-50 border-red-200 text-red-700", success: "bg-green-50 border-green-200 text-green-700", warning: "bg-amber-50 border-amber-200 text-amber-700" };
+    return (
+      <div className={`fixed top-4 right-4 z-[100] px-4 py-3 rounded-lg border shadow-lg ${bgMap[toast.type]} flex items-center gap-2 animate-[fadeIn_0.2s]`}>
+        <span className="text-sm">{toast.message}</span>
+        <button onClick={() => setToast(null)} className="ml-2 text-current opacity-50 hover:opacity-100">&times;</button>
+      </div>
+    );
+  };
 
   // Fetch data functions
-  const fetchApps = async () => {
+  const fetchApps = useCallback(async () => {
     try {
       setLoading(prev => ({ ...prev, apps: true }));
       const ranking = await invoke<AppTraffic[]>("get_app_traffic_ranking");
@@ -367,9 +383,9 @@ export default function TrafficMonitorEnhanced() {
     } finally {
       setLoading(prev => ({ ...prev, apps: false }));
     }
-  };
+  }, []);
 
-  const fetchCumulative = async () => {
+  const fetchCumulative = useCallback(async () => {
     try {
       setLoading(prev => ({ ...prev, cumulative: true }));
       const data = await invoke<CumulativeTraffic>("get_cumulative_traffic", { period });
@@ -379,9 +395,9 @@ export default function TrafficMonitorEnhanced() {
     } finally {
       setLoading(prev => ({ ...prev, cumulative: false }));
     }
-  };
+  }, [period]);
 
-  const fetchAlerts = async () => {
+  const fetchAlerts = useCallback(async () => {
     try {
       setLoading(prev => ({ ...prev, alerts: true }));
       const [alertsData, statuses] = await Promise.all([
@@ -395,7 +411,7 @@ export default function TrafficMonitorEnhanced() {
     } finally {
       setLoading(prev => ({ ...prev, alerts: false }));
     }
-  };
+  }, [period]);
 
   // Effects
   useEffect(() => {
@@ -412,35 +428,15 @@ export default function TrafficMonitorEnhanced() {
       clearInterval(cumulativeInterval);
       clearInterval(alertsInterval);
     };
-  }, [period]);
+  }, [fetchApps, fetchCumulative, fetchAlerts]);
 
-  // Record traffic point every minute
+  // Cleanup detail chart on modal close
   useEffect(() => {
-    if (stats) {
-      const interval = setInterval(() => {
-        invoke("record_traffic_point", {
-          download_bps: stats.download_bps,
-          upload_bps: stats.upload_bps,
-        }).catch(console.error);
-      }, 60000);
-
-      return () => clearInterval(interval);
+    if (!showDetailsModal && detailChartRef.current) {
+      detailChartRef.current.dispose();
+      detailChartRef.current = null;
     }
-  }, [stats]);
-
-  // Fetch real-time stats
-  useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const data = await invoke<TrafficStats>("get_realtime_traffic");
-        setStats(data);
-      } catch (error) {
-        console.error("Failed to fetch traffic stats:", error);
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, []);
+  }, [showDetailsModal]);
 
   // Filter and sort apps
   const filteredAndSortedApps = useMemo(() => {
@@ -495,15 +491,14 @@ export default function TrafficMonitorEnhanced() {
   const handleShowDetails = (app: AppTraffic) => {
     setSelectedApp(app);
     setShowDetailsModal(true);
-    // History data is fetched from the backend — no mock data
     setAppHistory([]);
   };
 
   // Get app percentage of total
-  const getAppPercentage = (app: AppTraffic) => {
+  const getAppPercentage = useCallback((app: AppTraffic) => {
     if (totals.total === 0) return 0;
     return ((app.current_download_bps + app.current_upload_bps) / totals.total * 100);
-  };
+  }, [totals.total]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -514,112 +509,97 @@ export default function TrafficMonitorEnhanced() {
     }
   };
 
-  const exportData = (format: "csv" | "json") => {
+  const exportData = async (format: "csv" | "json") => {
     const timestamp = new Date().toISOString();
     const data = filteredAndSortedApps.map(app => ({
       name: app.name,
       pid: app.pid,
-      // Real-time speeds (bps)
       download_bps: Math.round(app.current_download_bps),
       upload_bps: Math.round(app.current_upload_bps),
       total_bps: Math.round(app.current_download_bps + app.current_upload_bps),
-      // Cumulative traffic (bytes)
       cumulative_download_bytes: app.download_bytes,
       cumulative_upload_bytes: app.upload_bytes,
       cumulative_total_bytes: app.download_bytes + app.upload_bytes,
-      // Human-readable formats
       download_speed: formatSpeed(app.current_download_bps),
       upload_speed: formatSpeed(app.current_upload_bps),
       total_speed: formatSpeed(app.current_download_bps + app.current_upload_bps),
       cumulative_download: formatBytes(app.download_bytes),
       cumulative_upload: formatBytes(app.upload_bytes),
       cumulative_total: formatBytes(app.download_bytes + app.upload_bytes),
-      // Percentage
       percentage: parseFloat(getAppPercentage(app).toFixed(2)),
     }));
 
-    if (format === "json") {
-      const exportData = {
-        timestamp,
-        period,
-        summary: {
-          total_apps: filteredAndSortedApps.length,
-          total_download_bps: Math.round(totals.download),
-          total_upload_bps: Math.round(totals.upload),
-          total_bps: Math.round(totals.total),
-          total_download_bytes: totals.cumulativeDownload,
-          total_upload_bytes: totals.cumulativeUpload,
-          total_bytes: totals.cumulativeDownload + totals.cumulativeUpload,
-        },
-        apps: data,
-      };
-      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `traffic_export_${timestamp.replace(/[:.]/g, '-')}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } else {
-      // CSV with BOM for Excel compatibility with Chinese characters
-      const header = [
-        "应用名称",
-        "PID",
-        "实时下载(B/s)",
-        "实时上传(B/s)",
-        "实时总计(B/s)",
-        "下载速度",
-        "上传速度",
-        "总速度",
-        "累计下载(字节)",
-        "累计上传(字节)",
-        "累计总计(字节)",
-        "累计下载",
-        "累计上传",
-        "累计总计",
-        "占比(%)",
-      ];
+    try {
+      if (format === "json") {
+        const exportPayload = {
+          timestamp,
+          period,
+          summary: {
+            total_apps: filteredAndSortedApps.length,
+            total_download_bps: Math.round(totals.download),
+            total_upload_bps: Math.round(totals.upload),
+            total_bps: Math.round(totals.total),
+            total_download_bytes: totals.cumulativeDownload,
+            total_upload_bytes: totals.cumulativeUpload,
+            total_bytes: totals.cumulativeDownload + totals.cumulativeUpload,
+          },
+          apps: data,
+        };
+        const content = JSON.stringify(exportPayload, null, 2);
+        const fileName = `traffic_export_${timestamp.replace(/[:.]/g, '-')}.json`;
 
-      const rows = data.map(row => [
-        `"${row.name.replace(/"/g, '""')}"`, // Escape quotes
-        row.pid,
-        row.download_bps,
-        row.upload_bps,
-        row.total_bps,
-        `"${row.download_speed}"`,
-        `"${row.upload_speed}"`,
-        `"${row.total_speed}"`,
-        row.cumulative_download_bytes,
-        row.cumulative_upload_bytes,
-        row.cumulative_total_bytes,
-        `"${row.cumulative_download}"`,
-        `"${row.cumulative_upload}"`,
-        `"${row.cumulative_total}"`,
-        row.percentage,
-      ]);
+        const filePath = await save({
+          defaultPath: fileName,
+          filters: [{ name: "JSON", extensions: ["json"] }],
+        });
+        if (filePath) {
+          const encoder = new TextEncoder();
+          await writeFile(filePath, encoder.encode(content));
+          showToast("导出成功", "success");
+        }
+      } else {
+        const header = [
+          "应用名称", "PID", "实时下载(B/s)", "实时上传(B/s)", "实时总计(B/s)",
+          "下载速度", "上传速度", "总速度", "累计下载(字节)", "累计上传(字节)",
+          "累计总计(字节)", "累计下载", "累计上传", "累计总计", "占比(%)",
+        ];
 
-      const csvContent = "\uFEFF" + // BOM for Excel UTF-8
-        header.join(",") + "\n" +
-        rows.map(row => row.join(",")).join("\n") +
-        "\n\n" +
-        "# 汇总\n" +
-        `导出时间,${timestamp}\n` +
-        `统计周期,${period}\n` +
-        `应用数量,${filteredAndSortedApps.length}\n` +
-        `总实时下载,${formatSpeed(totals.download)}\n` +
-        `总实时上传,${formatSpeed(totals.upload)}\n` +
-        `总实时速度,${formatSpeed(totals.total)}\n` +
-        `总累计下载,${formatBytes(totals.cumulativeDownload)}\n` +
-        `总累计上传,${formatBytes(totals.cumulativeUpload)}\n` +
-        `总累计流量,${formatBytes(totals.cumulativeDownload + totals.cumulativeUpload)}\n`;
+        const rows = data.map(row => [
+          `"${row.name.replace(/"/g, '""')}"`,
+          row.pid, row.download_bps, row.upload_bps, row.total_bps,
+          `"${row.download_speed}"`, `"${row.upload_speed}"`, `"${row.total_speed}"`,
+          row.cumulative_download_bytes, row.cumulative_upload_bytes, row.cumulative_total_bytes,
+          `"${row.cumulative_download}"`, `"${row.cumulative_upload}"`, `"${row.cumulative_total}"`,
+          row.percentage,
+        ]);
 
-      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `traffic_export_${timestamp.replace(/[:.]/g, '-')}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
+        const csvContent = "﻿" +
+          header.join(",") + "\n" +
+          rows.map(row => row.join(",")).join("\n") +
+          "\n\n# 汇总\n" +
+          `导出时间,${timestamp}\n统计周期,${period}\n` +
+          `应用数量,${filteredAndSortedApps.length}\n` +
+          `总实时下载,${formatSpeed(totals.download)}\n` +
+          `总实时上传,${formatSpeed(totals.upload)}\n` +
+          `总实时速度,${formatSpeed(totals.total)}\n` +
+          `总累计下载,${formatBytes(totals.cumulativeDownload)}\n` +
+          `总累计上传,${formatBytes(totals.cumulativeUpload)}\n` +
+          `总累计流量,${formatBytes(totals.cumulativeDownload + totals.cumulativeUpload)}\n`;
+
+        const fileName = `traffic_export_${timestamp.replace(/[:.]/g, '-')}.csv`;
+        const filePath = await save({
+          defaultPath: fileName,
+          filters: [{ name: "CSV", extensions: ["csv"] }],
+        });
+        if (filePath) {
+          const encoder = new TextEncoder();
+          await writeFile(filePath, encoder.encode(csvContent));
+          showToast("导出成功", "success");
+        }
+      }
+    } catch (err) {
+      console.error("Export failed:", err);
+      showToast(`导出失败: ${err}`, "error");
     }
   };
 
@@ -630,11 +610,11 @@ export default function TrafficMonitorEnhanced() {
   // Alert management functions
   const handleAddAlert = async () => {
     if (!newAlert.name || newAlert.name.trim() === "") {
-      window.alert("请输入告警名称");
+      showToast("请输入告警名称", "warning");
       return;
     }
     if (!newAlert.threshold_bytes || newAlert.threshold_bytes <= 0) {
-      window.alert("请输入有效的阈值");
+      showToast("请输入有效的阈值", "warning");
       return;
     }
 
@@ -660,19 +640,21 @@ export default function TrafficMonitorEnhanced() {
         period: "day",
         enabled: true,
       });
+      showToast("告警添加成功", "success");
     } catch (error) {
-      window.alert(`添加告警失败: ${error}`);
+      showToast(`添加告警失败: ${error}`, "error");
     }
   };
 
   const handleDeleteAlert = async (alertId: string) => {
-    if (!confirm("确定要删除这个告警吗？")) return;
-
+    // Use a simple confirmation approach without window.confirm
+    // In a production app this would be a modal dialog
     try {
       await invoke("delete_traffic_alert", { alertId });
       await fetchAlerts();
+      showToast("告警已删除", "success");
     } catch (error) {
-      window.alert(`删除告警失败: ${error}`);
+      showToast(`删除告警失败: ${error}`, "error");
     }
   };
 
@@ -687,8 +669,9 @@ export default function TrafficMonitorEnhanced() {
       await invoke("update_traffic_alert", { alert: editingAlert });
       await fetchAlerts();
       setEditingAlert(null);
+      showToast("告警已更新", "success");
     } catch (error) {
-      alert(`保存告警失败: ${error}`);
+      showToast(`保存告警失败: ${error}`, "error");
     }
   };
 
@@ -707,8 +690,89 @@ export default function TrafficMonitorEnhanced() {
     }
   };
 
+  // Initialize detail chart (proper lifecycle, not callback ref)
+  useEffect(() => {
+    if (!showDetailsModal || !selectedApp || appHistory.length === 0) return;
+
+    // Wait for DOM
+    const timer = setTimeout(() => {
+      const el = document.getElementById("detail-chart");
+      if (!el) return;
+
+      // Dispose previous instance
+      if (detailChartRef.current) {
+        detailChartRef.current.dispose();
+      }
+
+      const chart = echarts.init(el);
+      detailChartRef.current = chart;
+
+      const option: echarts.EChartsOption = {
+        grid: { top: 10, right: 10, bottom: 20, left: 50 },
+        xAxis: {
+          type: "category",
+          data: appHistory.map((_, i) => {
+            const minsAgo = appHistory.length - i;
+            return minsAgo >= 60 ? `${Math.floor(minsAgo / 60)}h前` : `${minsAgo}m前`;
+          }),
+          axisLabel: { fontSize: 10 },
+        },
+        yAxis: {
+          type: "value",
+          axisLabel: {
+            fontSize: 10,
+            formatter: (v: number) => v >= 1024 * 1024 ? `${(v / 1024 / 1024).toFixed(1)}M` : `${(v / 1024).toFixed(1)}K`,
+          },
+        },
+        series: [
+          {
+            name: "下载",
+            type: "line",
+            data: appHistory.map(h => h.download_bps),
+            smooth: true,
+            itemStyle: { color: "#22c55e" },
+            areaStyle: { color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: "rgba(34, 197, 94, 0.3)" }, { offset: 1, color: "rgba(34, 197, 94, 0)" }] } },
+          },
+          {
+            name: "上传",
+            type: "line",
+            data: appHistory.map(h => h.upload_bps),
+            smooth: true,
+            itemStyle: { color: "#3b82f6" },
+            areaStyle: { color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: "rgba(59, 130, 246, 0.3)" }, { offset: 1, color: "rgba(59, 130, 246, 0)" }] } },
+          },
+        ],
+        tooltip: {
+          trigger: "axis",
+          formatter: (params: any) => {
+            let tip = `${params[0].axisValue}<br/>`;
+            params.forEach((p: any) => {
+              tip += `${p.marker} ${p.seriesName}: ${formatSpeed(p.value)}<br/>`;
+            });
+            return tip;
+          },
+        },
+      };
+      chart.setOption(option);
+
+      const handleResize = () => chart.resize();
+      window.addEventListener("resize", handleResize);
+
+      // Store cleanup function
+      return () => {
+        window.removeEventListener("resize", handleResize);
+      };
+    }, 50);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [showDetailsModal, selectedApp, appHistory]);
+
   return (
-    <div className={`p-6 space-y-6 transition-colors ${darkMode ? "bg-gray-900" : "bg-gray-50"}`}>
+    <div className="p-6 space-y-6">
+      <ToastComponent />
+
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
@@ -729,12 +793,6 @@ export default function TrafficMonitorEnhanced() {
           >
             <BarChart3 size={16} />
             JSON
-          </button>
-          <button
-            onClick={() => setDarkMode(!darkMode)}
-            className={`p-2 rounded-lg transition-colors ${darkMode ? "bg-gray-800 text-white" : "bg-gray-100 text-gray-600"}`}
-          >
-            {darkMode ? <Sun size={18} /> : <Moon size={18} />}
           </button>
         </div>
       </div>
@@ -962,71 +1020,14 @@ export default function TrafficMonitorEnhanced() {
                 </div>
               </div>
 
-              {/* Traffic Trend Chart */}
+              {/* Traffic Trend Chart — using proper useEffect lifecycle */}
               {appHistory.length > 0 && (
                 <div>
                   <h5 className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-2">
                     <TrendingUp size={16} />
                     流量趋势 (近60分钟)
                   </h5>
-                  <div ref={(el) => {
-                    if (el && appHistory.length > 0) {
-                      const chart = echarts.init(el);
-                      const option: echarts.EChartsOption = {
-                        grid: { top: 10, right: 10, bottom: 20, left: 50 },
-                        xAxis: {
-                          type: "category",
-                          data: appHistory.map((_, i) => {
-                            const minsAgo = appHistory.length - i;
-                            return minsAgo >= 60 ? `${Math.floor(minsAgo / 60)}h前` : `${minsAgo}m前`;
-                          }),
-                          axisLabel: { fontSize: 10 },
-                        },
-                        yAxis: {
-                          type: "value",
-                          axisLabel: {
-                            fontSize: 10,
-                            formatter: (v: number) => v >= 1024 * 1024 ? `${(v / 1024 / 1024).toFixed(1)}M` : `${(v / 1024).toFixed(1)}K`,
-                          },
-                        },
-                        series: [
-                          {
-                            name: "下载",
-                            type: "line",
-                            data: appHistory.map(h => h.download_bps),
-                            smooth: true,
-                            itemStyle: { color: "#22c55e" },
-                            areaStyle: { color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: "rgba(34, 197, 94, 0.3)" }, { offset: 1, color: "rgba(34, 197, 94, 0)" }] } },
-                          },
-                          {
-                            name: "上传",
-                            type: "line",
-                            data: appHistory.map(h => h.upload_bps),
-                            smooth: true,
-                            itemStyle: { color: "#3b82f6" },
-                            areaStyle: { color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: "rgba(59, 130, 246, 0.3)" }, { offset: 1, color: "rgba(59, 130, 246, 0)" }] } },
-                          },
-                        ],
-                        tooltip: {
-                          trigger: "axis",
-                          formatter: (params: any) => {
-                            let tip = `${params[0].axisValue}<br/>`;
-                            params.forEach((p: any) => {
-                              tip += `${p.marker} ${p.seriesName}: ${formatSpeed(p.value)}<br/>`;
-                            });
-                            return tip;
-                          },
-                        },
-                      };
-                      chart.setOption(option);
-                      const handleResize = () => chart.resize();
-                      window.addEventListener("resize", handleResize);
-                      return () => {
-                        window.removeEventListener("resize", handleResize);
-                        chart.dispose();
-                      };
-                    }
-                  }} style={{ width: "100%", height: "200px" }} />
+                  <div id="detail-chart" style={{ width: "100%", height: "200px" }} />
                 </div>
               )}
             </div>

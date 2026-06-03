@@ -1,12 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as echarts from "echarts";
-import { invoke } from "@tauri-apps/api/core";
-
-interface TrafficStats {
-  download_bps: number;
-  upload_bps: number;
-  timestamp: number;
-}
+import { useRealtimeTraffic } from "../../hooks/useTrafficData";
 
 export default function TrafficChart() {
   const chartRef = useRef<HTMLDivElement>(null);
@@ -14,13 +8,15 @@ export default function TrafficChart() {
   const dataRef = useRef<{ time: number; download: number; upload: number }[]>([]);
   const [dataError, setDataError] = useState(false);
 
+  // Use shared traffic hook
+  const { stats } = useRealtimeTraffic(1000);
+
+  // Initialize chart once
   useEffect(() => {
     if (!chartRef.current) return;
 
-    // Initialize chart
     chartInstance.current = echarts.init(chartRef.current);
 
-    // Initial Empty Option
     const option: echarts.EChartsOption = {
       title: {
         text: "实时流量（Real-time）",
@@ -36,7 +32,10 @@ export default function TrafficChart() {
         formatter: (params: any) => {
           if (!params[0]) return "";
           const time = new Date(params[0].value[0]).toLocaleTimeString();
-          return `${time}<br/>下行: ${params[0].value[1].toFixed(2)} KB/s<br/>上行: ${params[1].value[1].toFixed(2)} KB/s`;
+          const dl = params[0].value[1];
+          const ul = params[1].value[1];
+          const fmtVal = (v: number) => v >= 1024 ? `${(v / 1024).toFixed(2)} MB/s` : `${v.toFixed(2)} KB/s`;
+          return `${time}<br/>下行: ${fmtVal(dl)}<br/>上行: ${fmtVal(ul)}`;
         },
       },
       legend: {
@@ -59,7 +58,10 @@ export default function TrafficChart() {
       yAxis: {
         type: "value",
         axisLabel: {
-          formatter: "{value} KB/s",
+          formatter: (value: number) => {
+            if (value >= 1024) return `${(value / 1024).toFixed(0)} MB/s`;
+            return `${value.toFixed(0)} KB/s`;
+          },
         },
       },
       series: [
@@ -97,53 +99,40 @@ export default function TrafficChart() {
 
     chartInstance.current.setOption(option);
 
-    // Fetch and update loop
-    const fetchData = async () => {
-      try {
-        const stats = await invoke<TrafficStats>("get_realtime_traffic");
-        const now = Date.now();
-        const downloadKB = stats.download_bps / 1024;
-        const uploadKB = stats.upload_bps / 1024;
-
-        // Maintain array of last 60 seconds (approx)
-        dataRef.current.push({ time: now, download: downloadKB, upload: uploadKB });
-        if (dataRef.current.length > 60) {
-          dataRef.current.shift();
-        }
-
-        // Update chart
-        chartInstance.current?.setOption({
-          series: [
-            {
-              data: dataRef.current.map(d => [d.time, d.download])
-            },
-            {
-              data: dataRef.current.map(d => [d.time, d.upload])
-            }
-          ]
-        });
-
-      } catch (error) {
-        console.error("Chart data fetch failed", error);
-        setDataError(true);
-        // Don't update chart data on error, but keep existing display
-      }
-    };
-
-    const interval = setInterval(fetchData, 1000);
-
-    // Handle resize
     const handleResize = () => {
       chartInstance.current?.resize();
     };
     window.addEventListener("resize", handleResize);
 
     return () => {
-      clearInterval(interval);
       window.removeEventListener("resize", handleResize);
       chartInstance.current?.dispose();
+      chartInstance.current = null;
     };
   }, []);
+
+  // Update chart data when traffic stats change
+  useEffect(() => {
+    if (!stats || !chartInstance.current) return;
+
+    const now = Date.now();
+    const downloadKB = stats.download_bps / 1024;
+    const uploadKB = stats.upload_bps / 1024;
+
+    dataRef.current.push({ time: now, download: downloadKB, upload: uploadKB });
+    if (dataRef.current.length > 60) {
+      dataRef.current.shift();
+    }
+
+    setDataError(false);
+
+    chartInstance.current.setOption({
+      series: [
+        { data: dataRef.current.map(d => [d.time, d.download]) },
+        { data: dataRef.current.map(d => [d.time, d.upload]) },
+      ],
+    });
+  }, [stats]);
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-4 relative">

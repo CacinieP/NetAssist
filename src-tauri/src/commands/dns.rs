@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Instant;
 use tokio::net::UdpSocket;
-use trust_dns_client::rr::Name;
+use hickory_proto::rr::Name;
 
 /// Get system DNS servers
 #[tauri::command]

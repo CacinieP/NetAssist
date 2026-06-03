@@ -1,6 +1,6 @@
 [package]
 name = "netassist"
-version = "0.2.0"
+version = "0.3.0"
 description = "A network monitoring and troubleshooting tool"
 authors = ["you"]
 license = ""
@@ -16,6 +16,7 @@ tauri-build = { version = "2.0", features = [] }
 tauri = { version = "2.1", features = ["tray-icon"] }
 tauri-plugin-shell = "2.0"
 tauri-plugin-fs = "2.0"
+tauri-plugin-dialog = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.40", features = ["full"] }
@@ -28,7 +29,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Networking
 pnet = "0.35"
 socket2 = "0.5"
-trust-dns-client = "0.23" # Deprecated: consider migrating to trust-dns-resolver 0.24
+hickory-proto = "0.25"
 reqwest = { version = "0.12", features = ["json"] }
 
 # System information
@@ -37,7 +38,6 @@ sysinfo = "0.32"
 # Utilities
 cfg-if = "1.0"
 rand = "0.9"
-lazy_static = "1.5" # Deprecated: consider migrating to std::sync::OnceLock (Rust 1.70+)
 dirs = "5.0"
 
 [features]

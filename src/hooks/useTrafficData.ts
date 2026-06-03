@@ -1,23 +1,25 @@
 import { useState, useEffect, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 
 // TrafficStats type shared across components
 export interface TrafficStats {
   download_bps: number;
   upload_bps: number;
-  timestamp?: string;
+  timestamp?: number;
 }
 
-// Global singleton to ensure only one polling interval
+// Global singleton to ensure only one polling interval per frequency bucket
 let globalTrafficData: TrafficStats | null = null;
 let globalTrafficListeners: Set<(data: TrafficStats) => void> = new Set();
 let globalTrafficInterval: ReturnType<typeof setInterval> | null = null;
 
-function startGlobalTrafficPolling() {
-  if (globalTrafficInterval) return; // Already polling
+function startGlobalTrafficPolling(intervalMs: number = 1000) {
+  if (globalTrafficInterval) {
+    clearInterval(globalTrafficInterval);
+  }
 
-  globalTrafficInterval = setInterval(async () => {
+  const poll = async () => {
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
       const data = await invoke<TrafficStats>('get_realtime_traffic');
       globalTrafficData = data;
       for (const listener of globalTrafficListeners) {
@@ -26,7 +28,11 @@ function startGlobalTrafficPolling() {
     } catch {
       // Silently ignore — will retry next interval
     }
-  }, 1000);
+  };
+
+  // Initial poll
+  poll();
+  globalTrafficInterval = setInterval(poll, intervalMs);
 }
 
 function stopGlobalTrafficPolling() {
@@ -41,7 +47,7 @@ function stopGlobalTrafficPolling() {
  * Polls get_realtime_traffic once per second globally,
  * no matter how many components use this hook.
  */
-export function useRealtimeTraffic() {
+export function useRealtimeTraffic(intervalMs: number = 1000) {
   const [stats, setStats] = useState<TrafficStats | null>(globalTrafficData);
 
   useEffect(() => {
@@ -51,7 +57,7 @@ export function useRealtimeTraffic() {
     }
 
     globalTrafficListeners.add(setStats);
-    startGlobalTrafficPolling();
+    startGlobalTrafficPolling(intervalMs);
 
     return () => {
       globalTrafficListeners.delete(setStats);
@@ -59,7 +65,7 @@ export function useRealtimeTraffic() {
         stopGlobalTrafficPolling();
       }
     };
-  }, []);
+  }, [intervalMs]);
 
   return { stats };
 }
@@ -78,7 +84,6 @@ export function useRecordTrafficPoint(intervalMs: number = 60000) {
       const current = statsRef.current;
       if (current) {
         try {
-          const { invoke } = await import('@tauri-apps/api/core');
           await invoke('record_traffic_point', {
             download_bps: current.download_bps,
             upload_bps: current.upload_bps,

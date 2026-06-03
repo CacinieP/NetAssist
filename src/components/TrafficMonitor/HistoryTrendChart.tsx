@@ -53,13 +53,29 @@ export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrend
     fetchHistory();
   }, [hours]);
 
-  // Initialize and update chart
+  // Initialize chart instance + resize listener (once)
   useEffect(() => {
     if (!chartRef.current) return;
 
     if (!chartInstance.current) {
       chartInstance.current = echarts.init(chartRef.current);
     }
+
+    const handleResize = () => {
+      chartInstance.current?.resize();
+    };
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      chartInstance.current?.dispose();
+      chartInstance.current = null;
+    };
+  }, []);
+
+  // Update chart data when history/hours change
+  useEffect(() => {
+    if (!chartInstance.current) return;
 
     if (!history || history.data.length === 0) {
       chartInstance.current.clear();
@@ -85,7 +101,8 @@ export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrend
         formatter: (params: any) => {
           if (!params[0]) return "";
           const time = new Date(params[0].value[0]).toLocaleString();
-          return `${time}<br/>下载: ${params[0].value[1].toFixed(2)} KB/s<br/>上传: ${params[1].value[1].toFixed(2)} KB/s`;
+          const fmtVal = (v: number) => v >= 1024 ? `${(v / 1024).toFixed(2)} MB/s` : `${v.toFixed(2)} KB/s`;
+          return `${time}<br/>下载: ${fmtVal(params[0].value[1])}<br/>上传: ${fmtVal(params[1].value[1])}`;
         },
       },
       legend: {
@@ -113,7 +130,10 @@ export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrend
       yAxis: {
         type: "value",
         axisLabel: {
-          formatter: (value: number) => `${value.toFixed(0)} KB/s`,
+          formatter: (value: number) => {
+            if (value >= 1024) return `${(value / 1024).toFixed(0)} MB/s`;
+            return `${value.toFixed(0)} KB/s`;
+          },
         },
       },
       dataZoom: [
@@ -164,24 +184,7 @@ export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrend
     };
 
     chartInstance.current.setOption(option, true);
-
-    // Handle resize
-    const handleResize = () => {
-      chartInstance.current?.resize();
-    };
-    window.addEventListener("resize", handleResize);
-
-    return () => {
-      window.removeEventListener("resize", handleResize);
-    };
   }, [history, hours]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      chartInstance.current?.dispose();
-    };
-  }, []);
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-4">
