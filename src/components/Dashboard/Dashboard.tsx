@@ -1,15 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useRealtimeTraffic, useRecordTrafficPoint } from "../../hooks/useTrafficData";
+import { formatSpeed, formatBytes } from "../../utils/formatUtils";
 import NetworkStatus from "./NetworkStatus";
 import IPInfoCard from "./IPInfoCard";
 import MetricCard from "./MetricCard";
 import TrafficChart from "./TrafficChart";
-
-interface TrafficStats {
-  download_bps: number;
-  upload_bps: number;
-  timestamp: number;
-}
 
 interface CumulativeTraffic {
   total_download_bytes: number;
@@ -38,14 +34,6 @@ interface ConnectionInfo {
   pid: number;
 }
 
-// Utility function to format bytes
-const formatBytes = (bytes: number): string => {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-};
-
 export default function Dashboard() {
   const [bandwidth, setBandwidth] = useState("加载中...");
   const [latency, setLatency] = useState("加载中...");
@@ -63,76 +51,29 @@ export default function Dashboard() {
     cumulative: null as string | null,
   });
 
-  const fetchCumulative = async () => {
+  // Use shared traffic hook — no more independent polling
+  const { stats: traffic } = useRealtimeTraffic(1000);
+
+  // Record traffic points every 60 seconds using shared hook
+  useRecordTrafficPoint(60000);
+
+  // Fetch cumulative traffic — useCallback with period ref to avoid stale closures
+  const periodRef = useRef(period);
+  periodRef.current = period;
+
+  const fetchCumulative = useCallback(async () => {
     try {
-      const data = await invoke<CumulativeTraffic>("get_cumulative_traffic", { period });
+      const data = await invoke<CumulativeTraffic>("get_cumulative_traffic", { period: periodRef.current });
       setCumulative(data);
       setErrors(prev => ({ ...prev, cumulative: null }));
     } catch (error) {
       console.error("Failed to fetch cumulative traffic:", error);
       setErrors(prev => ({ ...prev, cumulative: "获取失败" }));
     }
-  };
+  }, []);
 
-  // Function to record a traffic data point
-  const recordTrafficPoint = async () => {
-    try {
-      const traffic = await invoke<TrafficStats>("get_realtime_traffic");
-      await invoke("record_traffic_point", {
-        download_bps: traffic.download_bps,
-        upload_bps: traffic.upload_bps,
-      });
-      console.log("Recorded traffic point:", traffic);
-      // After recording, refresh cumulative data
-      fetchCumulative();
-    } catch (err) {
-      console.error("Failed to record traffic point:", err);
-    }
-  };
-
-  useEffect(() => {
-    // Initial fetch
-    fetchMetrics();
-    fetchCumulative();
-
-    // Record initial traffic point after a short delay
-    const initialRecordTimeout = setTimeout(() => {
-      recordTrafficPoint();
-    }, 1000);
-
-    // Poll for updates (every 2 seconds)
-    const interval = setInterval(fetchMetrics, 2000);
-
-    // Poll cumulative traffic every 5 seconds
-    const cumulativeInterval = setInterval(fetchCumulative, 5000);
-
-    // Record traffic data points every 60 seconds for history
-    const recordInterval = setInterval(recordTrafficPoint, 60000);
-
-    return () => {
-      clearTimeout(initialRecordTimeout);
-      clearInterval(interval);
-      clearInterval(cumulativeInterval);
-      clearInterval(recordInterval);
-    };
-  }, [period]);
-
-  const fetchMetrics = async () => {
-    // Fetch all metrics in parallel using Promise.allSettled
-    // This ensures one failure doesn't block others
+  const fetchMetrics = useCallback(async () => {
     await Promise.allSettled([
-      invoke<TrafficStats>("get_realtime_traffic")
-        .then(traffic => {
-          const totalBps = traffic.download_bps + traffic.upload_bps;
-          setBandwidth(`${formatSpeed(totalBps)}`);
-          setErrors(prev => ({ ...prev, bandwidth: null }));
-        })
-        .catch(err => {
-          console.error("Bandwidth fetch failed:", err);
-          setErrors(prev => ({ ...prev, bandwidth: "获取失败" }));
-          setBandwidth("错误");
-        }),
-
       invoke<HttpConnectivityResult>("test_http_connectivity", { url: null })
         .then(http => {
           setLatency(http.success ? `${Math.round(http.latency_ms)}` : "超时");
@@ -166,13 +107,38 @@ export default function Dashboard() {
           setConnections("错误");
         }),
     ]);
-  };
+  }, []);
 
-  const formatSpeed = (bps: number) => {
-    if (bps < 1024) return `${Math.round(bps)} B/s`;
-    if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
-    return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
-  };
+  // Fetch metrics when bandwidth changes (from shared traffic hook)
+  useEffect(() => {
+    if (traffic) {
+      const totalBps = traffic.download_bps + traffic.upload_bps;
+      setBandwidth(formatSpeed(totalBps));
+      setErrors(prev => ({ ...prev, bandwidth: null }));
+    }
+  }, [traffic]);
+
+  useEffect(() => {
+    // Initial fetch
+    fetchMetrics();
+    fetchCumulative();
+
+    // Poll for metric updates (every 2 seconds) — traffic is handled by shared hook
+    const interval = setInterval(fetchMetrics, 2000);
+
+    // Poll cumulative traffic every 5 seconds
+    const cumulativeInterval = setInterval(fetchCumulative, 5000);
+
+    return () => {
+      clearInterval(interval);
+      clearInterval(cumulativeInterval);
+    };
+  }, [fetchMetrics, fetchCumulative]);
+
+  // Re-fetch cumulative when period changes
+  useEffect(() => {
+    fetchCumulative();
+  }, [period, fetchCumulative]);
 
   return (
     <div className="p-6 space-y-6">

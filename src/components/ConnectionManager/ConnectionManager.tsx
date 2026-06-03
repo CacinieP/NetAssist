@@ -99,7 +99,7 @@ export default function ConnectionManager() {
               <span className="text-blue-600 font-mono text-sm w-12">IPv4:</span>
               <span className="font-mono text-sm text-gray-800">{ipInfo?.ipv4 || "获取中..."}</span>
             </div>
-            <div className="flex items-start gap-3 pl-15">
+            <div className="flex items-start gap-3 pl-16">
               <span className="text-gray-500 text-sm">📍</span>
               <span className="text-gray-600 text-sm">{formatLocation(ipInfo?.ipv4_geoip)}</span>
             </div>
@@ -110,7 +110,7 @@ export default function ConnectionManager() {
               <span className="text-purple-600 font-mono text-sm w-12">IPv6:</span>
               <span className="font-mono text-sm text-gray-800">{ipInfo?.ipv6 || "未连接"}</span>
             </div>
-            <div className="flex items-start gap-3 pl-15">
+            <div className="flex items-start gap-3 pl-16">
               <span className="text-gray-500 text-sm">📍</span>
               <span className="text-gray-600 text-sm">{formatLocation(ipInfo?.ipv6_geoip)}</span>
             </div>

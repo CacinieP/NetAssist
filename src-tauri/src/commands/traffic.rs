@@ -339,18 +339,29 @@ impl TrafficMonitor {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref TRAFFIC_MONITOR: TrafficMonitor = TrafficMonitor::new();
+use std::sync::OnceLock;
+static TRAFFIC_MONITOR: OnceLock<TrafficMonitor> = OnceLock::new();
+
+fn traffic_monitor() -> &'static TrafficMonitor {
+    TRAFFIC_MONITOR.get_or_init(TrafficMonitor::new)
 }
 
 /// Get realtime traffic statistics
 #[tauri::command]
 pub async fn get_realtime_traffic() -> Result<TrafficStats, String> {
-    TRAFFIC_MONITOR.get_stats().await
+    traffic_monitor().get_stats().await
 }
 
 /// Get application traffic ranking
 #[tauri::command]
 pub async fn get_app_traffic_ranking() -> Result<Vec<AppTraffic>, String> {
-    TRAFFIC_MONITOR.get_app_ranking().await
+    // get_app_ranking does heavy synchronous work (System::new_all, process enumeration)
+    // so we run it on a blocking thread to avoid stalling the Tokio runtime.
+    tokio::task::spawn_blocking(move || {
+        // Use tokio::runtime::Handle to enter async context from blocking thread
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(traffic_monitor().get_app_ranking())
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }

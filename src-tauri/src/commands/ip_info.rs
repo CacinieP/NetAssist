@@ -82,14 +82,26 @@ pub async fn get_ip_info(include_geoip: Option<bool>) -> Result<IPInfo, String> 
 }
 
 /// Get overall network status
+/// Checks: 1) has local IP, 2) can reach the internet (HTTP probe to reliable endpoint)
 #[tauri::command]
 pub async fn get_network_status() -> Result<crate::models::NetworkStatus, String> {
-    let has_connection = !get_local_ipv4_addrs().is_empty();
+    let has_local_ip = !get_local_ipv4_addrs().is_empty();
 
-    let (status, message) = if has_connection {
+    if !has_local_ip {
+        return Ok(crate::models::NetworkStatus {
+            status: "abnormal".to_string(),
+            message: "未检测到网络连接".to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        });
+    }
+
+    // Probe internet connectivity with a lightweight HEAD request (2s timeout)
+    let internet_ok = check_internet_connectivity().await;
+
+    let (status, message) = if internet_ok {
         ("normal".to_string(), "网络连接正常".to_string())
     } else {
-        ("abnormal".to_string(), "未检测到网络连接".to_string())
+        ("abnormal".to_string(), "已连接路由器但无法访问互联网".to_string())
     };
 
     Ok(crate::models::NetworkStatus {
@@ -97,6 +109,42 @@ pub async fn get_network_status() -> Result<crate::models::NetworkStatus, String
         message,
         timestamp: chrono::Utc::now().timestamp_millis(),
     })
+}
+
+/// Lightweight internet connectivity check via HTTP HEAD probe
+async fn check_internet_connectivity() -> bool {
+    use tokio::time::{timeout, Duration};
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .no_proxy()
+        .build();
+
+    let client = match client {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    // Try multiple reliable endpoints
+    let probes = [
+        "https://www.google.com/generate_204",
+        "https://cp.cloudflare.com/",
+        "https://connectivitycheck.platform.hicloud.com/generate_204",
+    ];
+
+    for url in &probes {
+        match timeout(Duration::from_secs(2), client.head(*url).send()).await {
+            Ok(Ok(resp)) => {
+                // Accept any 2xx or 3xx response as "internet is reachable"
+                if resp.status().is_success() || resp.status().is_redirection() {
+                    return true;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    false
 }
 
 /// Get local IPv4 addresses

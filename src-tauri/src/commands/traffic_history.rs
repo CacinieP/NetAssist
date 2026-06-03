@@ -386,85 +386,109 @@ impl TrafficAlertManager {
     }
 }
 
-// Global instances
-lazy_static::lazy_static! {
-    static ref HISTORY_STORAGE: std::sync::Mutex<TrafficHistoryStorage> = {
+// Global instances (using std::sync::OnceLock instead of lazy_static)
+use std::sync::OnceLock;
+
+static HISTORY_STORAGE: OnceLock<std::sync::Mutex<TrafficHistoryStorage>> = OnceLock::new();
+static ALERT_MANAGER: OnceLock<TrafficAlertManager> = OnceLock::new();
+
+fn history_storage() -> &'static std::sync::Mutex<TrafficHistoryStorage> {
+    HISTORY_STORAGE.get_or_init(|| {
         std::sync::Mutex::new(TrafficHistoryStorage::new().unwrap_or_else(|e| {
             tracing::error!("Failed to initialize traffic history storage: {}", e);
-            // Create a dummy instance
             TrafficHistoryStorage {
                 data_dir: PathBuf::from("."),
                 history_cache: HashMap::new(),
             }
         }))
-    };
-    static ref ALERT_MANAGER: TrafficAlertManager = {
+    })
+}
+
+fn alert_manager() -> &'static TrafficAlertManager {
+    ALERT_MANAGER.get_or_init(|| {
         TrafficAlertManager::new().unwrap_or_else(|e| {
             tracing::error!("Failed to initialize alert manager: {}", e);
             TrafficAlertManager {
                 alerts_file: PathBuf::from("alerts.json"),
             }
         })
-    };
+    })
 }
 
 /// Get cumulative traffic for a time period
 #[tauri::command]
 pub async fn get_cumulative_traffic(period: String) -> Result<CumulativeTraffic, String> {
-    let storage = HISTORY_STORAGE
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    storage.get_cumulative_traffic(&period)
+    // File I/O inside mutex — run on blocking thread to avoid stalling async runtime
+    tokio::task::spawn_blocking(move || {
+        let storage = history_storage()
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        storage.get_cumulative_traffic(&period)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 /// Get traffic history for a time range (hours)
 #[tauri::command]
 pub async fn get_traffic_history(hours: i64) -> Result<TrafficHistory, String> {
-    let storage = HISTORY_STORAGE
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    storage.get_traffic_history(hours)
+    tokio::task::spawn_blocking(move || {
+        let storage = history_storage()
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        storage.get_traffic_history(hours)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 /// Record a traffic data point
 #[tauri::command]
 pub async fn record_traffic_point(download_bps: f64, upload_bps: f64) -> Result<(), String> {
-    let mut storage = HISTORY_STORAGE
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    storage.add_data_point(download_bps, upload_bps)
+    tokio::task::spawn_blocking(move || {
+        let mut storage = history_storage()
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        storage.add_data_point(download_bps, upload_bps)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 /// Get all traffic alerts
 #[tauri::command]
 pub async fn get_traffic_alerts() -> Result<Vec<TrafficAlert>, String> {
-    ALERT_MANAGER.get_alerts()
+    alert_manager().get_alerts()
 }
 
 /// Update a traffic alert
 #[tauri::command]
 pub async fn update_traffic_alert(alert: TrafficAlert) -> Result<(), String> {
-    ALERT_MANAGER.update_alert(alert)
+    alert_manager().update_alert(alert)
 }
 
 /// Add a new traffic alert
 #[tauri::command]
 pub async fn add_traffic_alert(alert: TrafficAlert) -> Result<(), String> {
-    ALERT_MANAGER.add_alert(alert)
+    alert_manager().add_alert(alert)
 }
 
 /// Delete a traffic alert
 #[tauri::command]
 pub async fn delete_traffic_alert(alert_id: String) -> Result<(), String> {
-    ALERT_MANAGER.delete_alert(&alert_id)
+    alert_manager().delete_alert(&alert_id)
 }
 
 /// Check alert status
 #[tauri::command]
 pub async fn check_traffic_alerts(period: String) -> Result<Vec<AlertStatus>, String> {
-    let storage = HISTORY_STORAGE
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-    let cumulative = storage.get_cumulative_traffic(&period)?;
-    ALERT_MANAGER.check_alerts(&cumulative)
+    tokio::task::spawn_blocking(move || {
+        let storage = history_storage()
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let cumulative = storage.get_cumulative_traffic(&period)?;
+        alert_manager().check_alerts(&cumulative)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }

@@ -1,4 +1,5 @@
 import { Activity, ArrowDown, ArrowUp } from "lucide-react";
+import { formatSpeed } from "../../utils/formatUtils";
 
 interface StatusBarProps {
   networkStatus: "normal" | "abnormal";
@@ -19,12 +20,6 @@ export default function StatusBar({
 }: StatusBarProps) {
   const statusText = networkStatus === "normal" ? "正常" : "异常";
   const statusIcon = networkStatus === "normal" ? "✓" : "✗";
-
-  const formatSpeed = (bps: number): string => {
-    if (bps < 1024) return `${bps.toFixed(1)} B/s`;
-    if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
-    return `${(bps / (1024 * 1024)).toFixed(2)} MB/s`;
-  };
 
   return (
     <div className="h-12 bg-white border-b border-gray-200 flex items-center justify-between px-4 shrink-0">
@@ -75,7 +70,7 @@ export default function StatusBar({
         </div>
       </div>
 
-      <div className="text-xs text-gray-400">NetAssist v0.1.0</div>
+      <div className="text-xs text-gray-400">NetAssist v0.3.0</div>
     </div>
   );
 }
