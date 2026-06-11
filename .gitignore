@@ -63,3 +63,6 @@ certificate_base64.txt
 *.key
 *.cert
 cos.conf
+
+# Claude Code temporary directories
+tmpclaude-*
