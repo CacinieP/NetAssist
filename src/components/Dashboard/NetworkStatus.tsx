@@ -23,22 +23,22 @@ export default function NetworkStatus() {
 
   if (loading) {
     return (
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
         <div className="flex items-center gap-2">
-          <span className="text-gray-400">加载中...</span>
+          <span className="text-gray-400 dark:text-gray-500">加载中...</span>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-4">
+    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <span className="text-lg">
             {isConnected ? "✅" : "❌"}
           </span>
-          <span className="text-gray-700">网络状态:</span>
+          <span className="text-gray-700 dark:text-gray-300">网络状态:</span>
           <span className={isConnected ? "text-green-600 font-medium" : "text-red-600 font-medium"}>
             {networkStatus?.message || "未知"}
           </span>
