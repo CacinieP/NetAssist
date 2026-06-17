@@ -8,16 +8,6 @@ struct TrafficState {
     last_rx_bytes: u64,
     last_tx_bytes: u64,
     last_update: std::time::Instant,
-    app_traffic: std::collections::HashMap<u32, AppTrafficData>,
-    cached_system: Option<System>,
-}
-
-struct AppTrafficData {
-    name: String,
-    download_bytes: u64,
-    upload_bytes: u64,
-    last_download: f64,
-    last_upload: f64,
 }
 
 pub struct TrafficMonitor {
@@ -33,8 +23,6 @@ impl TrafficMonitor {
                 last_rx_bytes: rx_bytes,
                 last_tx_bytes: tx_bytes,
                 last_update: std::time::Instant::now(),
-                app_traffic: std::collections::HashMap::new(),
-                cached_system: None,
             })),
         }
     }
@@ -72,165 +60,6 @@ impl TrafficMonitor {
             upload_bps,
             timestamp: chrono::Utc::now().timestamp_millis(),
         })
-    }
-
-    /// Get application traffic ranking
-    pub async fn get_app_ranking(&self) -> Result<Vec<AppTraffic>, String> {
-        let mut state = self.state.lock().await;
-
-        // Reuse cached System instance to avoid expensive re-creation
-        let sys = state.cached_system.get_or_insert_with(System::new_all);
-        sys.refresh_all();
-
-        let mut app_traffic = Vec::new();
-
-        // macOS: Use nettop for real process traffic data
-        #[cfg(target_os = "macos")]
-        let process_traffic_stats = {
-            match crate::platform::get_process_traffic_stats() {
-                Ok(stats) => stats,
-                Err(_) => std::collections::HashMap::new(),
-            }
-        };
-
-        // Windows: Use connection info for traffic estimation
-        #[cfg(target_os = "windows")]
-        let connection_info = {
-            match crate::platform::windows::get_active_connections() {
-                Ok(conns) => {
-                    // Count connections per PID
-                    let mut conn_count: std::collections::HashMap<u32, usize> =
-                        std::collections::HashMap::new();
-                    for conn in conns {
-                        if let Some(pid) = conn.pid {
-                            *conn_count.entry(pid).or_insert(0) += 1;
-                        }
-                    }
-                    conn_count
-                }
-                Err(_) => std::collections::HashMap::new(),
-            }
-        };
-
-        // Linux: Use ss for process info
-        #[cfg(target_os = "linux")]
-        let connection_info = {
-            match crate::platform::linux::get_active_connections() {
-                Ok(conns) => {
-                    let mut conn_count: std::collections::HashMap<u32, usize> =
-                        std::collections::HashMap::new();
-                    for conn in conns {
-                        if let Some(pid) = conn.pid {
-                            *conn_count.entry(pid).or_insert(0) += 1;
-                        }
-                    }
-                    conn_count
-                }
-                Err(_) => std::collections::HashMap::new(),
-            }
-        };
-
-        // Collect all PIDs first
-        let mut pids = std::collections::HashSet::new();
-        for (pid, _) in sys.processes() {
-            pids.insert(pid.as_u32());
-        }
-
-        // Use our improved process name resolution
-        #[cfg(target_os = "windows")]
-        let process_names = crate::platform::windows::get_process_names_batch(&pids);
-
-        #[cfg(target_os = "macos")]
-        let process_names = {
-            match crate::platform::get_all_processes() {
-                Ok(map) => map,
-                Err(_) => {
-                    let mut map = std::collections::HashMap::new();
-                    for (pid, process) in sys.processes() {
-                        let name = process.name().to_str().unwrap_or("[unknown]").to_string();
-                        map.insert(pid.as_u32(), name);
-                    }
-                    map
-                }
-            }
-        };
-
-        #[cfg(target_os = "linux")]
-        let process_names = {
-            let mut map = std::collections::HashMap::new();
-            for (pid, process) in sys.processes() {
-                let name = process.name().to_str().unwrap_or("[unknown]").to_string();
-                map.insert(pid.as_u32(), name);
-            }
-            map
-        };
-
-        // Build app traffic list
-        for (pid, _) in sys.processes() {
-            let pid_u32 = pid.as_u32();
-            let name = process_names
-                .get(&pid_u32)
-                .cloned()
-                .unwrap_or_else(|| "[unknown]".to_string());
-
-            // On macOS, use real traffic data from nettop
-            #[cfg(target_os = "macos")]
-            let (download_bps, upload_bps) = {
-                if let Some(stats) = process_traffic_stats.get(&pid_u32) {
-                    // Convert bytes to bits per second (rough estimate over the sampling interval)
-                    // nettop gives cumulative bytes, so we estimate bps
-                    let total_bps = (stats.bytes_in + stats.bytes_out) as f64 * 8.0 / 60.0; // Assume 60s interval
-                    (total_bps * 0.7, total_bps * 0.3) // 70% download, 30% upload
-                } else {
-                    (0.0, 0.0)
-                }
-            };
-
-            // On Windows/Linux, use connection count as proxy (estimated, not real traffic data)
-            #[cfg(not(target_os = "macos"))]
-            let (download_bps, upload_bps) = {
-                let conn_count = connection_info.get(&pid_u32).copied().unwrap_or(0);
-                let estimated_bps = conn_count as f64 * 100.0;
-                tracing::debug!(
-                    "PID {}: using estimated traffic based on {} connections (not real traffic data)",
-                    pid_u32, conn_count
-                );
-                (estimated_bps, estimated_bps * 0.3)
-            };
-
-            // Get cumulative bytes if available
-            #[cfg(target_os = "macos")]
-            let (total_download, total_upload) = {
-                if let Some(stats) = process_traffic_stats.get(&pid_u32) {
-                    (stats.bytes_in, stats.bytes_out)
-                } else {
-                    (0, 0)
-                }
-            };
-
-            #[cfg(not(target_os = "macos"))]
-            let (total_download, total_upload) = (0, 0);
-
-            app_traffic.push(AppTraffic {
-                name,
-                pid: pid_u32,
-                download_bytes: total_download,
-                upload_bytes: total_upload,
-                current_download_bps: download_bps,
-                current_upload_bps: upload_bps,
-            });
-        }
-
-        // Sort by estimated traffic (descending)
-        app_traffic.sort_by(|a, b| {
-            let total_a = a.current_download_bps + a.current_upload_bps;
-            let total_b = b.current_download_bps + b.current_upload_bps;
-            total_b
-                .partial_cmp(&total_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        Ok(app_traffic)
     }
 
     /// Get interface statistics (platform-specific)
@@ -308,34 +137,32 @@ impl TrafficMonitor {
         let interface =
             crate::platform::get_default_interface().unwrap_or_else(|_| "en0".to_string());
 
-        // Use netstat to get interface statistics on macOS
+        // Use netstat to get interface statistics on macOS.
+        // -b reports byte counts. Output columns are (1-indexed):
+        //   1:Name 2:Mtu 3:Network 4:Address 5:Ipkts 6:Ierrs 7:Ibytes
+        //   8:Opkts 9:Oerrs 10:Obytes 11:Coll
+        // NOTE: the same interface prints multiple rows (Link / each address).
+        // Those rows all carry the SAME cumulative byte counters, so summing
+        // every row would multiply the totals. We take only the FIRST data row.
         let output = Command::new("netstat")
             .args(&["-b", "-I", &interface])
             .output();
 
-        let mut total_rx = 0u64;
-        let mut total_tx = 0u64;
-
         if let Ok(result) = output {
             let content = String::from_utf8_lossy(&result.stdout);
-            // Parse netstat output: "Ibytes" and "Obytes" columns
-            for line in content.lines().skip(1) {
+            // skip(1) drops the header; we then take only the first data row.
+            if let Some(line) = content.lines().skip(1).next() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
+                // Need at least 10 columns to read Ibytes(7) and Obytes(10).
                 if parts.len() >= 10 {
-                    // netstat -b output format
-                    if let Ok(rx) = parts[7].parse::<u64>() {
-                        total_rx += rx;
-                    }
-                    if parts.len() > 10 {
-                        if let Ok(tx) = parts[10].parse::<u64>() {
-                            total_tx += tx;
-                        }
-                    }
+                    let rx = parts[6].parse::<u64>().unwrap_or(0);
+                    let tx = parts[9].parse::<u64>().unwrap_or(0);
+                    return Ok((rx, tx));
                 }
             }
         }
 
-        Ok((total_rx, total_tx))
+        Ok((0, 0))
     }
 }
 
@@ -346,6 +173,141 @@ fn traffic_monitor() -> &'static TrafficMonitor {
     TRAFFIC_MONITOR.get_or_init(TrafficMonitor::new)
 }
 
+/// Platform-dispatched active connection list (Windows / Linux only).
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn get_platform_connections() -> anyhow::Result<Vec<crate::platform::ConnectionRawInfo>> {
+    #[cfg(target_os = "windows")]
+    {
+        crate::platform::windows::get_active_connections()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::platform::linux::get_active_connections()
+    }
+}
+
+/// Build the per-process traffic ranking entirely on a blocking thread.
+///
+/// This used to live in an `async` method that held a `tokio::sync::Mutex`
+/// across blocking syscalls (nettop/ps/sysinfo) and was driven via
+/// `spawn_blocking` + a nested `rt.block_on(...)`, which re-enters and stalls
+/// the runtime. Here we do everything synchronously: build a fresh
+/// `sysinfo::System`, query platform traffic, assemble and sort the list.
+/// No async lock is held and the runtime is never re-entered.
+fn compute_app_ranking() -> Result<Vec<AppTraffic>, String> {
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let mut app_traffic = Vec::new();
+
+    // macOS: real per-process traffic (1s delta from nettop).
+    #[cfg(target_os = "macos")]
+    let process_traffic_stats =
+        crate::platform::get_process_traffic_stats().unwrap_or_default();
+
+    // Windows / Linux: per-PID active connection counts.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let connection_info: std::collections::HashMap<u32, usize> = {
+        let conns = get_platform_connections();
+        let mut counts: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::new();
+        if let Ok(conns) = conns {
+            for conn in conns {
+                if let Some(pid) = conn.pid {
+                    *counts.entry(pid).or_insert(0) += 1;
+                }
+            }
+        }
+        counts
+    };
+
+    // Resolve process names.
+    #[cfg(target_os = "windows")]
+    let pids: std::collections::HashSet<u32> =
+        sys.processes().keys().map(|p| p.as_u32()).collect();
+    #[cfg(target_os = "windows")]
+    let process_names = crate::platform::windows::get_process_names_batch(&pids);
+
+    #[cfg(target_os = "macos")]
+    let process_names =
+        crate::platform::get_all_processes().unwrap_or_else(|_| {
+            sys.processes()
+                .iter()
+                .map(|(pid, p)| {
+                    (
+                        pid.as_u32(),
+                        p.name().to_str().unwrap_or("[unknown]").to_string(),
+                    )
+                })
+                .collect()
+        });
+
+    #[cfg(target_os = "linux")]
+    let process_names: std::collections::HashMap<u32, String> = sys
+        .processes()
+        .iter()
+        .map(|(pid, p)| {
+            (
+                pid.as_u32(),
+                p.name().to_str().unwrap_or("[unknown]").to_string(),
+            )
+        })
+        .collect();
+
+    for (pid, _) in sys.processes() {
+        let pid_u32 = pid.as_u32();
+        let name = process_names
+            .get(&pid_u32)
+            .cloned()
+            .unwrap_or_else(|| "[unknown]".to_string());
+
+        // macOS: nettop returns a 1s delta, so these values are bytes/sec.
+        #[cfg(target_os = "macos")]
+        let (download_bps, upload_bps, total_download, total_upload) = {
+            if let Some(stats) = process_traffic_stats.get(&pid_u32) {
+                (
+                    stats.bytes_in as f64,
+                    stats.bytes_out as f64,
+                    stats.bytes_in,
+                    stats.bytes_out,
+                )
+            } else {
+                (0.0, 0.0, 0, 0)
+            }
+        };
+
+        // Windows / Linux: no real per-process rate is available without a
+        // delta between two samples, so report 0 for the rate fields rather
+        // than the previous bogus "connection_count * 100" estimate. The
+        // connection count is still surfaced via total bytes = 0 for honesty.
+        #[cfg(not(target_os = "macos"))]
+        let (download_bps, upload_bps, total_download, total_upload) = {
+            let _conn_count = connection_info.get(&pid_u32).copied().unwrap_or(0);
+            (0.0, 0.0, 0u64, 0u64)
+        };
+
+        app_traffic.push(AppTraffic {
+            name,
+            pid: pid_u32,
+            download_bytes: total_download,
+            upload_bytes: total_upload,
+            current_download_bps: download_bps,
+            current_upload_bps: upload_bps,
+        });
+    }
+
+    // Sort by current rate, descending.
+    app_traffic.sort_by(|a, b| {
+        let total_a = a.current_download_bps + a.current_upload_bps;
+        let total_b = b.current_download_bps + b.current_upload_bps;
+        total_b
+            .partial_cmp(&total_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok(app_traffic)
+}
+
 /// Get realtime traffic statistics
 #[tauri::command]
 pub async fn get_realtime_traffic() -> Result<TrafficStats, String> {
@@ -353,15 +315,16 @@ pub async fn get_realtime_traffic() -> Result<TrafficStats, String> {
 }
 
 /// Get application traffic ranking
+///
+/// NOTE: `get_app_ranking` performs blocking syscalls (nettop, ps, sysinfo
+/// enumeration). Previously this wrapped it in `spawn_blocking` + a nested
+/// `rt.block_on(...)`, which re-enters and stalls the runtime. Instead we
+/// offload the whole computation to a blocking thread and return the result.
+/// The per-process rate map is computed independently of the async state, so
+/// it does not need to re-enter the async runtime.
 #[tauri::command]
 pub async fn get_app_traffic_ranking() -> Result<Vec<AppTraffic>, String> {
-    // get_app_ranking does heavy synchronous work (System::new_all, process enumeration)
-    // so we run it on a blocking thread to avoid stalling the Tokio runtime.
-    tokio::task::spawn_blocking(move || {
-        // Use tokio::runtime::Handle to enter async context from blocking thread
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(traffic_monitor().get_app_ranking())
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    tokio::task::spawn_blocking(|| compute_app_ranking())
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
 }
