@@ -29,19 +29,15 @@ pub async fn apply_quick_fix(fix_type: String) -> Result<bool, String> {
             Ok(true)
         }
         "toggle_ipv6" => {
-            tracing::warn!(
-                "fix toggle_ipv6: not fully implemented, falling back to release/renew IP"
-            );
-            crate::platform::release_renew_ip()
-                .map_err(|e| format!("IPv6 切换尚未实现（已执行 IP 刷新作为替代）: {}", e))?;
+            tracing::info!("Executing fix: toggle_ipv6");
+            crate::platform::toggle_ipv6()
+                .map_err(|e| format!("切换 IPv6 失败: {}", e))?;
             Ok(true)
         }
         "reset_adapter" => {
-            tracing::warn!(
-                "fix reset_adapter: not fully implemented, falling back to release/renew IP"
-            );
-            crate::platform::release_renew_ip()
-                .map_err(|e| format!("网络适配器重置尚未实现（已执行 IP 刷新作为替代）: {}", e))?;
+            tracing::info!("Executing fix: reset_adapter");
+            crate::platform::reset_adapter()
+                .map_err(|e| format!("重置网络适配器失败: {}", e))?;
             Ok(true)
         }
         "restart_network_service" => {
@@ -379,7 +375,7 @@ fn generate_recommendations(
         recommendations.push(RepairAction {
             action_type: RepairType::ResetAdapter,
             name: "重置网络适配器".to_string(),
-            description: "禁用并重新启用网络适配器".to_string(),
+            description: "禁用并重新启用主网络适配器（需管理员授权）".to_string(),
             priority: 2,
             estimated_time_seconds: 15,
         });
@@ -388,8 +384,8 @@ fn generate_recommendations(
     if network_quality.status != DiagnosticStatus::Pass {
         recommendations.push(RepairAction {
             action_type: RepairType::ResetNetworkStack,
-            name: "重置网络协议栈".to_string(),
-            description: "重置TCP/IP协议栈到默认状态".to_string(),
+            name: "刷新DNS解析服务".to_string(),
+            description: "重启mDNSResponder解析服务并清空DNS缓存".to_string(),
             priority: 1,
             estimated_time_seconds: 30,
         });
@@ -398,8 +394,8 @@ fn generate_recommendations(
     if network_connectivity.status != DiagnosticStatus::Pass {
         recommendations.push(RepairAction {
             action_type: RepairType::RestartNetworkService,
-            name: "重启网络服务".to_string(),
-            description: "重启系统网络服务".to_string(),
+            name: "刷新网络解析服务".to_string(),
+            description: "重启DNS解析服务以重置网络通信".to_string(),
             priority: 1,
             estimated_time_seconds: 20,
         });
