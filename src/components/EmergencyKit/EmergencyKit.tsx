@@ -53,8 +53,8 @@ const FIX_ICONS: Record<FixType, JSX.Element> = {
 
 const FIX_WARNINGS: Record<FixType, { title: string; message: string }> = {
   reset_network_stack: {
-    title: "重置网络协议栈",
-    message: "此操作将重置 TCP/IP 协议栈到默认状态，可能导致短暂的网络中断。是否继续？"
+    title: "刷新 DNS 解析服务",
+    message: "将重启 mDNSResponder 解析服务并清空 DNS 缓存，可能短暂影响域名解析。是否继续？"
   },
   flush_dns_cache: {
     title: "清空 DNS 缓存",
@@ -66,19 +66,19 @@ const FIX_WARNINGS: Record<FixType, { title: string; message: string }> = {
   },
   switch_dns: {
     title: "切换 DNS 服务器",
-    message: "此操作将切换到备用 DNS 服务器（8.8.8.8 / 1.1.1.1）。是否继续？"
+    message: "此操作将把主网络服务切换到备用 DNS 服务器（8.8.8.8 / 1.1.1.1）。是否继续？"
   },
   toggle_ipv6: {
     title: "切换 IPv6",
-    message: "此操作将重新初始化网络配置以切换 IPv6 状态。是否继续？"
+    message: "将在主网络服务上启用或关闭 IPv6（Automatic ↔ Off），可能短暂影响网络连接。是否继续？"
   },
   reset_adapter: {
     title: "重置网络适配器",
-    message: "此操作将重置网络适配器，可能导致短暂的网络中断。是否继续？"
+    message: "将禁用并重新启用主网络适配器（需要管理员授权，会弹出系统密码框），期间网络会短暂中断。是否继续？"
   },
   restart_network_service: {
-    title: "重启网络服务",
-    message: "此操作将重启系统网络服务，将导致网络中断。是否继续？"
+    title: "刷新网络解析服务",
+    message: "将重启 DNS 解析服务以重置网络通信，可能短暂影响域名解析。是否继续？"
   }
 };
 

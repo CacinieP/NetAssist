@@ -175,6 +175,30 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
     }
 }
 
+/// Toggle IPv6 state on the primary interface (macOS: real toggle via
+/// networksetup; other platforms: not supported yet).
+pub fn toggle_ipv6() -> anyhow::Result<String> {
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "macos")] {
+            macos::toggle_ipv6()
+        } else {
+            Err(anyhow::anyhow!("IPv6 toggle is not supported on this platform"))
+        }
+    }
+}
+
+/// Reset (bounce) the primary network adapter (macOS: via osascript privilege
+/// escalation; other platforms: not supported yet).
+pub fn reset_adapter() -> anyhow::Result<()> {
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "macos")] {
+            macos::reset_adapter()
+        } else {
+            Err(anyhow::anyhow!("Adapter reset is not supported on this platform"))
+        }
+    }
+}
+
 /// Check app permissions (platform-specific)
 #[cfg(target_os = "macos")]
 pub fn check_permissions() -> anyhow::Result<macos::PermissionStatus> {
