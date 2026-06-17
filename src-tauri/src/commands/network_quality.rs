@@ -214,23 +214,11 @@ async fn ping_windows(target: &str, _ipv6: bool, count: u32) -> Result<PingResul
         if line.contains("Reply from") || line.contains("来自") {
             packets_received += 1;
 
-            // Extract time from output
-            if let Some(time_pos) = line.find("time=") {
-                let time_str = &line[time_pos + 5..];
-                if let Some(end_pos) = time_str.find('m') {
-                    if let Ok(latency) = time_str[..end_pos].trim().parse::<f64>() {
-                        latencies.push(latency);
-                    }
-                }
-            }
-            // Chinese Windows
-            else if let Some(time_pos) = line.find("时间=") {
-                let time_str = &line[time_pos + 7..];
-                if let Some(end_pos) = time_str.find('m') {
-                    if let Ok(latency) = time_str[..end_pos].trim().parse::<f64>() {
-                        latencies.push(latency);
-                    }
-                }
+            // Extract latency: English "time=" or Chinese "时间=".
+            if let Some(latency) = parse_ping_latency(line, "time=")
+                .or_else(|| parse_ping_latency(line, "时间="))
+            {
+                latencies.push(latency);
             }
         }
     }
@@ -275,7 +263,15 @@ async fn ping_windows(target: &str, _ipv6: bool, count: u32) -> Result<PingResul
 
 #[cfg(target_os = "linux")]
 async fn ping_linux(target: &str, ipv6: bool, count: u32) -> Result<PingResult, String> {
-    let mut args = vec!["-c".to_string(), count.to_string()];
+    // -W <sec>: per-reply timeout in seconds on Linux (unlike macOS where it
+    //   is milliseconds), so an unreachable host fails fast.
+    // -c <n>:   number of packets to send.
+    let mut args = vec![
+        "-c".to_string(),
+        count.to_string(),
+        "-W".to_string(),
+        "2".to_string(),
+    ];
 
     if ipv6 {
         args.push("-6".to_string());
@@ -295,23 +291,20 @@ async fn ping_linux(target: &str, ipv6: bool, count: u32) -> Result<PingResult, 
 
     let content = String::from_utf8_lossy(&output.stdout);
 
-    // Parse Linux ping output
+    // Parse Linux ping output.
     // Example: "64 bytes from 142.250.185.46: icmp_seq=1 ttl=117 time=12.3 ms"
+    // Recognize both English ("bytes from") and Chinese ("字节来自") replies.
     let mut latencies = Vec::new();
     let mut packets_received = 0u32;
 
     for line in content.lines() {
-        if line.contains("bytes from") {
+        if line.contains("bytes from") || line.contains("字节来自") {
             packets_received += 1;
 
-            // Extract time from output
-            if let Some(time_pos) = line.find("time=") {
-                let time_str = &line[time_pos + 5..];
-                if let Some(end_pos) = time_str.find(' ') {
-                    if let Ok(latency) = time_str[..end_pos].trim().parse::<f64>() {
-                        latencies.push(latency);
-                    }
-                }
+            if let Some(latency) = parse_ping_latency(line, "time=")
+                .or_else(|| parse_ping_latency(line, "时间="))
+            {
+                latencies.push(latency);
             }
         }
     }
@@ -345,7 +338,15 @@ async fn ping_linux(target: &str, ipv6: bool, count: u32) -> Result<PingResult, 
 
 #[cfg(target_os = "macos")]
 async fn ping_macos(target: &str, ipv6: bool, count: u32) -> Result<PingResult, String> {
-    let mut args = vec!["-c".to_string(), count.to_string()];
+    // -W <msec>: per-reply timeout in milliseconds, so an unreachable host
+    //   fails fast instead of blocking until the 10s outer timeout.
+    // -c <n>:   number of packets to send.
+    let mut args = vec![
+        "-c".to_string(),
+        count.to_string(),
+        "-W".to_string(),
+        "2000".to_string(),
+    ];
 
     if ipv6 {
         args.push("-6".to_string());
@@ -365,21 +366,20 @@ async fn ping_macos(target: &str, ipv6: bool, count: u32) -> Result<PingResult, 
 
     let content = String::from_utf8_lossy(&output.stdout);
 
-    // Parse macOS ping output (similar to Linux)
+    // Parse macOS ping output (similar to Linux).
+    // Recognize both English ("bytes from") and Chinese ("字节来自") replies.
     let mut latencies = Vec::new();
     let mut packets_received = 0u32;
 
     for line in content.lines() {
-        if line.contains("bytes from") {
+        if line.contains("bytes from") || line.contains("字节来自") {
             packets_received += 1;
 
-            if let Some(time_pos) = line.find("time=") {
-                let time_str = &line[time_pos + 5..];
-                if let Some(end_pos) = time_str.find(' ') {
-                    if let Ok(latency) = time_str[..end_pos].trim().parse::<f64>() {
-                        latencies.push(latency);
-                    }
-                }
+            // English "time=" or Chinese "时间="
+            if let Some(latency) = parse_ping_latency(line, "time=")
+                .or_else(|| parse_ping_latency(line, "时间="))
+            {
+                latencies.push(latency);
             }
         }
     }
@@ -504,29 +504,65 @@ async fn traceroute_windows(target: &str, max_hops: u32) -> Result<TracerouteRes
 async fn traceroute_linux(target: &str, max_hops: u32) -> Result<TracerouteResult, String> {
     let target = target.to_string();
     tokio::task::spawn_blocking(move || {
+        // -n: numeric (no DNS)
+        // -m: max hops
+        // -w: per-hop probe timeout in seconds
+        // -q: one probe per hop (simpler latency parsing)
         let output = Command::new("traceroute")
-            .args(&["-n", "-m", &max_hops.to_string(), &target])
+            .args(&[
+                "-n",
+                "-m",
+                &max_hops.to_string(),
+                "-w",
+                "2",
+                "-q",
+                "1",
+                &target,
+            ])
             .output()
             .map_err(|e| format!("Traceroute failed: {}", e))?;
 
         let content = String::from_utf8_lossy(&output.stdout);
         let mut hops = Vec::new();
 
+        // Format: " <hop> <ip> <latency_ms> ms"  (one probe with -q 1).
+        // Silent hop: " <hop> * * *".
         for line in content.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                if let Ok(hop_num) = parts[0].parse::<u32>() {
-                    let ip_addr = parts.get(1).map(|s| s.to_string());
-                    let success = ip_addr.is_some();
-                    hops.push(TracerouteHop {
-                        hop_number: hop_num,
-                        ip: ip_addr,
-                        hostname: None,
-                        avg_latency_ms: 0.0,
-                        success,
-                    });
-                }
+            let hop_num = match parts.first().and_then(|s| s.parse::<u32>().ok()) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            if parts.len() < 2 {
+                continue;
             }
+
+            if parts[1] == "*" {
+                hops.push(TracerouteHop {
+                    hop_number: hop_num,
+                    ip: None,
+                    hostname: None,
+                    avg_latency_ms: 0.0,
+                    success: false,
+                });
+                continue;
+            }
+
+            let ip_addr = parts[1].to_string();
+            let latency = parts
+                .iter()
+                .skip(2)
+                .find_map(|t| t.parse::<f64>().ok())
+                .unwrap_or(0.0);
+
+            hops.push(TracerouteHop {
+                hop_number: hop_num,
+                ip: Some(ip_addr),
+                hostname: None,
+                avg_latency_ms: latency,
+                success: true,
+            });
         }
 
         let success = !hops.is_empty();
@@ -546,29 +582,67 @@ async fn traceroute_linux(target: &str, max_hops: u32) -> Result<TracerouteResul
 async fn traceroute_macos(target: &str, max_hops: u32) -> Result<TracerouteResult, String> {
     let target = target.to_string();
     tokio::task::spawn_blocking(move || {
+        // -n: no DNS resolution (numeric)
+        // -m: max hops
+        // -w: per-hop probe timeout in seconds (fail fast on silent hops)
+        // -q: one probe per hop (simpler latency parsing)
         let output = Command::new("traceroute")
-            .args(&["-n", "-m", &max_hops.to_string(), &target])
+            .args(&[
+                "-n",
+                "-m",
+                &max_hops.to_string(),
+                "-w",
+                "2",
+                "-q",
+                "1",
+                &target,
+            ])
             .output()
             .map_err(|e| format!("Traceroute failed: {}", e))?;
 
         let content = String::from_utf8_lossy(&output.stdout);
         let mut hops = Vec::new();
 
+        // Format: " <hop> <ip> <latency_ms> ms"  (one probe with -q 1).
+        // Silent hop: " <hop> * * *".
         for line in content.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                if let Ok(hop_num) = parts[0].parse::<u32>() {
-                    let ip_addr = parts.get(1).map(|s| s.to_string());
-                    let has_ip = ip_addr.is_some();
-                    hops.push(TracerouteHop {
-                        hop_number: hop_num,
-                        ip: ip_addr,
-                        hostname: None,
-                        avg_latency_ms: 0.0,
-                        success: has_ip,
-                    });
-                }
+            let hop_num = match parts.first().and_then(|s| s.parse::<u32>().ok()) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            if parts.len() < 2 {
+                continue;
             }
+
+            // "*" means the hop did not respond.
+            if parts[1] == "*" {
+                hops.push(TracerouteHop {
+                    hop_number: hop_num,
+                    ip: None,
+                    hostname: None,
+                    avg_latency_ms: 0.0,
+                    success: false,
+                });
+                continue;
+            }
+
+            let ip_addr = parts[1].to_string();
+            // The latency value is the first token after the IP that parses as a float.
+            let latency = parts
+                .iter()
+                .skip(2)
+                .find_map(|t| t.parse::<f64>().ok())
+                .unwrap_or(0.0);
+
+            hops.push(TracerouteHop {
+                hop_number: hop_num,
+                ip: Some(ip_addr),
+                hostname: None,
+                avg_latency_ms: latency,
+                success: true,
+            });
         }
 
         let hop_count = hops.len();
@@ -596,4 +670,19 @@ fn is_valid_hostname(hostname: &str) -> bool {
         && !hostname.starts_with('.')
         && !hostname.ends_with('.')
         && !hostname.contains("..")
+}
+
+/// Extract the numeric latency that follows a `key` (e.g. "time=" or "时间=")
+/// in a ping reply line. The value runs from immediately after the key up to
+/// the first character that is not part of a number (space, 'm' of "ms", etc.).
+fn parse_ping_latency(line: &str, key: &str) -> Option<f64> {
+    let pos = line.find(key)?;
+    let rest = &line[pos + key.len()..];
+    // Take leading numeric characters: digits, decimal point, sign.
+    let num_str: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+        .collect();
+    num_str.parse::<f64>().ok()
 }
