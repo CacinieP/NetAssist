@@ -388,65 +388,114 @@ pub struct PermissionStatus {
     pub warnings: Vec<String>,
 }
 
-/// Get per-process network traffic statistics on macOS
+/// Get per-process network traffic statistics on macOS.
+///
+/// `nettop` output is **CSV** (NOT json). With `-L 2 -s 1` it emits two
+/// samples one second apart; the second sample is the **delta** over that
+/// interval, so we can derive a real bytes-per-second rate by using it
+/// directly. We request only the columns we need with `-j`.
+///
+/// Output looks like:
+/// ```text
+/// time,,interface,state,bytes_in,bytes_out,...
+/// 13:44:25,syslogd.368,,,0,5789,...
+/// ```
+/// Column 0 (1-indexed) is `time`, column 2 is `name.pid`, columns 5 and 6
+/// are `bytes_in` / `bytes_out` deltas.
 pub fn get_process_traffic_stats(
 ) -> anyhow::Result<std::collections::HashMap<u32, ProcessTrafficStats>> {
     use std::collections::HashMap;
     let mut stats = HashMap::new();
 
-    // Use nettop command to get real-time process traffic
-    // nettop -P -J -k time,interface,protocol,bytes_in,bytes_out,process_name -L 1
+    // -P   : per-process summaries only
+    // -j   : include only the listed columns (lowercase! -J is invalid)
+    // -x   : raw numbers (no human-readable suffixes)
+    // -L 2 : emit exactly 2 samples
+    // -s 1 : 1 second between samples -> sample #2 is a 1s delta
     let output = std::process::Command::new("nettop")
-        .args(&["-P", "-J", "-L", "1"])
+        .args(&["-P", "-j", "bytes_in,bytes_out", "-x", "-L", "2", "-s", "1"])
         .output();
 
-    if let Ok(result) = output {
-        let content = String::from_utf8_lossy(&result.stdout);
-
-        // Parse JSON output from nettop
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(array) = json.as_array() {
-                for entry in array {
-                    // Extract process info
-                    let process = entry.get("process");
-                    let process_name = process
-                        .and_then(|p| p.get("name"))
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("[unknown]")
-                        .to_string();
-
-                    let pid = process
-                        .and_then(|p| p.get("pid"))
-                        .and_then(|p| p.as_u64())
-                        .unwrap_or(0) as u32;
-
-                    if pid == 0 {
-                        continue;
-                    }
-
-                    // Extract traffic info
-                    let bytes_in = entry.get("bytes_in").and_then(|b| b.as_u64()).unwrap_or(0);
-
-                    let bytes_out = entry.get("bytes_out").and_then(|b| b.as_u64()).unwrap_or(0);
-
-                    stats.insert(
-                        pid,
-                        ProcessTrafficStats {
-                            pid,
-                            name: process_name,
-                            bytes_in,
-                            bytes_out,
-                        },
-                    );
-                }
-            }
+    let content = match output {
+        Ok(result) => String::from_utf8_lossy(&result.stdout).into_owned(),
+        Err(e) => {
+            tracing::warn!("Failed to run nettop: {}", e);
+            return Ok(stats);
         }
+    };
+
+    // Collect only the SECOND sample block (the 1s delta). Each sample begins
+    // with a header line that starts with "time".
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in content.lines() {
+        if line.starts_with("time,") {
+            if !current.is_empty() {
+                blocks.push(std::mem::take(&mut current));
+            }
+            current.clear();
+            continue;
+        }
+        if !line.trim().is_empty() {
+            current.push(line);
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+
+    // Prefer the delta (second) block; fall back to the first block.
+    let sample = blocks
+        .last()
+        .cloned()
+        .unwrap_or_default();
+
+    for line in sample {
+        // Split by comma. Verified column layout (0-indexed) for
+        // `nettop -P -j bytes_in,bytes_out -x`:
+        //   [0]=time  [1]="name.pid"  [2]=interface  [3]=state
+        //   [4]=bytes_in  [5]=bytes_out ...
+        // (The header shows `time,,interface,...` but in -P mode the process
+        //  identifier is emitted in slot [1].)
+        let cols: Vec<&str> = line.split(',').collect();
+        if cols.len() < 6 {
+            continue;
+        }
+
+        let name_pid = cols[1].trim();
+        // Format: "<process_name>.<pid>", e.g. "syslogd.368". The process name
+        // itself may contain dots (e.g. "python3.13"), so split from the RIGHT
+        // on the last '.'.
+        let pid = match name_pid.rsplit_once('.') {
+            Some((_, pid_str)) => pid_str.trim().parse::<u32>().unwrap_or(0),
+            None => 0,
+        };
+        if pid == 0 {
+            continue;
+        }
+        let name = name_pid.rsplit_once('.').map(|(n, _)| n).unwrap_or(name_pid);
+
+        let bytes_in = cols[4].trim().parse::<u64>().unwrap_or(0);
+        let bytes_out = cols[5].trim().parse::<u64>().unwrap_or(0);
+
+        stats.insert(
+            pid,
+            ProcessTrafficStats {
+                pid,
+                name: name.to_string(),
+                // When derived from the delta sample these are already a 1s
+                // delta, i.e. bytes/second. We expose them as a rate.
+                bytes_in,
+                bytes_out,
+            },
+        );
     }
 
     Ok(stats)
 }
 
-/// Process traffic statistics
+/// Per-process traffic statistics. On macOS the `bytes_in`/`bytes_out` are a
+/// 1-second delta from `nettop -L 2`, so they already represent bytes/sec.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProcessTrafficStats {
     pub pid: u32,
