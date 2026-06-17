@@ -144,8 +144,8 @@ export default function Dashboard() {
     <div className="p-6 space-y-6">
       {/* Header */}
       <div className="mb-6">
-        <h2 className="text-2xl font-bold text-gray-800">仪表盘</h2>
-        <p className="text-gray-500">网络状态概览</p>
+        <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">仪表盘</h2>
+        <p className="text-gray-500 dark:text-gray-400">网络状态概览</p>
       </div>
 
       {/* Network Status */}
@@ -155,9 +155,9 @@ export default function Dashboard() {
       <IPInfoCard />
 
       {/* Cumulative Traffic Card */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-medium text-gray-700">累计流量统计</h3>
+          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">累计流量统计</h3>
           <div className="flex gap-1">
             {[
               { key: "day" as Period, label: "今日" },
@@ -169,8 +169,8 @@ export default function Dashboard() {
                 onClick={() => setPeriod(p.key)}
                 className={`px-2 py-1 text-xs rounded transition-colors ${
                   period === p.key
-                    ? "bg-blue-50 text-blue-600"
-                    : "bg-gray-50 text-gray-600 hover:bg-gray-100"
+                    ? "bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-blue-300"
+                    : "bg-gray-50 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600"
                 }`}
               >
                 {p.label}
@@ -183,20 +183,20 @@ export default function Dashboard() {
         ) : cumulative ? (
           <div className="grid grid-cols-3 gap-4">
             <div className="text-center">
-              <div className="text-xs text-gray-500 mb-1">总流量</div>
-              <div className="text-lg font-semibold text-gray-800">
+              <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">总流量</div>
+              <div className="text-lg font-semibold text-gray-800 dark:text-gray-100">
                 {formatBytes(cumulative.total_download_bytes + cumulative.total_upload_bytes)}
               </div>
             </div>
             <div className="text-center">
               <div className="text-xs text-green-600 mb-1">下载</div>
-              <div className="text-sm font-medium text-gray-700">
+              <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
                 {formatBytes(cumulative.total_download_bytes)}
               </div>
             </div>
             <div className="text-center">
               <div className="text-xs text-blue-600 mb-1">上传</div>
-              <div className="text-sm font-medium text-gray-700">
+              <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
                 {formatBytes(cumulative.total_upload_bytes)}
               </div>
             </div>
