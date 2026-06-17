@@ -79,16 +79,16 @@ export default function IPInfoCard() {
   };
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-4">
+    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-700">IP 信息</h3>
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">IP 信息</h3>
         <button
           onClick={fetchIPInfo}
           disabled={refreshing}
-          className="p-1 hover:bg-gray-100 rounded transition-colors disabled:opacity-50"
+          className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors disabled:opacity-50"
           title="刷新IP信息"
         >
-          <RefreshCw className={`w-4 h-4 text-gray-600 ${refreshing ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 text-gray-600 dark:text-gray-400 ${refreshing ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
@@ -96,14 +96,14 @@ export default function IPInfoCard() {
       <div className="mb-4">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-blue-600 font-medium text-sm">公网 IPv4:</span>
-          <span className="font-mono text-sm text-gray-800">
+          <span className="font-mono text-sm text-gray-800 dark:text-gray-200">
             {ipInfo.ipv4 || "加载中..."}
           </span>
         </div>
         {settings.show_geoip && ipInfo.ipv4_geoip && (
           <div className="flex items-center gap-2 pl-6">
-            <span className="text-gray-500 text-sm">位置:</span>
-            <span className="text-gray-600 text-sm">
+            <span className="text-gray-500 dark:text-gray-400 text-sm">位置:</span>
+            <span className="text-gray-600 dark:text-gray-300 text-sm">
               {formatLocation(ipInfo.ipv4_geoip)}
             </span>
           </div>
@@ -114,31 +114,31 @@ export default function IPInfoCard() {
       <div className="mb-4">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-green-600 font-medium text-sm">本地 IPv4:</span>
-          <span className="font-mono text-sm text-gray-800">
+          <span className="font-mono text-sm text-gray-800 dark:text-gray-200">
             {ipInfo.local_ipv4 || "未检测到"}
           </span>
         </div>
         <div className="flex items-center gap-2 pl-6">
-          <span className="text-gray-500 text-sm">类型:</span>
-          <span className="text-gray-600 text-sm">局域网 (内网)</span>
+          <span className="text-gray-500 dark:text-gray-400 text-sm">类型:</span>
+          <span className="text-gray-600 dark:text-gray-300 text-sm">局域网 (内网)</span>
         </div>
       </div>
 
       {/* IPv6 */}
       {ipInfo.ipv6 && (
-        <div className="mt-4 pt-4 border-t border-gray-100">
+        <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
           <div className="flex items-center gap-2 mb-2">
             <span className="text-purple-600 font-medium text-sm">IPv6:</span>
-            <span className="font-mono text-sm text-gray-800">{ipInfo.ipv6}</span>
+            <span className="font-mono text-sm text-gray-800 dark:text-gray-200">{ipInfo.ipv6}</span>
           </div>
           <div className="flex items-center gap-2 pl-6">
-            <span className="text-gray-500 text-sm">类型:</span>
-            <span className="text-gray-600 text-sm">{ipInfo.ipv6_type || "未知"}</span>
+            <span className="text-gray-500 dark:text-gray-400 text-sm">类型:</span>
+            <span className="text-gray-600 dark:text-gray-300 text-sm">{ipInfo.ipv6_type || "未知"}</span>
           </div>
           {settings.show_geoip && ipInfo.ipv6_geoip && (
             <div className="flex items-center gap-2 pl-6">
-              <span className="text-gray-500 text-sm">位置:</span>
-              <span className="text-gray-600 text-sm">
+              <span className="text-gray-500 dark:text-gray-400 text-sm">位置:</span>
+              <span className="text-gray-600 dark:text-gray-300 text-sm">
                 {formatLocation(ipInfo.ipv6_geoip)}
               </span>
             </div>
@@ -148,8 +148,8 @@ export default function IPInfoCard() {
 
       {/* No IPv6 message */}
       {!ipInfo.ipv6 && (
-        <div className="mt-4 pt-4 border-t border-gray-100">
-          <div className="flex items-center gap-2 text-gray-500 text-sm">
+        <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
+          <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-sm">
             <span>IPv6: 未检测到</span>
           </div>
         </div>
