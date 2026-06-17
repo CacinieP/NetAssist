@@ -181,28 +181,34 @@ export default function Dashboard() {
         {errors.cumulative ? (
           <div className="text-center text-red-500 py-4">{errors.cumulative}</div>
         ) : cumulative ? (
-          <div className="grid grid-cols-3 gap-4">
-            <div className="text-center">
-              <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">总流量</div>
-              <div className="text-lg font-semibold text-gray-800 dark:text-gray-100">
-                {formatBytes(cumulative.total_download_bytes + cumulative.total_upload_bytes)}
+          (cumulative.total_download_bytes === 0 && cumulative.total_upload_bytes === 0) ? (
+            <div className="text-center text-gray-400 dark:text-gray-500 py-4 text-sm">
+              数据采集中…流量每分钟记录一次，请稍候查看
+            </div>
+          ) : (
+            <div className="grid grid-cols-3 gap-4">
+              <div className="text-center">
+                <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">总流量</div>
+                <div className="text-lg font-semibold text-gray-800 dark:text-gray-100">
+                  {formatBytes(cumulative.total_download_bytes + cumulative.total_upload_bytes)}
+                </div>
+              </div>
+              <div className="text-center">
+                <div className="text-xs text-green-600 mb-1">下载</div>
+                <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {formatBytes(cumulative.total_download_bytes)}
+                </div>
+              </div>
+              <div className="text-center">
+                <div className="text-xs text-blue-600 mb-1">上传</div>
+                <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {formatBytes(cumulative.total_upload_bytes)}
+                </div>
               </div>
             </div>
-            <div className="text-center">
-              <div className="text-xs text-green-600 mb-1">下载</div>
-              <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                {formatBytes(cumulative.total_download_bytes)}
-              </div>
-            </div>
-            <div className="text-center">
-              <div className="text-xs text-blue-600 mb-1">上传</div>
-              <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                {formatBytes(cumulative.total_upload_bytes)}
-              </div>
-            </div>
-          </div>
+          )
         ) : (
-          <div className="text-center text-gray-400 py-4">加载中...</div>
+          <div className="text-center text-gray-400 dark:text-gray-500 py-4">加载中...</div>
         )}
       </div>
 

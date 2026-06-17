@@ -182,7 +182,11 @@ export default function Settings() {
               type="checkbox"
               checked={localSettings.dark_mode}
               onChange={(e) => {
+                // Dark mode applies instantly (live preview) by writing to the
+                // store, which App.tsx reflects to <html class="dark">. Other
+                // fields remain in the local draft until "保存设置" is clicked.
                 setLocalSettings(prev => ({ ...prev, dark_mode: e.target.checked }));
+                setSettings({ dark_mode: e.target.checked });
                 setSaveSuccess(false);
               }}
               className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
