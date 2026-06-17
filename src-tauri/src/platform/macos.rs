@@ -40,6 +40,40 @@ pub fn get_default_interface() -> anyhow::Result<String> {
     Ok("en0".to_string())
 }
 
+/// Map a BSD interface name (e.g. `en0`) to its macOS **network service name**
+/// (e.g. `Wi-Fi`). The `networksetup` tool requires the service name, not the
+/// interface name — passing `en0` to `-setdnsservers`/`-setv6off` silently
+/// fails with "not a recognized network service".
+///
+/// Parses `networksetup -listallhardwareports`:
+/// ```text
+/// Hardware Port: Wi-Fi
+/// Device: en0
+/// Ethernet Address: ...
+/// ```
+pub fn get_network_service_for_interface(iface: &str) -> Option<String> {
+    let output = super::common::exec_command("networksetup", &["-listallhardwareports"]).ok()?;
+    let mut current_service: Option<String> = None;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(name) = trimmed.strip_prefix("Hardware Port:") {
+            current_service = Some(name.trim().to_string());
+        } else if let Some(device) = trimmed.strip_prefix("Device:") {
+            if device.trim() == iface {
+                return current_service.clone();
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the network service name for the current default interface, with a
+/// sensible fallback. Used by every `networksetup` operation.
+fn default_network_service() -> String {
+    let iface = get_default_interface().unwrap_or_else(|_| "en0".to_string());
+    get_network_service_for_interface(&iface).unwrap_or_else(|| "Wi-Fi".to_string())
+}
+
 /// Get network interfaces on macOS
 pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
     // Use: ifconfig
@@ -316,25 +350,111 @@ pub fn get_dns_servers() -> anyhow::Result<Vec<String>> {
 
 /// Set DNS servers on macOS
 pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result<()> {
-    // Use: networksetup -setdnsservers (interface) primary [secondary]
-    let output = super::common::exec_command("route", &["-n", "get", "default"])?;
-    let mut interface = "en0";
-
-    for line in output.lines() {
-        if line.contains("interface:") {
-            if let Some(iface) = line.split_whitespace().nth(1) {
-                interface = iface;
-            }
-        }
-    }
+    // networksetup -setdnsservers requires the NETWORK SERVICE name (e.g. "Wi-Fi"),
+    // NOT the interface name (e.g. "en0"). Passing the interface fails silently
+    // with "not a recognized network service".
+    let service = default_network_service();
 
     let mut cmd = std::process::Command::new("networksetup");
-    cmd.args(&["-setdnsservers", interface, primary]);
+    cmd.args(&["-setdnsservers", &service, primary]);
     if let Some(secondary) = secondary {
         cmd.arg(secondary);
     }
 
-    cmd.status()?;
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "Failed to set DNS servers on {}: {}",
+            service,
+            stderr.trim()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Toggle IPv6 on the primary network service between "Automatic" and "Off".
+///
+/// This is a real implementation (no root required): `networksetup -getinfo`
+/// reads the current state, then `-setv6off` / `-setv6automatic` flips it.
+/// Returns a human-readable description of what was done.
+pub fn toggle_ipv6() -> anyhow::Result<String> {
+    let service = default_network_service();
+
+    // Read current IPv6 state from `networksetup -getinfo <service>`.
+    let info = super::common::exec_command("networksetup", &["-getinfo", &service])?;
+    let current_off = info
+        .lines()
+        .any(|line| line.trim().eq_ignore_ascii_case("IPv6: Off"));
+
+    if current_off {
+        // Currently Off -> enable (Automatic)
+        let output = std::process::Command::new("networksetup")
+            .args(&["-setv6automatic", &service])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "Failed to enable IPv6 on {}: {}",
+                service,
+                stderr.trim()
+            ));
+        }
+        Ok(format!("已启用 IPv6 (Automatic) on {}", service))
+    } else {
+        // Currently Automatic/On -> disable (Off)
+        let output = std::process::Command::new("networksetup")
+            .args(&["-setv6off", &service])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "Failed to disable IPv6 on {}: {}",
+                service,
+                stderr.trim()
+            ));
+        }
+        Ok(format!("已关闭 IPv6 (Off) on {}", service))
+    }
+}
+
+/// Reset (disable then re-enable) the primary network adapter.
+///
+/// `ifconfig <iface> down/up` requires root on macOS, so this is performed via
+/// `osascript` which prompts for administrator privileges (native macOS auth
+/// dialog). If the user cancels, osascript exits non-zero and we surface a
+/// clear error.
+pub fn reset_adapter() -> anyhow::Result<()> {
+    let iface = get_default_interface().unwrap_or_else(|_| "en0".to_string());
+
+    // osascript: run a privileged shell that bounces the interface.
+    // down -> wait 1s -> up. Quotes are escaped for the AppleScript string.
+    let script = format!(
+        "do shell script \"ifconfig {} down && sleep 1 && ifconfig {} up\" with administrator privileges",
+        iface, iface
+    );
+
+    let output = std::process::Command::new("osascript")
+        .args(&["-e", &script])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = stderr.trim();
+        // osascript prints "-128 User canceled" / "not authorized" on cancel/deny.
+        if msg.contains("-128") || msg.to_lowercase().contains("cancel") {
+            return Err(anyhow::anyhow!(
+                "用户取消了管理员授权，未重置适配器 {}",
+                iface
+            ));
+        }
+        return Err(anyhow::anyhow!(
+            "重置适配器 {} 失败（需要管理员权限）: {}",
+            iface,
+            msg
+        ));
+    }
 
     Ok(())
 }
