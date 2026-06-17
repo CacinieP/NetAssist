@@ -128,13 +128,13 @@ export default function Settings() {
   return (
     <div className="p-6 space-y-6">
       <div className="mb-6">
-        <h2 className="text-2xl font-bold text-gray-800">设置</h2>
-        <p className="text-gray-500">配置应用偏好和选项</p>
+        <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">设置</h2>
+        <p className="text-gray-500 dark:text-gray-400">配置应用偏好和选项</p>
       </div>
 
       {/* Success Message */}
       {saveSuccess && (
-        <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg flex items-center gap-2">
+        <div className="bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-300 px-4 py-3 rounded-lg flex items-center gap-2">
           <span>✓</span>
           <span>设置保存成功</span>
         </div>
@@ -142,18 +142,18 @@ export default function Settings() {
 
       {/* Error Message */}
       {storeError && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
+        <div className="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 px-4 py-3 rounded-lg">
           {storeError}
         </div>
       )}
 
       {/* General Settings */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h3 className="text-sm font-medium text-gray-700 mb-4">常规设置</h3>
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">常规设置</h3>
 
         <div className="space-y-3">
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700">开机自启动</span>
+            <span className="text-gray-700 dark:text-gray-200">开机自启动</span>
             <input
               type="checkbox"
               checked={localSettings.auto_start}
@@ -165,7 +165,7 @@ export default function Settings() {
             />
           </label>
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700">最小化到托盘</span>
+            <span className="text-gray-700 dark:text-gray-200">最小化到托盘</span>
             <input
               type="checkbox"
               checked={localSettings.minimize_to_tray}
@@ -177,7 +177,7 @@ export default function Settings() {
             />
           </label>
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700">深色模式</span>
+            <span className="text-gray-700 dark:text-gray-200">深色模式</span>
             <input
               type="checkbox"
               checked={localSettings.dark_mode}
@@ -189,14 +189,14 @@ export default function Settings() {
             />
           </label>
           <div>
-            <label className="text-gray-700 block mb-2">语言</label>
+            <label className="text-gray-700 dark:text-gray-200 block mb-2">语言</label>
             <select
               value={localSettings.language}
               onChange={(e) => {
                 setLocalSettings(prev => ({ ...prev, language: e.target.value }));
                 setSaveSuccess(false);
               }}
-              className="px-3 py-1.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 w-40"
+              className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 w-40"
             >
               <option value="zh-CN">简体中文</option>
               <option value="en-US">English</option>
@@ -212,19 +212,19 @@ export default function Settings() {
       </div>
 
       {/* Monitoring Settings */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h3 className="text-sm font-medium text-gray-700 mb-4">监控设置</h3>
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">监控设置</h3>
 
         <div className="space-y-4">
           <div>
-            <label className="text-gray-700 block mb-2">刷新间隔</label>
+            <label className="text-gray-700 dark:text-gray-200 block mb-2">刷新间隔</label>
             <select
               value={localSettings.refresh_interval_secs}
               onChange={(e) => handleRefreshIntervalChange(e.target.value)}
-              className={`px-3 py-1.5 border rounded-lg focus:outline-none focus:ring-2 w-32 ${
+              className={`px-3 py-1.5 border rounded-lg focus:outline-none focus:ring-2 w-32 dark:bg-gray-700 dark:text-gray-200 ${
                 validationErrors.refresh_interval_secs
                   ? 'border-red-300 focus:ring-red-500'
-                  : 'border-gray-300 focus:ring-blue-500'
+                  : 'border-gray-300 dark:border-gray-600 focus:ring-blue-500'
               }`}
             >
               <option value={1}>1秒</option>
@@ -244,7 +244,7 @@ export default function Settings() {
             )}
           </div>
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700">显示IP地区信息</span>
+            <span className="text-gray-700 dark:text-gray-200">显示IP地区信息</span>
             <input
               type="checkbox"
               checked={localSettings.show_geoip}
@@ -256,7 +256,7 @@ export default function Settings() {
             />
           </label>
           <div>
-            <label className="text-gray-700 block mb-2">流量限制 (GB)</label>
+            <label className="text-gray-700 dark:text-gray-200 block mb-2">流量限制 (GB)</label>
             <input
               type="number"
               min={0.1}
@@ -264,10 +264,10 @@ export default function Settings() {
               step={0.1}
               value={localSettings.traffic_limit_gb}
               onChange={(e) => handleTrafficLimitChange(e.target.value)}
-              className={`px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 w-32 ${
+              className={`px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 w-32 dark:bg-gray-700 dark:text-gray-200 ${
                 validationErrors.traffic_limit_gb
                   ? 'border-red-300 focus:ring-red-500'
-                  : 'border-gray-300 focus:ring-blue-500'
+                  : 'border-gray-300 dark:border-gray-600 focus:ring-blue-500'
               }`}
             />
             {validationErrors.traffic_limit_gb && (
@@ -278,20 +278,20 @@ export default function Settings() {
       </div>
 
       {/* DNS Settings */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h3 className="text-sm font-medium text-gray-700 mb-4">DNS设置</h3>
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">DNS设置</h3>
 
         <div className="space-y-3">
           <div>
-            <label className="block text-sm text-gray-700 mb-1">主DNS</label>
+            <label className="block text-sm text-gray-700 dark:text-gray-200 mb-1">主DNS</label>
             <input
               type="text"
               value={localSettings.primary_dns}
               onChange={(e) => handleDNSChange('primary_dns', e.target.value)}
-              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 font-mono ${
+              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 font-mono dark:bg-gray-700 dark:text-gray-200 ${
                 validationErrors.primary_dns
                   ? 'border-red-300 focus:ring-red-500'
-                  : 'border-gray-300 focus:ring-blue-500'
+                  : 'border-gray-300 dark:border-gray-600 focus:ring-blue-500'
               }`}
               placeholder="例如: 8.8.8.8"
             />
@@ -300,15 +300,15 @@ export default function Settings() {
             )}
           </div>
           <div>
-            <label className="block text-sm text-gray-700 mb-1">备用DNS</label>
+            <label className="block text-sm text-gray-700 dark:text-gray-200 mb-1">备用DNS</label>
             <input
               type="text"
               value={localSettings.secondary_dns}
               onChange={(e) => handleDNSChange('secondary_dns', e.target.value)}
-              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 font-mono ${
+              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 font-mono dark:bg-gray-700 dark:text-gray-200 ${
                 validationErrors.secondary_dns
                   ? 'border-red-300 focus:ring-red-500'
-                  : 'border-gray-300 focus:ring-blue-500'
+                  : 'border-gray-300 dark:border-gray-600 focus:ring-blue-500'
               }`}
               placeholder="例如: 1.1.1.1"
             />
@@ -320,12 +320,12 @@ export default function Settings() {
       </div>
 
       {/* Notification Settings */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h3 className="text-sm font-medium text-gray-700 mb-4">通知设置</h3>
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">通知设置</h3>
 
         <div className="space-y-3">
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700">网络异常通知</span>
+            <span className="text-gray-700 dark:text-gray-200">网络异常通知</span>
             <input
               type="checkbox"
               checked={localSettings.notify_network_abnormal}
@@ -337,7 +337,7 @@ export default function Settings() {
             />
           </label>
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700">流量超限通知</span>
+            <span className="text-gray-700 dark:text-gray-200">流量超限通知</span>
             <input
               type="checkbox"
               checked={localSettings.notify_traffic_limit}
@@ -362,7 +362,7 @@ export default function Settings() {
         </button>
         <button
           onClick={handleReset}
-          className="px-6 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+          className="px-6 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 dark:bg-gray-800 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
         >
           恢复默认
         </button>
