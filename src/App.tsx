@@ -34,6 +34,14 @@ function App() {
     loadSettings();
   }, [loadSettings]);
 
+  // Apply dark mode by toggling the `dark` class on <html>.
+  // The Settings checkbox writes settings.dark_mode via the store; this effect
+  // is the single source of truth that reflects it to the DOM (and thus to all
+  // Tailwind `dark:` variants and the CSS base theme).
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", settings.dark_mode);
+  }, [settings.dark_mode]);
+
   // Derive error state from network data (replaces old retry logic)
   useEffect(() => {
     if (networkStatus === null && ipInfo === null) {
@@ -77,7 +85,7 @@ function App() {
 
   return (
     <BrowserRouter>
-      <div className="h-screen flex flex-col bg-gray-50">
+      <div className="h-screen flex flex-col bg-gray-50 dark:bg-gray-900">
         {/* Error Banner */}
         {error && (
           <div className="bg-red-50 border-b border-red-200 px-4 py-2 flex items-center justify-between">

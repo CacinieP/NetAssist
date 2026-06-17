@@ -16,6 +16,12 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Dark theme base — toggled by the `dark` class on <html>. */
+.dark {
+  color: #e5e7eb;
+  background-color: #0f172a;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -39,14 +45,14 @@ body {
   }
 
   .scrollbar-thin::-webkit-scrollbar-track {
-    @apply bg-gray-100;
+    @apply bg-gray-100 dark:bg-gray-800;
   }
 
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    @apply bg-gray-300 rounded-full;
+    @apply bg-gray-300 dark:bg-gray-600 rounded-full;
   }
 
   .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-    @apply bg-gray-400;
+    @apply bg-gray-400 dark:bg-gray-500;
   }
 }

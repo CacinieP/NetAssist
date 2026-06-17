@@ -33,14 +33,14 @@ class ErrorBoundary extends Component<Props, State> {
     if (this.state.hasError) {
       // Custom fallback UI
       return (
-        <div className="flex items-center justify-center h-screen bg-gray-50">
-          <div className="text-center p-8 bg-white rounded-lg shadow-lg max-w-md">
+            <div className="flex items-center justify-center h-screen bg-gray-50 dark:bg-gray-900">
+          <div className="text-center p-8 bg-white dark:bg-gray-800 rounded-lg shadow-lg max-w-md">
             <div className="text-6xl mb-4">⚠️</div>
             <h1 className="text-xl font-bold text-red-600 mb-2">应用出错了</h1>
-            <p className="text-gray-600 mb-4">
+            <p className="text-gray-600 dark:text-gray-300 mb-4">
               {this.state.error?.message || "发生了一个未知错误"}
             </p>
-            <p className="text-sm text-gray-500 mb-6">
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
               请尝试刷新页面或重启应用
             </p>
             <button

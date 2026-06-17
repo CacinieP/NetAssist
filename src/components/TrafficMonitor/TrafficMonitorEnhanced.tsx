@@ -77,9 +77,9 @@ const CumulativeStatsCard = ({
   ];
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-4">
+    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-700">累计流量统计</h3>
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">累计流量统计</h3>
         <div className="flex gap-1">
           {periods.map(p => (
             <button
@@ -87,8 +87,8 @@ const CumulativeStatsCard = ({
               onClick={() => onPeriodChange(p.key)}
               className={`px-2 py-1 text-xs rounded transition-colors ${
                 period === p.key
-                  ? "bg-blue-50 text-blue-600"
-                  : "bg-gray-50 text-gray-600 hover:bg-gray-100"
+                  ? "bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-blue-300"
+                  : "bg-gray-50 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600"
               }`}
             >
               {p.label}
@@ -97,26 +97,26 @@ const CumulativeStatsCard = ({
         </div>
       </div>
       {loading ? (
-        <div className="animate-pulse h-16 bg-gray-100 rounded"></div>
+        <div className="animate-pulse h-16 bg-gray-100 dark:bg-gray-700 rounded"></div>
       ) : (
         <div className="grid grid-cols-3 gap-4">
           <div className="text-center">
-            <div className="text-xs text-gray-500 mb-1">总流量</div>
-            <div className="text-lg font-semibold text-gray-800">{formatBytes((data?.total_download_bytes || 0) + (data?.total_upload_bytes || 0))}</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">总流量</div>
+            <div className="text-lg font-semibold text-gray-800 dark:text-gray-100">{formatBytes((data?.total_download_bytes || 0) + (data?.total_upload_bytes || 0))}</div>
           </div>
           <div className="text-center">
             <div className="flex items-center justify-center gap-1 text-xs text-green-600 mb-1">
               <Download size={12} />
               <span>下载</span>
             </div>
-            <div className="text-sm font-medium text-gray-700">{formatBytes(data?.total_download_bytes || 0)}</div>
+            <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{formatBytes(data?.total_download_bytes || 0)}</div>
           </div>
           <div className="text-center">
             <div className="flex items-center justify-center gap-1 text-xs text-blue-600 mb-1">
               <Upload size={12} />
               <span>上传</span>
             </div>
-            <div className="text-sm font-medium text-gray-700">{formatBytes(data?.total_upload_bytes || 0)}</div>
+            <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{formatBytes(data?.total_upload_bytes || 0)}</div>
           </div>
         </div>
       )}
@@ -137,15 +137,15 @@ const TrafficAlertCard = ({
   const getStatus = (alertId: string) => alertStatuses.find(s => s.alert_id === alertId);
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-4">
+    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-700 flex items-center gap-2">
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 flex items-center gap-2">
           <AlertTriangle size={16} className="text-amber-500" />
           流量告警
         </h3>
         <button
           onClick={onManageAlerts}
-          className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+          className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"
         >
           管理告警
         </button>
@@ -158,20 +158,20 @@ const TrafficAlertCard = ({
           const isCritical = percentage >= 100;
 
           return (
-            <div key={alert.id} className="p-2 bg-gray-50 rounded">
+            <div key={alert.id} className="p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
               <div className="flex justify-between items-center mb-1">
-                <span className="text-xs font-medium text-gray-700">{alert.name}</span>
-                <span className={`text-xs ${isCritical ? 'text-red-600' : isWarning ? 'text-amber-600' : 'text-gray-500'}`}>
+                <span className="text-xs font-medium text-gray-700 dark:text-gray-200">{alert.name}</span>
+                <span className={`text-xs ${isCritical ? 'text-red-600' : isWarning ? 'text-amber-600' : 'text-gray-500 dark:text-gray-400'}`}>
                   {percentage.toFixed(0)}%
                 </span>
               </div>
-              <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+              <div className="w-full h-1.5 bg-gray-200 dark:bg-gray-600 rounded-full overflow-hidden">
                 <div
                   className={`h-full rounded-full transition-all ${isCritical ? 'bg-red-500' : isWarning ? 'bg-amber-500' : 'bg-green-500'}`}
                   style={{ width: `${Math.min(percentage, 100)}%` }}
                 />
               </div>
-              <div className="flex justify-between mt-1 text-xs text-gray-400">
+              <div className="flex justify-between mt-1 text-xs text-gray-400 dark:text-gray-500">
                 <span>{formatBytes(status?.current_value || 0)}</span>
                 <span>/ {formatBytes(alert.threshold_bytes)}</span>
               </div>
@@ -194,13 +194,13 @@ const AppTableHeader = ({ field, order, onSort }: { field: SortField | null, ord
   ];
 
   return (
-    <div className="grid grid-cols-[2fr,100px,100px,100px,70px,80px] gap-2 px-4 py-2 bg-gray-50 rounded-t-lg">
+    <div className="grid grid-cols-[2fr,100px,100px,100px,70px,80px] gap-2 px-4 py-2 bg-gray-50 dark:bg-gray-700/50 rounded-t-lg">
       {headers.map((header, idx) => (
         <button
           key={`${header.key}-${idx}`}
           onClick={() => onSort(header.key)}
           className={`text-xs font-medium text-left flex items-center gap-1 ${
-            field === header.key ? "text-blue-600" : "text-gray-600 hover:text-gray-800"
+            field === header.key ? "text-blue-600 dark:text-blue-400" : "text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-gray-100"
           }`}
           style={{ width: header.width }}
         >
@@ -288,19 +288,19 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
 
   if (topApps.length === 0) {
     return (
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h3 className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-2">
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3 flex items-center gap-2">
           <PieChart size={16} />
           应用流量占比 (Top 10)
         </h3>
-        <div className="text-center text-gray-500 py-8 text-sm">暂无流量数据</div>
+        <div className="text-center text-gray-500 dark:text-gray-400 py-8 text-sm">暂无流量数据</div>
       </div>
     );
   }
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-4">
-      <h3 className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-2">
+    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+      <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3 flex items-center gap-2">
         <PieChart size={16} />
         应用流量占比 (Top 10)
       </h3>
@@ -776,20 +776,20 @@ export default function TrafficMonitorEnhanced() {
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
-          <h2 className="text-2xl font-bold text-gray-800">流量监控</h2>
-          <p className="text-gray-500">实时流量统计与应用排行</p>
+          <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">流量监控</h2>
+          <p className="text-gray-500 dark:text-gray-400">实时流量统计与应用排行</p>
         </div>
         <div className="flex gap-2">
           <button
             onClick={() => exportData("csv")}
-            className="flex items-center gap-1 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-1 px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
           >
             <FileText size={16} />
             CSV
           </button>
           <button
             onClick={() => exportData("json")}
-            className="flex items-center gap-1 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            className="flex items-center gap-1 px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
           >
             <BarChart3 size={16} />
             JSON
@@ -798,23 +798,23 @@ export default function TrafficMonitorEnhanced() {
       </div>
 
       {/* Real-time Stats */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
         <div className="flex items-center gap-2 mb-3">
           <Activity size={16} className="text-blue-500" />
-          <h3 className="text-sm font-medium text-gray-700">实时流量</h3>
+          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">实时流量</h3>
         </div>
         <div className="flex gap-8">
           <div className="flex items-center gap-3">
             <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
-            <span className="text-gray-600">下载:</span>
-            <span className="font-mono text-lg font-semibold text-gray-800">
+            <span className="text-gray-600 dark:text-gray-400">下载:</span>
+            <span className="font-mono text-lg font-semibold text-gray-800 dark:text-gray-100">
               {stats ? formatSpeed(stats.download_bps) : "-"}
             </span>
           </div>
           <div className="flex items-center gap-3">
             <div className="w-3 h-3 bg-blue-500 rounded-full animate-pulse"></div>
-            <span className="text-gray-600">上传:</span>
-            <span className="font-mono text-lg font-semibold text-gray-800">
+            <span className="text-gray-600 dark:text-gray-400">上传:</span>
+            <span className="font-mono text-lg font-semibold text-gray-800 dark:text-gray-100">
               {stats ? formatSpeed(stats.upload_bps) : "-"}
             </span>
           </div>
@@ -843,17 +843,17 @@ export default function TrafficMonitorEnhanced() {
       </div>
 
       {/* App Ranking Table */}
-      <div className="bg-white rounded-lg border border-gray-200">
-        <div className="p-4 border-b border-gray-200">
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+        <div className="p-4 border-b border-gray-200 dark:border-gray-700">
           <div className="flex justify-between items-center">
-            <h3 className="text-sm font-medium text-gray-700">应用进程列表 ({filteredAndSortedApps.length})</h3>
+            <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">应用进程列表 ({filteredAndSortedApps.length})</h3>
             <div className="flex gap-2">
               <input
                 type="text"
                 placeholder="搜索应用..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value.slice(0, 100))}
-                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <button
                 onClick={fetchApps}
@@ -870,18 +870,18 @@ export default function TrafficMonitorEnhanced() {
         {/* Virtual Scrolled List (simplified) */}
         <div className="max-h-[500px] overflow-y-auto">
           {filteredAndSortedApps.length === 0 ? (
-            <div className="text-center text-gray-500 py-10">未找到进程</div>
+            <div className="text-center text-gray-500 dark:text-gray-400 py-10">未找到进程</div>
           ) : (
             <>
               {filteredAndSortedApps.map((app, index) => {
                 const percentage = getAppPercentage(app);
                 return (
-                  <div key={`${app.pid}-${index}`} className="grid grid-cols-[2fr,100px,100px,100px,70px,80px] gap-2 px-4 py-3 border-b border-gray-100 hover:bg-gray-50 transition-colors items-center">
+                  <div key={`${app.pid}-${index}`} className="grid grid-cols-[2fr,100px,100px,100px,70px,80px] gap-2 px-4 py-3 border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors items-center">
                     <div className="flex items-center gap-3 overflow-hidden">
-                      <span className="text-gray-500 font-medium w-6 text-sm flex-shrink-0">{index + 1}</span>
+                      <span className="text-gray-500 dark:text-gray-400 font-medium w-6 text-sm flex-shrink-0">{index + 1}</span>
                       <div className="truncate">
-                        <div className="font-medium text-gray-800 text-sm truncate">{app.name}</div>
-                        <div className="text-xs text-gray-400">PID: {app.pid}</div>
+                        <div className="font-medium text-gray-800 dark:text-gray-100 text-sm truncate">{app.name}</div>
+                        <div className="text-xs text-gray-400 dark:text-gray-500">PID: {app.pid}</div>
                       </div>
                     </div>
                     <div className="text-sm">
@@ -891,11 +891,11 @@ export default function TrafficMonitorEnhanced() {
                       <div className="font-mono text-blue-600">{formatSpeed(app.current_upload_bps)}</div>
                     </div>
                     <div className="text-sm">
-                      <div className="font-mono text-gray-700">{formatSpeed(app.current_download_bps + app.current_upload_bps)}</div>
+                      <div className="font-mono text-gray-700 dark:text-gray-300">{formatSpeed(app.current_download_bps + app.current_upload_bps)}</div>
                     </div>
                     <div className="text-sm">
-                      <div className="font-mono text-gray-600">{percentage.toFixed(1)}%</div>
-                      <div className="w-full h-1 bg-gray-200 rounded-full mt-1 overflow-hidden">
+                      <div className="font-mono text-gray-600 dark:text-gray-400">{percentage.toFixed(1)}%</div>
+                      <div className="w-full h-1 bg-gray-200 dark:bg-gray-600 rounded-full mt-1 overflow-hidden">
                         <div
                           className="h-full bg-blue-500 rounded-full"
                           style={{ width: `${Math.min(percentage, 100)}%` }}
@@ -905,7 +905,7 @@ export default function TrafficMonitorEnhanced() {
                     <div>
                       <button
                         onClick={() => handleShowDetails(app)}
-                        className="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-blue-50 hover:text-blue-600 hover:border-blue-300 transition-colors"
+                        className="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 rounded hover:bg-blue-50 dark:hover:bg-blue-900/30 hover:text-blue-600 hover:border-blue-300 transition-colors"
                       >
                         详情
                       </button>
@@ -915,10 +915,10 @@ export default function TrafficMonitorEnhanced() {
               })}
 
               {/* Summary Total Row */}
-              <div className="grid grid-cols-[2fr,100px,100px,100px,70px,80px] gap-2 px-4 py-3 bg-gray-100 border-t-2 border-gray-300 items-center font-medium">
+              <div className="grid grid-cols-[2fr,100px,100px,100px,70px,80px] gap-2 px-4 py-3 bg-gray-100 dark:bg-gray-700/50 border-t-2 border-gray-300 dark:border-gray-600 items-center font-medium">
                 <div className="flex items-center gap-3">
-                  <span className="text-gray-700 font-bold w-6 text-sm flex-shrink-0">Σ</span>
-                  <div className="text-gray-800 text-sm">总计</div>
+                  <span className="text-gray-700 dark:text-gray-200 font-bold w-6 text-sm flex-shrink-0">Σ</span>
+                  <div className="text-gray-800 dark:text-gray-100 text-sm">总计</div>
                 </div>
                 <div className="text-sm">
                   <div className="font-mono text-green-700">{formatSpeed(totals.download)}</div>
@@ -927,12 +927,12 @@ export default function TrafficMonitorEnhanced() {
                   <div className="font-mono text-blue-700">{formatSpeed(totals.upload)}</div>
                 </div>
                 <div className="text-sm">
-                  <div className="font-mono text-gray-900">{formatSpeed(totals.total)}</div>
+                  <div className="font-mono text-gray-900 dark:text-gray-100">{formatSpeed(totals.total)}</div>
                 </div>
                 <div className="text-sm">
-                  <div className="font-mono text-gray-700">100%</div>
-                  <div className="w-full h-1 bg-gray-300 rounded-full mt-1 overflow-hidden">
-                    <div className="h-full bg-gray-600 rounded-full" style={{ width: "100%" }} />
+                  <div className="font-mono text-gray-700 dark:text-gray-300">100%</div>
+                  <div className="w-full h-1 bg-gray-300 dark:bg-gray-600 rounded-full mt-1 overflow-hidden">
+                    <div className="h-full bg-gray-600 dark:bg-gray-400 rounded-full" style={{ width: "100%" }} />
                   </div>
                 </div>
                 <div></div>
@@ -945,15 +945,15 @@ export default function TrafficMonitorEnhanced() {
       {/* App Details Modal */}
       {showDetailsModal && selectedApp && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-            <div className="p-4 border-b border-gray-200 flex justify-between items-center sticky top-0 bg-white z-10">
-              <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-3xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+            <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center sticky top-0 bg-white dark:bg-gray-800 z-10">
+              <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100 flex items-center gap-2">
                 <Activity size={20} className="text-blue-500" />
                 应用流量详情
               </h3>
               <button
                 onClick={() => setShowDetailsModal(false)}
-                className="text-gray-500 hover:text-gray-700"
+                className="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
               >
                 <X size={24} />
               </button>
@@ -961,61 +961,61 @@ export default function TrafficMonitorEnhanced() {
 
             <div className="p-6 space-y-6">
               {/* App Info */}
-              <div className="flex items-center gap-4 pb-4 border-b">
+              <div className="flex items-center gap-4 pb-4 border-b dark:border-gray-700">
                 <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center text-white text-2xl font-bold">
                   {selectedApp.name.charAt(0).toUpperCase()}
                 </div>
                 <div className="flex-1">
-                  <h4 className="text-xl font-bold text-gray-800">{selectedApp.name}</h4>
-                  <p className="text-sm text-gray-500">PID: {selectedApp.pid}</p>
+                  <h4 className="text-xl font-bold text-gray-800 dark:text-gray-100">{selectedApp.name}</h4>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">PID: {selectedApp.pid}</p>
                 </div>
                 <div className="text-right">
-                  <div className="text-sm text-gray-500">占比</div>
+                  <div className="text-sm text-gray-500 dark:text-gray-400">占比</div>
                   <div className="text-lg font-bold text-blue-600">{getAppPercentage(selectedApp).toFixed(2)}%</div>
                 </div>
               </div>
 
               {/* Real-time Stats */}
               <div className="grid grid-cols-2 gap-4">
-                <div className="bg-green-50 rounded-lg p-4">
+                <div className="bg-green-50 dark:bg-green-900/30 rounded-lg p-4">
                   <div className="flex items-center gap-2 mb-2">
                     <Download size={16} className="text-green-600" />
-                    <span className="text-sm font-medium text-gray-700">实时下载</span>
+                    <span className="text-sm font-medium text-gray-700 dark:text-gray-200">实时下载</span>
                   </div>
                   <div className="text-2xl font-bold text-green-600 font-mono">
                     {formatSpeed(selectedApp.current_download_bps)}
                   </div>
-                  <div className="text-xs text-gray-500 mt-1">
+                  <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     累计: {formatBytes(selectedApp.download_bytes)}
                   </div>
                 </div>
-                <div className="bg-blue-50 rounded-lg p-4">
+                <div className="bg-blue-50 dark:bg-blue-900/30 rounded-lg p-4">
                   <div className="flex items-center gap-2 mb-2">
                     <Upload size={16} className="text-blue-600" />
-                    <span className="text-sm font-medium text-gray-700">实时上传</span>
+                    <span className="text-sm font-medium text-gray-700 dark:text-gray-200">实时上传</span>
                   </div>
                   <div className="text-2xl font-bold text-blue-600 font-mono">
                     {formatSpeed(selectedApp.current_upload_bps)}
                   </div>
-                  <div className="text-xs text-gray-500 mt-1">
+                  <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     累计: {formatBytes(selectedApp.upload_bytes)}
                   </div>
                 </div>
               </div>
 
               {/* Total Stats */}
-              <div className="bg-gray-50 rounded-lg p-4">
+              <div className="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4">
                 <div className="flex justify-between items-center mb-2">
-                  <span className="text-sm font-medium text-gray-700">总流量</span>
-                  <span className="text-xl font-bold text-gray-800 font-mono">
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-200">总流量</span>
+                  <span className="text-xl font-bold text-gray-800 dark:text-gray-100 font-mono">
                     {formatSpeed(selectedApp.current_download_bps + selectedApp.current_upload_bps)}
                   </span>
                 </div>
-                <div className="flex justify-between text-sm text-gray-600">
+                <div className="flex justify-between text-sm text-gray-600 dark:text-gray-300">
                   <span>累计下载: {formatBytes(selectedApp.download_bytes)}</span>
                   <span>累计上传: {formatBytes(selectedApp.upload_bytes)}</span>
                 </div>
-                <div className="flex justify-between text-sm text-gray-600 mt-1">
+                <div className="flex justify-between text-sm text-gray-600 dark:text-gray-300 mt-1">
                   <span>累计总计: {formatBytes(selectedApp.download_bytes + selectedApp.upload_bytes)}</span>
                 </div>
               </div>
@@ -1023,7 +1023,7 @@ export default function TrafficMonitorEnhanced() {
               {/* Traffic Trend Chart — using proper useEffect lifecycle */}
               {appHistory.length > 0 && (
                 <div>
-                  <h5 className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-2">
+                  <h5 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3 flex items-center gap-2">
                     <TrendingUp size={16} />
                     流量趋势 (近60分钟)
                   </h5>
@@ -1032,7 +1032,7 @@ export default function TrafficMonitorEnhanced() {
               )}
             </div>
 
-            <div className="p-4 border-t border-gray-200 bg-gray-50 sticky bottom-0">
+            <div className="p-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700/50 sticky bottom-0">
               <button
                 onClick={() => setShowDetailsModal(false)}
                 className="w-full py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
@@ -1047,9 +1047,9 @@ export default function TrafficMonitorEnhanced() {
       {/* Manage Alerts Modal */}
       {showManageAlerts && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[85vh] overflow-y-auto">
-            <div className="p-4 border-b border-gray-200 flex justify-between items-center sticky top-0 bg-white z-10">
-              <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[85vh] overflow-y-auto">
+            <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center sticky top-0 bg-white dark:bg-gray-800 z-10">
+              <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100 flex items-center gap-2">
                 <AlertTriangle size={20} className="text-amber-500" />
                 流量告警管理
               </h3>
@@ -1059,7 +1059,7 @@ export default function TrafficMonitorEnhanced() {
                   setShowAddAlertForm(false);
                   setEditingAlert(null);
                 }}
-                className="text-gray-500 hover:text-gray-700"
+                className="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
               >
                 <X size={24} />
               </button>
