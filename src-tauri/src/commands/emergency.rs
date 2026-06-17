@@ -151,10 +151,11 @@ async fn check_network_connectivity() -> DiagnosticItem {
         Ok(join_result) => match join_result {
             Ok(output_result) => match output_result {
                 Ok(output) => {
-                    let content = String::from_utf8_lossy(&output.stdout);
-                    let success = content.contains("TTL=")
-                        || content.contains("ttl=")
-                        || content.contains("bytes from");
+                    // Prefer the ping process exit code over parsing its
+                    // (locale-dependent) text output: ping exits 0 on success
+                    // regardless of system language, which is more reliable
+                    // than matching "TTL="/"bytes from" strings.
+                    let success = output.status.success();
 
                     if success {
                         DiagnosticItem {
