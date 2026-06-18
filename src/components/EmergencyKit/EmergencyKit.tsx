@@ -522,14 +522,9 @@ export default function EmergencyKit() {
                 disabled={fixing !== null || autoFixing}
                 className="p-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:border-orange-300 dark:hover:border-orange-700 hover:bg-orange-50 dark:hover:bg-gray-700 transition-all text-left disabled:opacity-50"
               >
-                <div className="flex items-center gap-2 mb-1">
+                <div className="flex items-center gap-2">
                   {FIX_ICONS[action.action_type as FixType] || <Wrench className="w-4 h-4" />}
                   <span className="font-medium text-gray-800 dark:text-gray-100">{action.name}</span>
-                </div>
-                <p className="text-sm text-gray-600 dark:text-gray-300">{action.description}</p>
-                <div className="mt-2 text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1">
-                  <Clock className="w-3 h-3" />
-                  预计 {action.estimated_time_seconds} 秒
                 </div>
               </button>
             ))}
