@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { useSettingsStore } from "./store/settingsStore";
 import { useRealtimeTraffic } from "./hooks/useTrafficData";
 import { useNetworkData } from "./hooks/useNetworkData";
+import { notify } from "./utils/notify";
+import i18n from "./i18n";
 import StatusBar from "./components/StatusBar/StatusBar";
 import Navigation from "./components/Navigation/Navigation";
 import Dashboard from "./components/Dashboard/Dashboard";
@@ -13,6 +16,7 @@ import Settings from "./components/Settings/Settings";
 
 function App() {
   const { settings, loadSettings } = useSettingsStore();
+  const { t } = useTranslation();
 
   // Error state with user feedback
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +45,30 @@ function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", settings.dark_mode);
   }, [settings.dark_mode]);
+
+  // Sync the active i18n language to the persisted settings.language value.
+  useEffect(() => {
+    if (settings.language && settings.language !== i18n.language) {
+      void i18n.changeLanguage(settings.language);
+    }
+  }, [settings.language]);
+
+  // Network-abnormal notification: fire a native notification on the
+  // normal→abnormal transition (only once per transition), gated by the
+  // notify_network_abnormal setting.
+  const prevStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const current = networkStatus?.status ?? null;
+    const prev = prevStatusRef.current;
+    if (
+      prev === "normal" &&
+      current === "abnormal" &&
+      settings.notify_network_abnormal
+    ) {
+      void notify(t("notify.network_abnormal_title"), t("notify.network_abnormal_body"));
+    }
+    prevStatusRef.current = current;
+  }, [networkStatus, settings.notify_network_abnormal]);
 
   // Derive error state from network data (replaces old retry logic)
   useEffect(() => {
