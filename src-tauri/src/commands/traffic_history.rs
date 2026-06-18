@@ -382,6 +382,30 @@ impl TrafficAlertManager {
             });
         }
 
+        // Also honor the user's `traffic_limit_gb` setting from Settings as an
+        // additional "total" alert, so the 流量限制 field actually drives an
+        // alert. Failures to load settings are non-fatal (just skip it).
+        if let Ok(settings) = crate::commands::settings::load_settings_from_file() {
+            if settings.traffic_limit_gb > 0.0 {
+                let threshold_bytes = (settings.traffic_limit_gb * 1024.0 * 1024.0 * 1024.0) as u64;
+                let current_value =
+                    cumulative.total_download_bytes + cumulative.total_upload_bytes;
+                let triggered = current_value >= threshold_bytes;
+                let percentage = if threshold_bytes > 0 {
+                    (current_value as f64 / threshold_bytes as f64) * 100.0
+                } else {
+                    0.0
+                };
+                statuses.push(AlertStatus {
+                    alert_id: "traffic_limit_gb".to_string(),
+                    triggered,
+                    current_value,
+                    threshold_value: threshold_bytes,
+                    percentage,
+                });
+            }
+        }
+
         Ok(statuses)
     }
 }
