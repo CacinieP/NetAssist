@@ -1,9 +1,12 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useTranslation } from "react-i18next";
 import { useSettingsStore } from "../../store/settingsStore";
 import type { Settings as SettingsType } from "../../store/settingsStore";
 
 export default function Settings() {
   const { settings, setSettings, saveSettings, saving, error: storeError } = useSettingsStore();
+  const { t } = useTranslation();
 
   // Local state for form data
   const [localSettings, setLocalSettings] = useState<SettingsType>(settings);
@@ -128,15 +131,15 @@ export default function Settings() {
   return (
     <div className="p-6 space-y-6">
       <div className="mb-6">
-        <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">设置</h2>
-        <p className="text-gray-500 dark:text-gray-400">配置应用偏好和选项</p>
+        <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">{t("settings.title")}</h2>
+        <p className="text-gray-500 dark:text-gray-400">{t("settings.subtitle")}</p>
       </div>
 
       {/* Success Message */}
       {saveSuccess && (
         <div className="bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-300 px-4 py-3 rounded-lg flex items-center gap-2">
           <span>✓</span>
-          <span>设置保存成功</span>
+          <span>{t("settings.save_success")}</span>
         </div>
       )}
 
@@ -149,35 +152,44 @@ export default function Settings() {
 
       {/* General Settings */}
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">常规设置</h3>
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">{t("settings.general")}</h3>
 
         <div className="space-y-3">
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700 dark:text-gray-200">开机自启动</span>
+            <span className="text-gray-700 dark:text-gray-200">{t("settings.auto_start")}</span>
             <input
               type="checkbox"
               checked={localSettings.auto_start}
-              onChange={(e) => {
-                setLocalSettings(prev => ({ ...prev, auto_start: e.target.checked }));
+              onChange={async (e) => {
+                const enabled = e.target.checked;
+                setLocalSettings(prev => ({ ...prev, auto_start: enabled }));
+                setSettings({ auto_start: enabled });
                 setSaveSuccess(false);
+                // Apply launch-at-login immediately via the autostart plugin.
+                try {
+                  await invoke("set_autostart", { enabled });
+                } catch (err) {
+                  console.error("Failed to toggle autostart:", err);
+                }
               }}
               className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
             />
           </label>
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700 dark:text-gray-200">最小化到托盘</span>
+            <span className="text-gray-700 dark:text-gray-200">{t("settings.minimize_to_tray")}</span>
             <input
               type="checkbox"
               checked={localSettings.minimize_to_tray}
               onChange={(e) => {
                 setLocalSettings(prev => ({ ...prev, minimize_to_tray: e.target.checked }));
+                setSettings({ minimize_to_tray: e.target.checked });
                 setSaveSuccess(false);
               }}
               className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
             />
           </label>
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700 dark:text-gray-200">深色模式</span>
+            <span className="text-gray-700 dark:text-gray-200">{t("settings.dark_mode")}</span>
             <input
               type="checkbox"
               checked={localSettings.dark_mode}
@@ -193,23 +205,19 @@ export default function Settings() {
             />
           </label>
           <div>
-            <label className="text-gray-700 dark:text-gray-200 block mb-2">语言</label>
+            <label className="text-gray-700 dark:text-gray-200 block mb-2">{t("settings.language")}</label>
             <select
               value={localSettings.language}
               onChange={(e) => {
-                setLocalSettings(prev => ({ ...prev, language: e.target.value }));
+                const lang = e.target.value;
+                setLocalSettings(prev => ({ ...prev, language: lang }));
+                setSettings({ language: lang });
                 setSaveSuccess(false);
               }}
               className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 w-40"
             >
-              <option value="zh-CN">简体中文</option>
-              <option value="en-US">English</option>
-              <option value="ja-JP">日本語</option>
-              <option value="ko-KR">한국어</option>
-              <option value="es-ES">Español</option>
-              <option value="fr-FR">Français</option>
-              <option value="de-DE">Deutsch</option>
-              <option value="ru-RU">Русский</option>
+              <option value="zh-CN">{t("settings.lang_zh")}</option>
+              <option value="en-US">{t("settings.lang_en")}</option>
             </select>
           </div>
         </div>
@@ -217,11 +225,11 @@ export default function Settings() {
 
       {/* Monitoring Settings */}
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">监控设置</h3>
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">{t("settings.monitoring")}</h3>
 
         <div className="space-y-4">
           <div>
-            <label className="text-gray-700 dark:text-gray-200 block mb-2">刷新间隔</label>
+            <label className="text-gray-700 dark:text-gray-200 block mb-2">{t("settings.refresh_interval")}</label>
             <select
               value={localSettings.refresh_interval_secs}
               onChange={(e) => handleRefreshIntervalChange(e.target.value)}
@@ -231,24 +239,24 @@ export default function Settings() {
                   : 'border-gray-300 dark:border-gray-600 focus:ring-blue-500'
               }`}
             >
-              <option value={1}>1秒</option>
-              <option value={2}>2秒</option>
-              <option value={5}>5秒</option>
-              <option value={10}>10秒</option>
-              <option value={30}>30秒</option>
-              <option value={60}>1分钟</option>
-              <option value={120}>2分钟</option>
-              <option value={300}>5分钟</option>
-              <option value={600}>10分钟</option>
-              <option value={1800}>30分钟</option>
-              <option value={3600}>1小时</option>
+              <option value={1}>{t("settings.interval_1s")}</option>
+              <option value={2}>{t("settings.interval_2s")}</option>
+              <option value={5}>{t("settings.interval_5s")}</option>
+              <option value={10}>{t("settings.interval_10s")}</option>
+              <option value={30}>{t("settings.interval_30s")}</option>
+              <option value={60}>{t("settings.interval_1m")}</option>
+              <option value={120}>{t("settings.interval_2m")}</option>
+              <option value={300}>{t("settings.interval_5m")}</option>
+              <option value={600}>{t("settings.interval_10m")}</option>
+              <option value={1800}>{t("settings.interval_30m")}</option>
+              <option value={3600}>{t("settings.interval_1h")}</option>
             </select>
             {validationErrors.refresh_interval_secs && (
               <p className="text-red-500 text-sm mt-1">{validationErrors.refresh_interval_secs}</p>
             )}
           </div>
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700 dark:text-gray-200">显示IP地区信息</span>
+            <span className="text-gray-700 dark:text-gray-200">{t("settings.show_geoip")}</span>
             <input
               type="checkbox"
               checked={localSettings.show_geoip}
@@ -260,7 +268,7 @@ export default function Settings() {
             />
           </label>
           <div>
-            <label className="text-gray-700 dark:text-gray-200 block mb-2">流量限制 (GB)</label>
+            <label className="text-gray-700 dark:text-gray-200 block mb-2">{t("settings.traffic_limit")}</label>
             <input
               type="number"
               min={0.1}
@@ -283,11 +291,11 @@ export default function Settings() {
 
       {/* DNS Settings */}
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">DNS设置</h3>
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">{t("settings.dns_settings")}</h3>
 
         <div className="space-y-3">
           <div>
-            <label className="block text-sm text-gray-700 dark:text-gray-200 mb-1">主DNS</label>
+            <label className="block text-sm text-gray-700 dark:text-gray-200 mb-1">{t("settings.primary_dns")}</label>
             <input
               type="text"
               value={localSettings.primary_dns}
@@ -304,7 +312,7 @@ export default function Settings() {
             )}
           </div>
           <div>
-            <label className="block text-sm text-gray-700 dark:text-gray-200 mb-1">备用DNS</label>
+            <label className="block text-sm text-gray-700 dark:text-gray-200 mb-1">{t("settings.secondary_dns")}</label>
             <input
               type="text"
               value={localSettings.secondary_dns}
@@ -325,11 +333,11 @@ export default function Settings() {
 
       {/* Notification Settings */}
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">通知设置</h3>
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-4">{t("settings.notifications")}</h3>
 
         <div className="space-y-3">
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700 dark:text-gray-200">网络异常通知</span>
+            <span className="text-gray-700 dark:text-gray-200">{t("settings.notify_network_abnormal")}</span>
             <input
               type="checkbox"
               checked={localSettings.notify_network_abnormal}
@@ -341,7 +349,7 @@ export default function Settings() {
             />
           </label>
           <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-gray-700 dark:text-gray-200">流量超限通知</span>
+            <span className="text-gray-700 dark:text-gray-200">{t("settings.notify_traffic_limit")}</span>
             <input
               type="checkbox"
               checked={localSettings.notify_traffic_limit}
@@ -362,13 +370,13 @@ export default function Settings() {
           disabled={saving || Object.values(validationErrors).some(Boolean)}
           className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          {saving ? '保存中...' : '保存设置'}
+          {saving ? t("settings.saving") : t("settings.save")}
         </button>
         <button
           onClick={handleReset}
           className="px-6 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 dark:bg-gray-800 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
         >
-          恢复默认
+          {t("settings.reset")}
         </button>
       </div>
     </div>

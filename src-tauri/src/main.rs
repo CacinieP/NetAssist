@@ -6,6 +6,14 @@ mod core;
 mod models;
 mod platform;
 
+use commands::settings::load_settings_from_file;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+    Manager, WindowEvent,
+};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+
 fn main() {
     // Initialize tracing with debug level for process name resolution
     tracing_subscriber::fmt()
@@ -16,6 +24,69 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
+        .setup(|app| {
+            // ---- System tray ----
+            // Menu items: toggle window visibility + quit.
+            let show_item = MenuItem::with_id(app, "show", "显示/隐藏", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .tooltip("NetAssist")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .build(app)?;
+
+            // ---- Autostart sync ----
+            // Reflect the persisted auto_start setting into the OS on launch,
+            // in case the user toggled it from System Settings directly.
+            if let Ok(settings) = load_settings_from_file() {
+                let autostart_manager = app.autolaunch();
+                let currently_enabled = autostart_manager.is_enabled().unwrap_or(false);
+                if settings.auto_start && !currently_enabled {
+                    let _ = autostart_manager.enable();
+                } else if !settings.auto_start && currently_enabled {
+                    let _ = autostart_manager.disable();
+                }
+            }
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Minimize-to-tray: if the setting is on, intercept the close and
+            // hide the window to the tray instead of quitting.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let minimize_to_tray = load_settings_from_file()
+                    .map(|s| s.minimize_to_tray)
+                    .unwrap_or(false);
+                if minimize_to_tray {
+                    // prevent the app from actually closing
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::ip_info::get_ip_info,
             commands::ip_info::get_network_status,
@@ -41,6 +112,7 @@ fn main() {
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::reset_settings,
+            commands::settings::set_autostart,
             commands::settings::check_platform_permissions,
             #[cfg(target_os = "macos")]
             commands::settings::get_macos_diagnostics,

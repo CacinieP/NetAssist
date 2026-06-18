@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
   BarChart3,
   Network,
@@ -8,14 +9,15 @@ import {
 } from "lucide-react";
 
 const navItems = [
-  { path: "/", label: "仪表盘", icon: BarChart3 },
-  { path: "/traffic", label: "流量监控", icon: Network },
-  { path: "/connections", label: "连接管理", icon: Cable },
-  { path: "/emergency", label: "断网急救", icon: HelpCircle },
-  { path: "/settings", label: "设置", icon: Settings },
+  { path: "/", labelKey: "nav.dashboard", icon: BarChart3 },
+  { path: "/traffic", labelKey: "nav.traffic", icon: Network },
+  { path: "/connections", labelKey: "nav.connections", icon: Cable },
+  { path: "/emergency", labelKey: "nav.emergency", icon: HelpCircle },
+  { path: "/settings", labelKey: "nav.settings", icon: Settings },
 ];
 
 export default function Navigation() {
+  const { t } = useTranslation();
   return (
     <nav className="w-56 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col shrink-0">
       <div className="p-4 border-b border-gray-200 dark:border-gray-700">
@@ -40,7 +42,7 @@ export default function Navigation() {
                 }
               >
                 <item.icon className="w-5 h-5" />
-                <span>{item.label}</span>
+                <span>{t(item.labelKey)}</span>
               </NavLink>
             </li>
           ))}

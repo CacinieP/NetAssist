@@ -6,6 +6,8 @@ import * as echarts from "echarts";
 import { Activity, TrendingUp, AlertTriangle, Download, Upload, BarChart3, PieChart, FileText, Plus, Trash2, Edit, X, Save } from "lucide-react";
 import { useRealtimeTraffic, useRecordTrafficPoint } from "../../hooks/useTrafficData";
 import { formatSpeed, formatBytes } from "../../utils/formatUtils";
+import { notify } from "../../utils/notify";
+import { useSettingsStore } from "../../store/settingsStore";
 import HistoryTrendChart from "./HistoryTrendChart";
 
 // ==================== Type Definitions ====================
@@ -317,6 +319,10 @@ export default function TrafficMonitorEnhanced() {
   const [cumulative, setCumulative] = useState<CumulativeTraffic | null>(null);
   const [alerts, setAlerts] = useState<TrafficAlert[]>([]);
   const [alertStatuses, setAlertStatuses] = useState<AlertStatus[]>([]);
+  const { settings } = useSettingsStore();
+  // Track previously-triggered alert ids so we notify only on the not-triggered
+  // → triggered transition (avoids re-notifying every 5s poll).
+  const triggeredAlertsRef = useRef<Set<string>>(new Set());
 
   const [searchTerm, setSearchTerm] = useState("");
   const [historyHours, setHistoryHours] = useState<number>(1);
@@ -406,12 +412,32 @@ export default function TrafficMonitorEnhanced() {
       ]);
       setAlerts(alertsData);
       setAlertStatuses(statuses);
+
+      // Fire a native notification on the not-triggered → triggered
+      // transition for any alert, gated by the notify_traffic_limit setting.
+      if (settings.notify_traffic_limit) {
+        const newlyTriggered = statuses.filter(
+          s => s.triggered && !triggeredAlertsRef.current.has(s.alert_id)
+        );
+        // Update the set with current triggered state.
+        triggeredAlertsRef.current = new Set(
+          statuses.filter(s => s.triggered).map(s => s.alert_id)
+        );
+        if (newlyTriggered.length > 0) {
+          void notify("流量告警", `有 ${newlyTriggered.length} 项流量阈值已触发，请查看流量监控`);
+        }
+      } else {
+        // Keep the ref fresh even when notifications are off.
+        triggeredAlertsRef.current = new Set(
+          statuses.filter(s => s.triggered).map(s => s.alert_id)
+        );
+      }
     } catch (error) {
       console.error("Failed to fetch alerts:", error);
     } finally {
       setLoading(prev => ({ ...prev, alerts: false }));
     }
-  }, [period]);
+  }, [period, settings.notify_traffic_limit]);
 
   // Effects
   useEffect(() => {
