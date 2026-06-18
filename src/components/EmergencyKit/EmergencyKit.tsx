@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import { Activity, AlertTriangle, CheckCircle, XCircle, Wrench, Clock, RefreshCw, Settings, Network, FileDown } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle, XCircle, X, Wrench, Clock, RefreshCw, Settings, Network, FileDown, ChevronDown } from "lucide-react";
 
 type DiagnosticStatus = "pass" | "fail" | "warning";
 
@@ -93,6 +93,12 @@ export default function EmergencyKit() {
   const [autoFixing, setAutoFixing] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [exportToast, setExportToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  // Manual tools are shown in a modal (opened on demand) instead of always
+  // laid out as cards on the page, to reduce visual clutter.
+  const [showManualTools, setShowManualTools] = useState(false);
+  // Collapsible diagnostic detail: which item keys are expanded. Empty by
+  // default so details are hidden until the user clicks a row.
+  const [expandedDetails, setExpandedDetails] = useState<Set<string>>(new Set());
 
   const showToast = (msg: string, ok: boolean) => {
     setExportToast({ msg, ok });
@@ -240,6 +246,19 @@ export default function EmergencyKit() {
       case "warning": return <AlertTriangle className="w-5 h-5 text-yellow-600" />;
       default: return <Activity className="w-5 h-5 text-gray-400" />;
     }
+  };
+
+  // Toggle a diagnostic detail item's expanded state (click to expand/collapse).
+  const toggleDetail = (key: string) => {
+    setExpandedDetails(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
   };
 
   const getStatusBadge = (status: DiagnosticStatus) => {
@@ -419,77 +438,49 @@ export default function EmergencyKit() {
         </div>
       )}
 
-      {/* Diagnostic Results */}
+      {/* Diagnostic Results — collapsible rows */}
       {result && (
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 shadow-sm">
           <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3">诊断详情</h3>
 
-          <div className="space-y-3">
-            {/* Connectivity */}
-            <div className="p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {renderStatusIcon(result.network_connectivity.status)}
-                  <span className="font-medium text-gray-800 dark:text-gray-100">网络连接</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {getStatusBadge(result.network_connectivity.status)}
-                  <span className="text-xs text-gray-500 dark:text-gray-400">{formatDuration(result.network_connectivity.duration_ms)}</span>
-                </div>
-              </div>
-              <p className="text-sm text-gray-600 dark:text-gray-300 mt-1 ml-7">{result.network_connectivity.message}</p>
-            </div>
-
-            {/* IP Configuration */}
-            <div className="p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {renderStatusIcon(result.ip_configuration.status)}
-                  <span className="font-medium text-gray-800 dark:text-gray-100">IP 配置</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {getStatusBadge(result.ip_configuration.status)}
-                  <span className="text-xs text-gray-500 dark:text-gray-400">{formatDuration(result.ip_configuration.duration_ms)}</span>
-                </div>
-              </div>
-              <p className="text-sm text-gray-600 dark:text-gray-300 mt-1 ml-7">{result.ip_configuration.message}</p>
-              {result.ip_configuration.details.ipv4 && (
+          <div className="space-y-2">
+            {([
+              { key: "connectivity", title: "网络连接", item: result.network_connectivity, extra: null as null | JSX.Element },
+              { key: "ip", title: "IP 配置", item: result.ip_configuration, extra: result.ip_configuration.details.ipv4 ? (
                 <div className="ml-7 mt-2 p-2 bg-gray-50 dark:bg-gray-700/50 rounded text-sm">
                   <span className="text-gray-500 dark:text-gray-400">IPv4: </span>
                   <span className="font-mono text-gray-800 dark:text-gray-200">{result.ip_configuration.details.ipv4}</span>
                 </div>
-              )}
-            </div>
-
-            {/* DNS Resolution */}
-            <div className="p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {renderStatusIcon(result.dns_resolution.status)}
-                  <span className="font-medium text-gray-800 dark:text-gray-100">DNS 解析</span>
+              ) : null },
+              { key: "dns", title: "DNS 解析", item: result.dns_resolution, extra: null },
+              { key: "quality", title: "网络质量", item: result.network_quality, extra: null },
+            ]).map(({ key, title, item, extra }) => {
+              const open = expandedDetails.has(key);
+              return (
+                <div key={key} className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                  <button
+                    onClick={() => toggleDetail(key)}
+                    className="w-full flex items-center justify-between p-3 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      {renderStatusIcon(item.status)}
+                      <span className="font-medium text-gray-800 dark:text-gray-100">{title}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {getStatusBadge(item.status)}
+                      <span className="text-xs text-gray-500 dark:text-gray-400">{formatDuration(item.duration_ms)}</span>
+                      <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${open ? "rotate-180" : ""}`} />
+                    </div>
+                  </button>
+                  {open && (
+                    <div className="px-3 pb-3">
+                      <p className="text-sm text-gray-600 dark:text-gray-300 ml-7">{item.message}</p>
+                      {extra}
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-2">
-                  {getStatusBadge(result.dns_resolution.status)}
-                  <span className="text-xs text-gray-500 dark:text-gray-400">{formatDuration(result.dns_resolution.duration_ms)}</span>
-                </div>
-              </div>
-              <p className="text-sm text-gray-600 dark:text-gray-300 mt-1 ml-7">{result.dns_resolution.message}</p>
-            </div>
-
-            {/* Network Quality */}
-            <div className="p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {renderStatusIcon(result.network_quality.status)}
-                  <span className="font-medium text-gray-800 dark:text-gray-100">网络质量</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {getStatusBadge(result.network_quality.status)}
-                  <span className="text-xs text-gray-500 dark:text-gray-400">{formatDuration(result.network_quality.duration_ms)}</span>
-                </div>
-              </div>
-              <p className="text-sm text-gray-600 dark:text-gray-300 mt-1 ml-7">{result.network_quality.message}</p>
-            </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -546,26 +537,63 @@ export default function EmergencyKit() {
         </div>
       )}
 
-      {/* Manual Tools */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 shadow-sm">
-        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3">手动修复工具</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {Object.entries(FIX_WARNINGS).map(([type, info]) => (
-            <button
-              key={type}
-              onClick={() => handleFixClick(type as FixType, info.title)}
-              disabled={fixing !== null || autoFixing}
-              className="p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 hover:border-gray-300 dark:hover:border-gray-600 transition-all text-left disabled:opacity-50"
-            >
-              <div className="flex items-center gap-2 mb-1">
-                {FIX_ICONS[type as FixType]}
-                <span className="font-medium text-gray-800 dark:text-gray-100">{info.title}</span>
-              </div>
-              <p className="text-sm text-gray-600 dark:text-gray-300 line-clamp-2">{info.message}</p>
-            </button>
-          ))}
+      {/* Manual Tools — trigger button (tools shown in a modal on click) */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 shadow-sm flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 flex items-center gap-2">
+            <Wrench className="w-4 h-4" />
+            手动修复工具
+          </h3>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">DNS 缓存、IP 续租、IPv6、适配器重置等</p>
         </div>
+        <button
+          onClick={() => setShowManualTools(true)}
+          disabled={fixing !== null || autoFixing}
+          className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+        >
+          <Wrench className="w-4 h-4" />
+          打开工具
+        </button>
       </div>
+
+      {/* Manual Tools Modal */}
+      {showManualTools && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[85vh] overflow-y-auto">
+            <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center sticky top-0 bg-white dark:bg-gray-800 z-10">
+              <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+                <Wrench size={20} className="text-blue-500" />
+                手动修复工具
+              </h3>
+              <button
+                onClick={() => setShowManualTools(false)}
+                className="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+              >
+                <X size={24} />
+              </button>
+            </div>
+            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+              {Object.entries(FIX_WARNINGS).map(([type, info]) => (
+                <button
+                  key={type}
+                  onClick={() => {
+                    setShowManualTools(false);
+                    handleFixClick(type as FixType, info.title);
+                  }}
+                  disabled={fixing !== null || autoFixing}
+                  className="p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 hover:border-gray-300 dark:hover:border-gray-600 transition-all text-left disabled:opacity-50"
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    {FIX_ICONS[type as FixType]}
+                    <span className="font-medium text-gray-800 dark:text-gray-100">{info.title}</span>
+                  </div>
+                  <p className="text-sm text-gray-600 dark:text-gray-300 line-clamp-2">{info.message}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Confirmation Modal */}
       {showConfirm && (
