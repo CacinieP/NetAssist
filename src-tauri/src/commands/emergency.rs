@@ -23,8 +23,23 @@ pub async fn apply_quick_fix(fix_type: String) -> Result<bool, String> {
         }
         "switch_dns" => {
             tracing::info!("Executing fix: switch_dns");
-            // Switch to Google DNS (8.8.8.8) as backup
-            crate::platform::set_dns_servers("8.8.8.8", Some("1.1.1.1"))
+            // Use the DNS servers configured in Settings (falling back to
+            // 8.8.8.8 / 1.1.1.1 if settings can't be read). This links the
+            // Settings DNS fields to the EmergencyKit "切换DNS" action.
+            let (primary, secondary) =
+                crate::commands::settings::load_settings_from_file()
+                    .map(|s| {
+                        let sec = if s.secondary_dns.is_empty() {
+                            None
+                        } else {
+                            Some(s.secondary_dns.clone())
+                        };
+                        (s.primary_dns, sec)
+                    })
+                    .unwrap_or_else(|_| {
+                        ("8.8.8.8".to_string(), Some("1.1.1.1".to_string()))
+                    });
+            crate::platform::set_dns_servers(&primary, secondary.as_deref())
                 .map_err(|e| format!("Failed to switch DNS: {}", e))?;
             Ok(true)
         }
