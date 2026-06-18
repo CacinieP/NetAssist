@@ -166,10 +166,10 @@ fn validate_settings(settings: &Settings) -> Result<(), ValidationError> {
         )));
     }
 
-    // Validate language (basic check)
-    let valid_languages = [
-        "zh-CN", "en-US", "ja-JP", "ko-KR", "es-ES", "fr-FR", "de-DE", "ru-RU",
-    ];
+    // Validate language — only zh-CN and en-US are supported (other codes were
+    // removed from the dropdown). Previously-stored codes are rejected here and
+    // reset to zh-CN at load time.
+    let valid_languages = ["zh-CN", "en-US"];
     if !valid_languages.contains(&settings.language.as_str()) {
         return Err(ValidationError::InvalidLanguage(format!(
             "unsupported language code: {}",
@@ -192,7 +192,7 @@ fn get_settings_path() -> anyhow::Result<PathBuf> {
 }
 
 /// Load settings from file
-fn load_settings_from_file() -> anyhow::Result<Settings> {
+pub fn load_settings_from_file() -> anyhow::Result<Settings> {
     let settings_path = get_settings_path()?;
 
     if settings_path.exists() {
@@ -221,10 +221,7 @@ fn load_settings_from_file() -> anyhow::Result<Settings> {
             if settings.traffic_limit_gb < 0.1 || settings.traffic_limit_gb > 10000.0 {
                 validated_settings.traffic_limit_gb = Settings::default().traffic_limit_gb;
             }
-            if ![
-                "zh-CN", "en-US", "ja-JP", "ko-KR", "es-ES", "fr-FR", "de-DE", "ru-RU",
-            ]
-            .contains(&settings.language.as_str())
+            if !["zh-CN", "en-US"].contains(&settings.language.as_str())
             {
                 validated_settings.language = Settings::default().language;
             }
@@ -285,6 +282,34 @@ pub async fn update_settings(settings: Settings) -> Result<bool, String> {
         settings.dark_mode
     );
     Ok(true)
+}
+
+/// Enable or disable launch-at-login. Mirrors the settings.auto_start boolean
+/// into the OS (LaunchAgent on macOS). The frontend toggles auto_start and
+/// then calls this so the change takes effect immediately, not just on save.
+#[tauri::command]
+pub async fn set_autostart(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    let result = if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    match result {
+        Ok(_) => {
+            tracing::info!("autostart {}", if enabled { "enabled" } else { "disabled" });
+            Ok(true)
+        }
+        Err(e) => {
+            let msg = format!("Failed to {} autostart: {}", if enabled { "enable" } else { "disable" }, e);
+            tracing::error!("{}", msg);
+            Err(msg)
+        }
+    }
 }
 
 /// Reset settings to default
