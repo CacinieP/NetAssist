@@ -1,5 +1,4 @@
 use crate::models::GeoIPInfo;
-use std::collections::HashMap;
 
 /// Get GeoIP information for an IP address
 pub async fn lookup_geoip(ip: &str) -> Option<GeoIPInfo> {
@@ -271,17 +270,4 @@ fn parse_ipapico_response(data: serde_json::Value) -> Result<GeoIPInfo, String> 
         latitude: data["latitude"].as_f64(),
         longitude: data["longitude"].as_f64(),
     })
-}
-
-/// Get GeoIP information for multiple IPs
-pub async fn lookup_geoip_batch(ips: Vec<String>) -> HashMap<String, GeoIPInfo> {
-    let mut results = HashMap::new();
-
-    for ip in ips {
-        if let Some(info) = lookup_geoip(&ip).await {
-            results.insert(ip, info);
-        }
-    }
-
-    results
 }

@@ -19,12 +19,10 @@ use std::net::IpAddr;
 #[derive(Debug, Clone)]
 pub struct NetworkInterfaceInfo {
     pub name: String,
-    pub display_name: String,
     pub ipv4_addresses: Vec<IpAddr>,
     pub ipv6_addresses: Vec<IpAddr>,
     pub is_up: bool,
     pub is_loopback: bool,
-    pub gateway: Option<IpAddr>,
 }
 
 /// Connection information (cross-platform)
@@ -40,21 +38,6 @@ pub struct ConnectionRawInfo {
     pub process_name: Option<String>,
 }
 
-/// Get default gateway (cross-platform abstraction)
-pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
-    cfg_if::cfg_if! {
-        if #[cfg(windows)] {
-            windows::get_default_gateway()
-        } else if #[cfg(target_os = "linux")] {
-            linux::get_default_gateway()
-        } else if #[cfg(target_os = "macos")] {
-            macos::get_default_gateway()
-        } else {
-            Ok(None)
-        }
-    }
-}
-
 /// Get default network interface (cross-platform abstraction)
 pub fn get_default_interface() -> anyhow::Result<String> {
     cfg_if::cfg_if! {
@@ -66,21 +49,6 @@ pub fn get_default_interface() -> anyhow::Result<String> {
             macos::get_default_interface()
         } else {
             Ok("eth0".to_string())
-        }
-    }
-}
-
-/// Get all network interfaces (cross-platform abstraction)
-pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
-    cfg_if::cfg_if! {
-        if #[cfg(windows)] {
-            windows::get_network_interfaces()
-        } else if #[cfg(target_os = "linux")] {
-            linux::get_network_interfaces()
-        } else if #[cfg(target_os = "macos")] {
-            macos::get_network_interfaces()
-        } else {
-            Ok(vec![])
         }
     }
 }
@@ -215,6 +183,10 @@ pub fn check_permissions() -> anyhow::Result<PermissionStatusGeneric> {
 }
 
 /// Generic permission status for non-macOS platforms
+///
+/// Constructed only inside the `#[cfg(not(target_os = "macos"))]` branch of
+/// `check_permissions`, so it appears dead when building on macOS.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PermissionStatusGeneric {
     pub has_permissions: bool,

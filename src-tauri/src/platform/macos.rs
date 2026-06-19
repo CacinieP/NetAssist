@@ -4,25 +4,6 @@ use super::{ConnectionRawInfo, NetworkInterfaceInfo};
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-/// Get default gateway on macOS
-pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
-    // Use: netstat -nr | grep default
-    let output = super::common::exec_command("netstat", &["-nr"])?;
-
-    for line in output.lines() {
-        if line.contains("default") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() > 1 {
-                if let Ok(gw) = parts[1].parse::<IpAddr>() {
-                    return Ok(Some(gw));
-                }
-            }
-        }
-    }
-
-    Ok(None)
-}
-
 /// Get default network interface on macOS
 pub fn get_default_interface() -> anyhow::Result<String> {
     // Use: route -n get default
@@ -91,13 +72,11 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
             let name = line.trim_end_matches(':').to_string();
             let is_loopback = name == "lo0";
             current_interface = Some(NetworkInterfaceInfo {
-                name: name.clone(),
-                display_name: name,
+                name,
                 ipv4_addresses: Vec::new(),
                 ipv6_addresses: Vec::new(),
                 is_up: false,
                 is_loopback,
-                gateway: None,
             });
         } else if let Some(ref mut intf) = current_interface {
             if line.contains("inet ") && !line.contains("inet6") {

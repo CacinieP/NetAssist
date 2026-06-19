@@ -16,12 +16,3 @@ pub struct DNSStats {
     /// Cache hit rate (0.0 to 1.0)
     pub cache_hit_rate: f64,
 }
-
-/// DNS record information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DNSRecord {
-    pub name: String,
-    pub record_type: String, // "A" or "AAAA"
-    pub value: String,
-    pub ttl: u32,
-}

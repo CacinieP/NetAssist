@@ -1,3 +1,10 @@
+//! Dual-stack status and management.
+//!
+//! Planned IPv6 priority management — currently a stub (see TODOs below) and
+//! not yet wired into any command. The whole module is suppressed until the
+//! feature is implemented.
+#![allow(dead_code)]
+
 /// Dual-stack status and management
 pub struct DualStackManager {
     enabled: bool,

@@ -1,29 +1,9 @@
 // Linux-specific implementations
 
-use super::{ConnectionRawInfo, NetworkInterfaceInfo};
+use super::ConnectionRawInfo;
 use std::net::IpAddr;
 
-/// Get default gateway on Linux
-pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
-    // Read from /proc/net/route or use netlink
-    let output = super::common::exec_command("ip", &["route", "show", "default"])?;
-
-    // Parse output to find gateway
-    for line in output.lines() {
-        if line.contains("default via") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if let Some(gw_str) = parts.get(2) {
-                if let Ok(gw) = gw_str.parse::<IpAddr>() {
-                    return Ok(Some(gw));
-                }
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-/// Get default network interface on Linux
+/// Get default interface on Linux
 pub fn get_default_interface() -> anyhow::Result<String> {
     // Use: ip route show default
     let output = super::common::exec_command("ip", &["route", "show", "default"])?;
@@ -42,61 +22,6 @@ pub fn get_default_interface() -> anyhow::Result<String> {
 
     // Fallback to common interface
     Ok("eth0".to_string())
-}
-
-/// Get network interfaces on Linux
-pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
-    let mut interfaces = Vec::new();
-
-    // Read from /proc/net/dev
-    let output = std::fs::read_to_string("/proc/net/dev")?;
-
-    for line in output.lines().skip(2) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if let Some(name) = parts.first() {
-            let name = name.trim_end_matches(':');
-
-            // Get addresses using ip command
-            if let Ok(addr_output) = super::common::exec_command("ip", &["addr", "show", name]) {
-                let mut ipv4_addrs = Vec::new();
-                let mut ipv6_addrs = Vec::new();
-
-                for line in addr_output.lines() {
-                    if line.contains("inet ") {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if let Some(addr_str) = parts.get(1) {
-                            if let Ok(addr) =
-                                addr_str.split('/').next().unwrap_or("").parse::<IpAddr>()
-                            {
-                                ipv4_addrs.push(addr);
-                            }
-                        }
-                    } else if line.contains("inet6 ") && !line.contains("scope link") {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if let Some(addr_str) = parts.get(1) {
-                            if let Ok(addr) =
-                                addr_str.split('/').next().unwrap_or("").parse::<IpAddr>()
-                            {
-                                ipv6_addrs.push(addr);
-                            }
-                        }
-                    }
-                }
-
-                interfaces.push(NetworkInterfaceInfo {
-                    name: name.to_string(),
-                    display_name: name.to_string(),
-                    ipv4_addresses: ipv4_addrs,
-                    ipv6_addresses: ipv6_addrs,
-                    is_up: true, // TODO: Check actual status
-                    is_loopback: name == "lo",
-                    gateway: None,
-                });
-            }
-        }
-    }
-
-    Ok(interfaces)
 }
 
 /// Get active connections on Linux

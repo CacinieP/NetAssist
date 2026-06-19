@@ -18,30 +18,6 @@ pub fn is_local_ip(ip: &IpAddr) -> bool {
     }
 }
 
-/// Classify IP address type
-pub fn classify_ip_type(ip: &IpAddr) -> crate::models::IPType {
-    match ip {
-        IpAddr::V4(ipv4) => {
-            if ipv4.is_loopback() || ipv4.is_private() {
-                crate::models::IPType::Private
-            } else if ipv4.is_link_local() {
-                crate::models::IPType::LinkLocal
-            } else {
-                crate::models::IPType::Public
-            }
-        }
-        IpAddr::V6(ipv6) => {
-            if ipv6.is_loopback() || ipv6.is_unique_local() {
-                crate::models::IPType::Private
-            } else if is_ipv6_link_local_check(ipv6) {
-                crate::models::IPType::LinkLocal
-            } else {
-                crate::models::IPType::Global
-            }
-        }
-    }
-}
-
 /// Execute a shell command and return output
 #[cfg(unix)]
 pub fn exec_command(cmd: &str, args: &[&str]) -> anyhow::Result<String> {
