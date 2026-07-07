@@ -363,8 +363,9 @@ export default function TrafficMonitorEnhanced() {
   // Use shared traffic hook — single global 1s poll
   const { stats } = useRealtimeTraffic(1000);
 
-  // Record traffic points using shared hook
-  useRecordTrafficPoint(60000);
+  // Record traffic points using shared hook (5s window keeps the 24h
+  // history trend chart populated shortly after the page is opened).
+  useRecordTrafficPoint(5000);
 
   // Toast component
   const ToastComponent = () => {

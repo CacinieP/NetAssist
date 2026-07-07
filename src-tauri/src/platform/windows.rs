@@ -888,3 +888,41 @@ pub fn kill_connection(
 
     Ok(false)
 }
+
+/// Read cumulative (rx_bytes, tx_bytes) across all operational interfaces via
+/// `GetIfTable2`. Adapted from the logic previously inlined in
+/// `TrafficMonitor::get_interface_stats`.
+pub fn get_interface_total_bytes() -> (u64, u64) {
+    unsafe {
+        // GetIfTable2 allocates memory and returns a pointer
+        let mut if_table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        let result = GetIfTable2(&mut if_table);
+
+        if result.is_ok() && !if_table.is_null() {
+            let table = &*if_table;
+            let mut total_rx = 0u64;
+            let mut total_tx = 0u64;
+
+            let num_entries = table.NumEntries as usize;
+            let table_ptr = table.Table.as_ptr();
+
+            for i in 0..num_entries {
+                let row = &*table_ptr.add(i);
+                // Sum only operational interfaces (OperStatus == 1 = Up).
+                if row.OperStatus.0 == 1 {
+                    // Skip loopback so totals reflect real traffic.
+                    if row.Type == IF_TYPE_SOFTWARE_LOOPBACK {
+                        continue;
+                    }
+                    total_rx += row.InOctets;
+                    total_tx += row.OutOctets;
+                }
+            }
+
+            FreeMibTable(if_table as *mut _);
+            (total_rx, total_tx)
+        } else {
+            (0, 0)
+        }
+    }
+}

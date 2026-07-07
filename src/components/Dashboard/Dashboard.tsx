@@ -54,8 +54,8 @@ export default function Dashboard() {
   // Use shared traffic hook — no more independent polling
   const { stats: traffic } = useRealtimeTraffic(1000);
 
-  // Record traffic points every 60 seconds using shared hook
-  useRecordTrafficPoint(60000);
+  // Record traffic points every 5 seconds using shared hook (24h window)
+  useRecordTrafficPoint(5000);
 
   // Fetch cumulative traffic — useCallback with period ref to avoid stale closures
   const periodRef = useRef(period);

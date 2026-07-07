@@ -345,3 +345,33 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
     );
     Ok(())
 }
+
+/// Read cumulative (rx_bytes, tx_bytes) across all interfaces from
+/// `/proc/net/dev`. Columns are (0-indexed): rx_bytes=1, tx_bytes=9.
+pub fn get_interface_total_bytes() -> (u64, u64) {
+    use std::fs;
+
+    let mut total_rx = 0u64;
+    let mut total_tx = 0u64;
+
+    if let Ok(content) = fs::read_to_string("/proc/net/dev") {
+        for line in content.lines().skip(2) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 10 {
+                // Skip the loopback interface so totals reflect real traffic.
+                let name = parts[0].trim_end_matches(':');
+                if name == "lo" {
+                    continue;
+                }
+                if let Ok(rx) = parts[1].parse::<u64>() {
+                    total_rx += rx;
+                }
+                if let Ok(tx) = parts[9].parse::<u64>() {
+                    total_tx += tx;
+                }
+            }
+        }
+    }
+
+    (total_rx, total_tx)
+}
