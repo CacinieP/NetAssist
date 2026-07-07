@@ -73,8 +73,11 @@ export function useRealtimeTraffic(intervalMs: number = 1000) {
 /**
  * Records a traffic data point to the backend.
  * Uses a ref to always record the latest value.
+ *
+ * Default interval is 5s so the history trend chart starts showing points
+ * soon after the page is opened (the backend keeps a 24h rolling window).
  */
-export function useRecordTrafficPoint(intervalMs: number = 60000) {
+export function useRecordTrafficPoint(intervalMs: number = 5000) {
   const { stats } = useRealtimeTraffic();
   const statsRef = useRef(stats);
   statsRef.current = stats;

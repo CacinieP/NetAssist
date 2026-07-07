@@ -14,7 +14,7 @@ pub async fn get_active_connections() -> Result<Vec<ConnectionInfo>, String> {
 
     let mut connections = Vec::new();
     for raw in &raw_connections {
-        let process_name = raw.process_name.as_ref().map(|s| s.as_str()).unwrap_or("-");
+        let process_name = raw.process_name.as_deref().unwrap_or("-");
         tracing::debug!(
             "Connection: PID={:?}, process_name={}, remote={}",
             raw.pid,
@@ -156,7 +156,7 @@ pub async fn kill_connection(
     {
         // Linux critical PIDs - kernel threads and essential system processes
         // Range check for kernel threads (2-500)
-        if pid == 1 || (pid >= 2 && pid <= 500) {
+        if pid == 1 || (2..=500).contains(&pid) {
             return Err(format!("Cannot kill system-critical process (PID {})", pid));
         }
 
@@ -194,7 +194,7 @@ pub async fn kill_connection(
     {
         // macOS critical PIDs
         // Range check for kernel and early system processes (2-200)
-        if pid == 1 || (pid >= 2 && pid <= 200) {
+        if pid == 1 || (2..=200).contains(&pid) {
             return Err(format!("Cannot kill system-critical process (PID {})", pid));
         }
 
@@ -255,7 +255,7 @@ pub async fn kill_connection(
     {
         use std::process::Command;
         let output = Command::new("kill")
-            .args(&["-15", &pid.to_string()]) // Try SIGTERM first (less aggressive)
+            .args(["-15", &pid.to_string()]) // Try SIGTERM first (less aggressive)
             .output()
             .map_err(|e| format!("Failed to execute kill: {}", e))?;
 
@@ -270,7 +270,7 @@ pub async fn kill_connection(
         } else {
             // Fall back to SIGKILL if SIGTERM fails
             let output = Command::new("kill")
-                .args(&["-9", &pid.to_string()])
+                .args(["-9", &pid.to_string()])
                 .output()
                 .map_err(|e| format!("Failed to execute kill -9: {}", e))?;
 
@@ -292,7 +292,7 @@ pub async fn kill_connection(
     {
         use std::process::Command;
         let output = Command::new("kill")
-            .args(&["-15", &pid.to_string()]) // Try SIGTERM first
+            .args(["-15", &pid.to_string()]) // Try SIGTERM first
             .output()
             .map_err(|e| format!("Failed to execute kill: {}", e))?;
 

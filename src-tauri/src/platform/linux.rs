@@ -214,17 +214,19 @@ fn parse_hex_addr(addr: &str) -> Option<(IpAddr, u16)> {
 /// Flush DNS cache on Linux
 pub fn flush_dns_cache() -> anyhow::Result<()> {
     // Try systemd-resolved first
-    if let Ok(_) = std::process::Command::new("systemd-resolve")
-        .args(&["--flush-caches"])
+    if std::process::Command::new("systemd-resolve")
+        .args(["--flush-caches"])
         .status()
+        .is_ok()
     {
         return Ok(());
     }
 
     // Try dnsmasq
-    if let Ok(_) = std::process::Command::new("systemctl")
-        .args(&["restart", "dnsmasq"])
+    if std::process::Command::new("systemctl")
+        .args(["restart", "dnsmasq"])
         .status()
+        .is_ok()
     {
         return Ok(());
     }
@@ -236,7 +238,11 @@ pub fn flush_dns_cache() -> anyhow::Result<()> {
 /// Release and renew IP on Linux
 pub fn release_renew_ip() -> anyhow::Result<()> {
     // Use dhclient or dhcpcd
-    if let Ok(_) = std::process::Command::new("dhclient").arg("-r").status() {
+    if std::process::Command::new("dhclient")
+        .arg("-r")
+        .status()
+        .is_ok()
+    {
         std::process::Command::new("dhclient").status()?;
     }
 
@@ -247,7 +253,7 @@ pub fn release_renew_ip() -> anyhow::Result<()> {
 pub fn reset_network_stack() -> anyhow::Result<()> {
     // Reload network configuration
     std::process::Command::new("systemctl")
-        .args(&["restart", "NetworkManager"])
+        .args(["restart", "NetworkManager"])
         .status()?;
 
     Ok(())
@@ -283,7 +289,7 @@ fn check_root_privileges() -> anyhow::Result<bool> {
             return Ok(metadata.uid() == 0 && unsafe { libc::geteuid() } == 0);
         }
         // Fallback: check euid directly
-        return Ok(unsafe { libc::geteuid() } == 0);
+        Ok(unsafe { libc::geteuid() } == 0)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -344,4 +350,34 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
         secondary
     );
     Ok(())
+}
+
+/// Read cumulative (rx_bytes, tx_bytes) across all interfaces from
+/// `/proc/net/dev`. Columns are (0-indexed): rx_bytes=1, tx_bytes=9.
+pub fn get_interface_total_bytes() -> (u64, u64) {
+    use std::fs;
+
+    let mut total_rx = 0u64;
+    let mut total_tx = 0u64;
+
+    if let Ok(content) = fs::read_to_string("/proc/net/dev") {
+        for line in content.lines().skip(2) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 10 {
+                // Skip the loopback interface so totals reflect real traffic.
+                let name = parts[0].trim_end_matches(':');
+                if name == "lo" {
+                    continue;
+                }
+                if let Ok(rx) = parts[1].parse::<u64>() {
+                    total_rx += rx;
+                }
+                if let Ok(tx) = parts[9].parse::<u64>() {
+                    total_tx += tx;
+                }
+            }
+        }
+    }
+
+    (total_rx, total_tx)
 }

@@ -37,6 +37,7 @@ impl Default for Settings {
 
 /// Settings validation error
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)] // all variants intentionally share the "Invalid" prefix
 pub enum ValidationError {
     InvalidRefreshInterval(String),
     InvalidDnsServer(String),
@@ -86,7 +87,7 @@ fn validate_dns_server(addr: &str) -> Result<(), ValidationError> {
         ));
     }
 
-    if addr.len() < 1 {
+    if addr.is_empty() {
         return Err(ValidationError::InvalidDnsServer(
             "DNS server hostname too short".to_string(),
         ));
@@ -221,8 +222,7 @@ pub fn load_settings_from_file() -> anyhow::Result<Settings> {
             if settings.traffic_limit_gb < 0.1 || settings.traffic_limit_gb > 10000.0 {
                 validated_settings.traffic_limit_gb = Settings::default().traffic_limit_gb;
             }
-            if !["zh-CN", "en-US"].contains(&settings.language.as_str())
-            {
+            if !["zh-CN", "en-US"].contains(&settings.language.as_str()) {
                 validated_settings.language = Settings::default().language;
             }
         }
@@ -288,10 +288,7 @@ pub async fn update_settings(settings: Settings) -> Result<bool, String> {
 /// into the OS (LaunchAgent on macOS). The frontend toggles auto_start and
 /// then calls this so the change takes effect immediately, not just on save.
 #[tauri::command]
-pub async fn set_autostart(
-    app: tauri::AppHandle,
-    enabled: bool,
-) -> Result<bool, String> {
+pub async fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;
     let manager = app.autolaunch();
     let result = if enabled {
@@ -305,7 +302,11 @@ pub async fn set_autostart(
             Ok(true)
         }
         Err(e) => {
-            let msg = format!("Failed to {} autostart: {}", if enabled { "enable" } else { "disable" }, e);
+            let msg = format!(
+                "Failed to {} autostart: {}",
+                if enabled { "enable" } else { "disable" },
+                e
+            );
             tracing::error!("{}", msg);
             Err(msg)
         }

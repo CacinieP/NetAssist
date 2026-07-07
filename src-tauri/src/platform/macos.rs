@@ -274,7 +274,7 @@ fn parse_sock_addr(addr: &str) -> Option<(IpAddr, u16)> {
 pub fn flush_dns_cache() -> anyhow::Result<()> {
     // Use: dscacheutil -flushcache
     std::process::Command::new("dscacheutil")
-        .args(&["-flushcache"])
+        .args(["-flushcache"])
         .status()?;
 
     // Also kill mDNSResponder for macOS 10.10+
@@ -302,7 +302,7 @@ pub fn release_renew_ip() -> anyhow::Result<()> {
 
     // Release
     let _ = std::process::Command::new("ipconfig")
-        .args(&["set", interface, "DHCP"])
+        .args(["set", interface, "DHCP"])
         .status();
 
     Ok(())
@@ -356,7 +356,7 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
     let service = default_network_service();
 
     let mut cmd = std::process::Command::new("networksetup");
-    cmd.args(&["-setdnsservers", &service, primary]);
+    cmd.args(["-setdnsservers", &service, primary]);
     if let Some(secondary) = secondary {
         cmd.arg(secondary);
     }
@@ -391,7 +391,7 @@ pub fn toggle_ipv6() -> anyhow::Result<String> {
     if current_off {
         // Currently Off -> enable (Automatic)
         let output = std::process::Command::new("networksetup")
-            .args(&["-setv6automatic", &service])
+            .args(["-setv6automatic", &service])
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -405,7 +405,7 @@ pub fn toggle_ipv6() -> anyhow::Result<String> {
     } else {
         // Currently Automatic/On -> disable (Off)
         let output = std::process::Command::new("networksetup")
-            .args(&["-setv6off", &service])
+            .args(["-setv6off", &service])
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -436,7 +436,7 @@ pub fn reset_adapter() -> anyhow::Result<()> {
     );
 
     let output = std::process::Command::new("osascript")
-        .args(&["-e", &script])
+        .args(["-e", &script])
         .output()?;
 
     if !output.status.success() {
@@ -483,7 +483,7 @@ pub fn check_permissions() -> anyhow::Result<PermissionStatus> {
 
     // Check if we can read network interface stats
     match std::process::Command::new("netstat")
-        .args(&["-b", "-I", "en0"])
+        .args(["-b", "-I", "en0"])
         .output()
     {
         Ok(_) => {
@@ -506,6 +506,40 @@ pub struct PermissionStatus {
     pub accessibility: bool,
     pub network_monitor: bool,
     pub warnings: Vec<String>,
+}
+
+/// Read cumulative (rx_bytes, tx_bytes) for the active interface via
+/// `netstat -b -I <iface>`. Mirrors the parsing previously inlined in
+/// `TrafficMonitor::get_interface_stats`.
+///
+/// -b reports byte counts. Output columns (1-indexed):
+///   1:Name 2:Mtu 3:Network 4:Address 5:Ipkts 6:Ierrs 7:Ibytes
+///   8:Opkts 9:Oerrs 10:Obytes 11:Coll
+/// The same interface prints multiple rows (Link / each address) that all
+/// carry the SAME cumulative byte counters; we take only the FIRST data row
+/// to avoid multiplying the totals.
+pub fn get_interface_total_bytes() -> (u64, u64) {
+    let interface = get_default_interface().unwrap_or_else(|_| "en0".to_string());
+
+    let output = std::process::Command::new("netstat")
+        .args(["-b", "-I", &interface])
+        .output();
+
+    if let Ok(result) = output {
+        let content = String::from_utf8_lossy(&result.stdout);
+        // skip(1) drops the header; we then take only the first data row.
+        if let Some(line) = content.lines().nth(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            // Need at least 10 columns to read Ibytes(7) and Obytes(10).
+            if parts.len() >= 10 {
+                let rx = parts[6].parse::<u64>().unwrap_or(0);
+                let tx = parts[9].parse::<u64>().unwrap_or(0);
+                return (rx, tx);
+            }
+        }
+    }
+
+    (0, 0)
 }
 
 /// Get per-process network traffic statistics on macOS.
@@ -533,7 +567,7 @@ pub fn get_process_traffic_stats(
     // -L 2 : emit exactly 2 samples
     // -s 1 : 1 second between samples -> sample #2 is a 1s delta
     let output = std::process::Command::new("nettop")
-        .args(&["-P", "-j", "bytes_in,bytes_out", "-x", "-L", "2", "-s", "1"])
+        .args(["-P", "-j", "bytes_in,bytes_out", "-x", "-L", "2", "-s", "1"])
         .output();
 
     let content = match output {
@@ -565,10 +599,7 @@ pub fn get_process_traffic_stats(
     }
 
     // Prefer the delta (second) block; fall back to the first block.
-    let sample = blocks
-        .last()
-        .cloned()
-        .unwrap_or_default();
+    let sample = blocks.last().cloned().unwrap_or_default();
 
     for line in sample {
         // Split by comma. Verified column layout (0-indexed) for
@@ -593,7 +624,10 @@ pub fn get_process_traffic_stats(
         if pid == 0 {
             continue;
         }
-        let name = name_pid.rsplit_once('.').map(|(n, _)| n).unwrap_or(name_pid);
+        let name = name_pid
+            .rsplit_once('.')
+            .map(|(n, _)| n)
+            .unwrap_or(name_pid);
 
         let bytes_in = cols[4].trim().parse::<u64>().unwrap_or(0);
         let bytes_out = cols[5].trim().parse::<u64>().unwrap_or(0);
@@ -629,7 +663,7 @@ pub fn get_all_processes() -> anyhow::Result<HashMap<u32, String>> {
     let mut processes = HashMap::new();
 
     let output = std::process::Command::new("ps")
-        .args(&["-axo", "pid,comm"])
+        .args(["-axo", "pid,comm"])
         .output()?;
 
     let content = String::from_utf8_lossy(&output.stdout);
@@ -641,7 +675,7 @@ pub fn get_all_processes() -> anyhow::Result<HashMap<u32, String>> {
                 let name = parts[1].to_string();
                 // Get full path for more accurate name
                 if let Ok(path_output) = std::process::Command::new("ps")
-                    .args(&["-p", &parts[0], "-o", "comm="])
+                    .args(["-p", parts[0], "-o", "comm="])
                     .output()
                 {
                     let full_name = String::from_utf8_lossy(&path_output.stdout)
@@ -730,7 +764,7 @@ pub fn run_network_diagnostics() -> anyhow::Result<MacOSDiagnostics> {
 
     // 2. Check DNS configuration with scutil
     if let Ok(output) = std::process::Command::new("scutil")
-        .args(&["--dns"])
+        .args(["--dns"])
         .output()
     {
         let content = String::from_utf8_lossy(&output.stdout);
@@ -743,7 +777,7 @@ pub fn run_network_diagnostics() -> anyhow::Result<MacOSDiagnostics> {
 
     // 3. Check proxy settings
     if let Ok(output) = std::process::Command::new("scutil")
-        .args(&["--proxy"])
+        .args(["--proxy"])
         .output()
     {
         let content = String::from_utf8_lossy(&output.stdout);
@@ -771,7 +805,7 @@ pub fn run_network_diagnostics() -> anyhow::Result<MacOSDiagnostics> {
     if let Ok(output) = std::process::Command::new(
         "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport",
     )
-    .args(&["-I"])
+    .args(["-I"])
     .output()
     {
         let content = String::from_utf8_lossy(&output.stdout);

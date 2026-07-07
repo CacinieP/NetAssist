@@ -4,6 +4,7 @@ use crate::models::{
     AlertStatus, CumulativeTraffic, TrafficAlert, TrafficHistory, TrafficHistoryPoint,
 };
 use chrono::{DateTime, Datelike, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -56,7 +57,7 @@ impl TrafficHistoryStorage {
         let year = date_str[0..4]
             .parse::<i32>()
             .map_err(|_| "Invalid year".to_string())?;
-        if year < 2000 || year > 2100 {
+        if !(2000..=2100).contains(&year) {
             return Err("Date out of valid range (2000-2100)".to_string());
         }
 
@@ -111,12 +112,14 @@ impl TrafficHistoryStorage {
         let mut day_data = self.load_day_history(&date_str)?;
         day_data.push(point);
 
-        // Keep only recent data points (last 24 hours worth, one per minute)
-        let max_points = 24 * 60;
-        if day_data.len() > max_points {
-            day_data = day_data.into_iter().rev().take(max_points).collect();
-            day_data.sort_by_key(|p| p.timestamp);
-        }
+        // Keep only the last 24h of points (window-based, not count-based).
+        // The recording interval is configurable (frontend default 5s), so a
+        // fixed point cap would either over- or under-trim. Dropping anything
+        // older than 24h keeps each daily file bounded to one day and matches
+        // the largest trend-chart range that reads a single day.
+        let cutoff_ms = now.timestamp_millis() - 24 * 60 * 60 * 1000;
+        day_data.retain(|p| p.timestamp >= cutoff_ms);
+        day_data.sort_by_key(|p| p.timestamp);
 
         self.save_day_history(&date_str, &day_data)?;
         self.history_cache.insert(date_str, day_data);
@@ -127,43 +130,14 @@ impl TrafficHistoryStorage {
     /// Get cumulative traffic for a time period
     fn get_cumulative_traffic(&self, period: &str) -> Result<CumulativeTraffic, String> {
         let now = Utc::now();
-        let (start_time, end_time, period_label) = match period {
-            "day" => {
-                let start = now
-                    .date_naive()
-                    .and_hms_opt(0, 0, 0)
-                    .and_then(|d| d.and_local_timezone(Utc).single())
-                    .unwrap_or_else(|| Utc::now());
-                (start.timestamp(), now.timestamp(), "day".to_string())
-            }
-            "week" => {
-                let weekday = now.weekday().num_days_from_monday();
-                let start = now
-                    .date_naive()
-                    .and_hms_opt(0, 0, 0)
-                    .and_then(|d| d.and_local_timezone(Utc).single())
-                    .unwrap_or_else(|| Utc::now());
-                let start = start - chrono::Duration::days(weekday as i64);
-                (start.timestamp(), now.timestamp(), "week".to_string())
-            }
-            "month" => {
-                let start = now
-                    .date_naive()
-                    .with_day(1)
-                    .and_then(|d| d.and_hms_opt(0, 0, 0))
-                    .and_then(|d| d.and_local_timezone(Utc).single())
-                    .unwrap_or_else(|| Utc::now());
-                (start.timestamp(), now.timestamp(), "month".to_string())
-            }
-            _ => return Err(format!("Invalid period: {}", period)),
-        };
+        let (start_time, end_time, period_label) = Self::period_bounds(period, now)?;
 
         let mut total_download = 0u64;
         let mut total_upload = 0u64;
 
         // Load data for each day in the period
-        let start_date = DateTime::from_timestamp(start_time, 0).unwrap_or_else(|| Utc::now());
-        let end_date = DateTime::from_timestamp(end_time, 0).unwrap_or_else(|| Utc::now());
+        let start_date = DateTime::from_timestamp(start_time, 0).unwrap_or_else(Utc::now);
+        let end_date = DateTime::from_timestamp(end_time, 0).unwrap_or_else(Utc::now);
         let mut current_date = start_date;
 
         // Convert to milliseconds for comparison with point.timestamp
@@ -192,7 +166,7 @@ impl TrafficHistoryStorage {
                     }
                 }
             }
-            current_date = current_date + chrono::Duration::days(1);
+            current_date += chrono::Duration::days(1);
         }
 
         Ok(CumulativeTraffic {
@@ -212,7 +186,7 @@ impl TrafficHistoryStorage {
         let mut all_data = Vec::new();
 
         let start_date =
-            DateTime::from_timestamp(start_time.timestamp(), 0).unwrap_or_else(|| Utc::now());
+            DateTime::from_timestamp(start_time.timestamp(), 0).unwrap_or_else(Utc::now);
         let mut current_date = start_date;
 
         while current_date <= now {
@@ -226,7 +200,7 @@ impl TrafficHistoryStorage {
                     }
                 }
             }
-            current_date = current_date + chrono::Duration::days(1);
+            current_date += chrono::Duration::days(1);
         }
 
         all_data.sort_by_key(|p| p.timestamp);
@@ -237,6 +211,154 @@ impl TrafficHistoryStorage {
             end_timestamp: now.timestamp_millis(),
         })
     }
+
+    /// Compute the (start, end, label) bounds for a period relative to `now`.
+    /// Extracted so it can be shared by the file-based and counter-based
+    /// cumulative calculations and unit-tested in isolation.
+    fn period_bounds(period: &str, now: DateTime<Utc>) -> Result<(i64, i64, String), String> {
+        match period {
+            "day" => {
+                let start = now
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .and_then(|d| d.and_local_timezone(Utc).single())
+                    .unwrap_or(now);
+                Ok((start.timestamp(), now.timestamp(), "day".to_string()))
+            }
+            "week" => {
+                let weekday = now.weekday().num_days_from_monday();
+                let start = now
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .and_then(|d| d.and_local_timezone(Utc).single())
+                    .unwrap_or(now);
+                let start = start - chrono::Duration::days(weekday as i64);
+                Ok((start.timestamp(), now.timestamp(), "week".to_string()))
+            }
+            "month" => {
+                let start = now
+                    .date_naive()
+                    .with_day(1)
+                    .and_then(|d| d.and_hms_opt(0, 0, 0))
+                    .and_then(|d| d.and_local_timezone(Utc).single())
+                    .unwrap_or(now);
+                Ok((start.timestamp(), now.timestamp(), "month".to_string()))
+            }
+            _ => Err(format!("Invalid period: {}", period)),
+        }
+    }
+
+    /// Path to the on-disk anchor store (interface-counter snapshots taken at
+    /// the start of each period). Lives next to the per-day history files.
+    fn anchors_file_path(&self) -> PathBuf {
+        self.data_dir.join("anchors.json")
+    }
+
+    /// Load the anchor store. Returns an empty store if the file is missing or
+    /// corrupt (we never want a bad anchor file to blank the whole page).
+    fn load_anchors(&self) -> AnchorStore {
+        let path = self.anchors_file_path();
+        if !path.exists() {
+            return AnchorStore::default();
+        }
+        match fs::read_to_string(&path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => AnchorStore::default(),
+        }
+    }
+
+    /// Persist the anchor store. Failures are logged but non-fatal.
+    fn save_anchors(&self, anchors: &AnchorStore) {
+        let path = self.anchors_file_path();
+        if let Ok(content) = serde_json::to_string_pretty(anchors) {
+            if let Err(e) = fs::write(&path, content) {
+                tracing::warn!("Failed to write traffic anchors file: {}", e);
+            }
+        }
+    }
+
+    /// Cumulative traffic driven by the OS interface byte counters.
+    ///
+    /// On the first request for a period (or when the period has rolled over)
+    /// we snapshot the current interface counters as the period's "start
+    /// anchor" and persist it. The reported total is
+    /// `current_counters − anchor_counters`. When the counters reset below the
+    /// anchor (interface flap / reboot / Wi-Fi switch) we re-baseline to the
+    /// current value so the period restarts from 0 instead of going negative.
+    ///
+    /// This gives immediate, accurate, OS-authoritative totals — independent
+    /// of the per-minute history sampling — so the page shows real numbers the
+    /// instant it is opened instead of waiting minutes for samples to accrue.
+    fn get_cumulative_traffic_via_counters(
+        &mut self,
+        period: &str,
+    ) -> Result<CumulativeTraffic, String> {
+        let now = Utc::now();
+        let (start_ts, end_ts, label) = Self::period_bounds(period, now)?;
+
+        let (current_rx, current_tx) = crate::platform::get_interface_total_bytes();
+
+        let mut anchors = self.load_anchors();
+
+        // Resolve the anchor for this period and re-baseline when needed. We
+        // touch the field directly (rather than via a mut ref helper) so the
+        // borrow of `anchors` ends before we persist it.
+        let anchor = match period {
+            "week" => &mut anchors.week,
+            "month" => &mut anchors.month,
+            // default to day for "day" and any unrecognized value
+            _ => &mut anchors.day,
+        };
+
+        // Period rollover (new day/week/month) or counter reset (interface
+        // flap/reboot) both require re-baselining to the current counters.
+        let needs_reset = anchor.start_ts != start_ts
+            || current_rx < anchor.rx_bytes
+            || current_tx < anchor.tx_bytes;
+
+        if needs_reset {
+            anchor.start_ts = start_ts;
+            anchor.rx_bytes = current_rx;
+            anchor.tx_bytes = current_tx;
+        }
+
+        // Snapshot the anchor baseline before the immutable save borrow.
+        let baseline_rx = anchor.rx_bytes;
+        let baseline_tx = anchor.tx_bytes;
+
+        if needs_reset {
+            self.save_anchors(&anchors);
+        }
+
+        let total_download = current_rx.saturating_sub(baseline_rx);
+        let total_upload = current_tx.saturating_sub(baseline_tx);
+
+        Ok(CumulativeTraffic {
+            total_download_bytes: total_download,
+            total_upload_bytes: total_upload,
+            start_timestamp: start_ts,
+            end_timestamp: end_ts,
+            period: label,
+        })
+    }
+}
+
+/// Snapshot of the interface byte counters captured at the start of a period.
+/// `start_ts` lets us detect period rollover (new day/week/month).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PeriodAnchor {
+    start_ts: i64,
+    rx_bytes: u64,
+    tx_bytes: u64,
+}
+
+/// On-disk anchor store: one anchor per supported period. Persisted at
+/// `traffic/anchors.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct AnchorStore {
+    day: PeriodAnchor,
+    week: PeriodAnchor,
+    month: PeriodAnchor,
 }
 
 /// Traffic alert manager
@@ -388,8 +510,7 @@ impl TrafficAlertManager {
         if let Ok(settings) = crate::commands::settings::load_settings_from_file() {
             if settings.traffic_limit_gb > 0.0 {
                 let threshold_bytes = (settings.traffic_limit_gb * 1024.0 * 1024.0 * 1024.0) as u64;
-                let current_value =
-                    cumulative.total_download_bytes + cumulative.total_upload_bytes;
+                let current_value = cumulative.total_download_bytes + cumulative.total_upload_bytes;
                 let triggered = current_value >= threshold_bytes;
                 let percentage = if threshold_bytes > 0 {
                     (current_value as f64 / threshold_bytes as f64) * 100.0
@@ -439,15 +560,21 @@ fn alert_manager() -> &'static TrafficAlertManager {
     })
 }
 
-/// Get cumulative traffic for a time period
+/// Get cumulative traffic for a time period.
+///
+/// Prefers the OS interface-counter method (immediate, accurate) and falls
+/// back to the per-minute history aggregation only if the counter method
+/// errors. Both share the same period bounds via `period_bounds`.
 #[tauri::command]
 pub async fn get_cumulative_traffic(period: String) -> Result<CumulativeTraffic, String> {
     // File I/O inside mutex — run on blocking thread to avoid stalling async runtime
     tokio::task::spawn_blocking(move || {
-        let storage = history_storage()
+        let mut storage = history_storage()
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
-        storage.get_cumulative_traffic(&period)
+        storage
+            .get_cumulative_traffic_via_counters(&period)
+            .or_else(|_| storage.get_cumulative_traffic(&period))
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -515,4 +642,196 @@ pub async fn check_traffic_alerts(period: String) -> Result<Vec<AlertStatus>, St
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Datelike, Timelike};
+
+    /// Build a `TrafficHistoryStorage` rooted at a fresh temp dir so tests
+    /// never touch the real `~/Library/Application Support/NetAssist` data.
+    fn storage_in_tempdir() -> (TrafficHistoryStorage, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let data_dir = dir.path().join("traffic");
+        fs::create_dir_all(&data_dir).expect("create data_dir");
+        let storage = TrafficHistoryStorage {
+            data_dir,
+            history_cache: HashMap::new(),
+        };
+        (storage, dir)
+    }
+
+    /// `period_bounds("day", ...)` should start at today's 00:00 UTC and end
+    /// at `now`; the same invariant must hold for week (Monday) and month
+    /// (1st). This is the shared foundation for both cumulative paths.
+    #[test]
+    fn test_period_bounds_day() {
+        let now = Utc::now();
+        let (start, end, label) = TrafficHistoryStorage::period_bounds("day", now).unwrap();
+        assert_eq!(label, "day");
+        assert!(start <= end, "start must not be after end");
+        assert_eq!(end, now.timestamp(), "end is the current timestamp");
+        // start should be at or after 00:00 today.
+        let start_dt = DateTime::<Utc>::from_timestamp(start, 0).unwrap();
+        assert_eq!(start_dt.hour(), 0);
+        assert_eq!(start_dt.minute(), 0);
+        assert_eq!(start_dt.second(), 0);
+    }
+
+    #[test]
+    fn test_period_bounds_week_starts_monday() {
+        let now = Utc::now();
+        let (start, _end, _label) = TrafficHistoryStorage::period_bounds("week", now).unwrap();
+        let start_dt = DateTime::<Utc>::from_timestamp(start, 0).unwrap();
+        // Monday in chrono's weekday() is 0 (num_days_from_monday).
+        assert_eq!(
+            start_dt.weekday().num_days_from_monday(),
+            0,
+            "week bound should fall on a Monday"
+        );
+        assert_eq!(start_dt.hour(), 0);
+    }
+
+    #[test]
+    fn test_period_bounds_month_starts_first() {
+        let now = Utc::now();
+        let (start, _end, _label) = TrafficHistoryStorage::period_bounds("month", now).unwrap();
+        let start_dt = DateTime::<Utc>::from_timestamp(start, 0).unwrap();
+        assert_eq!(start_dt.day(), 1, "month bound should be the 1st");
+        assert_eq!(start_dt.hour(), 0);
+    }
+
+    #[test]
+    fn test_period_bounds_rejects_unknown_period() {
+        let now = Utc::now();
+        assert!(TrafficHistoryStorage::period_bounds("year", now).is_err());
+        assert!(TrafficHistoryStorage::period_bounds("", now).is_err());
+    }
+
+    /// First call for a period must create an anchor at the current OS
+    /// counters and report 0 bytes consumed (baseline == current).
+    #[test]
+    fn test_anchor_initial_baselines_to_zero() {
+        let (mut storage, _dir) = storage_in_tempdir();
+
+        let result = storage
+            .get_cumulative_traffic_via_counters("day")
+            .expect("counter cumulative succeeds");
+
+        assert_eq!(result.total_download_bytes, 0, "first read is 0");
+        assert_eq!(result.total_upload_bytes, 0, "first read is 0");
+        assert_eq!(result.period, "day");
+
+        // The anchors file must now exist and carry the day anchor.
+        let anchors = storage.load_anchors();
+        assert_ne!(anchors.day.start_ts, 0, "anchor start_ts was written");
+    }
+
+    /// A pre-existing anchor with a stale `start_ts` (period rolled over)
+    /// must be re-baselined, so the cumulative total restarts from 0.
+    #[test]
+    fn test_anchor_period_rollover_rebaselines() {
+        let (mut storage, _dir) = storage_in_tempdir();
+
+        // Seed an obviously-stale anchor (year 2000) so the period check trips.
+        let stale = AnchorStore {
+            day: PeriodAnchor {
+                start_ts: 946_684_800, // 2000-01-01T00:00:00Z
+                rx_bytes: 0,
+                tx_bytes: 0,
+            },
+            ..Default::default()
+        };
+        storage.save_anchors(&stale);
+
+        let result = storage
+            .get_cumulative_traffic_via_counters("day")
+            .expect("counter cumulative succeeds");
+
+        // After re-baseline the total is current − current == 0.
+        assert_eq!(result.total_download_bytes, 0);
+        assert_eq!(result.total_upload_bytes, 0);
+
+        // The persisted anchor must now reference this period's start.
+        let anchors = storage.load_anchors();
+        let (expected_start, _, _) =
+            TrafficHistoryStorage::period_bounds("day", Utc::now()).unwrap();
+        assert_eq!(anchors.day.start_ts, expected_start);
+    }
+
+    /// When the OS counters go *backwards* vs the anchor (interface reset /
+    /// reboot / Wi-Fi switch), we must re-baseline instead of underflowing.
+    #[test]
+    fn test_anchor_counter_reset_rebaselines() {
+        let (mut storage, _dir) = storage_in_tempdir();
+
+        // Anchor at a huge value; the real OS counters will be far below it,
+        // simulating a reset. start_ts is forced to match this period so the
+        // *only* trip is the backwards-counter check.
+        let (start_ts, _, _) = TrafficHistoryStorage::period_bounds("day", Utc::now()).unwrap();
+        let inflated = AnchorStore {
+            day: PeriodAnchor {
+                start_ts,
+                rx_bytes: u64::MAX / 2,
+                tx_bytes: u64::MAX / 2,
+            },
+            ..Default::default()
+        };
+        storage.save_anchors(&inflated);
+
+        let result = storage
+            .get_cumulative_traffic_via_counters("day")
+            .expect("counter cumulative succeeds");
+
+        // No underflow: the result is 0 (re-baselined) rather than a wrapped
+        // huge number from saturating_sub(u64::MAX/2 - current).
+        assert!(
+            result.total_download_bytes < u64::MAX / 4,
+            "reset path must not report a wrapped/huge value"
+        );
+        assert!(result.total_upload_bytes < u64::MAX / 4);
+
+        // Anchor counters were rewritten down to the real OS counters.
+        let anchors = storage.load_anchors();
+        assert!(anchors.day.rx_bytes < u64::MAX / 2);
+        assert!(anchors.day.tx_bytes < u64::MAX / 2);
+    }
+
+    /// AnchorStore must round-trip through JSON so the persisted baseline
+    /// survives app restarts.
+    #[test]
+    fn test_anchor_store_serde_roundtrip() {
+        let store = AnchorStore {
+            day: PeriodAnchor {
+                start_ts: 1_700_000_000,
+                rx_bytes: 1234,
+                tx_bytes: 5678,
+            },
+            week: PeriodAnchor {
+                start_ts: 1_700_000_000,
+                rx_bytes: 9999,
+                tx_bytes: 0,
+            },
+            month: PeriodAnchor::default(),
+        };
+
+        let json = serde_json::to_string(&store).unwrap();
+        let back: AnchorStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.day.rx_bytes, 1234);
+        assert_eq!(back.day.tx_bytes, 5678);
+        assert_eq!(back.week.rx_bytes, 9999);
+        assert_eq!(back.month.start_ts, 0);
+    }
+
+    /// A corrupt/empty anchors.json must degrade to the default store rather
+    /// than poisoning the page (the whole point of the fallback).
+    #[test]
+    fn test_load_anchors_tolerates_corrupt_file() {
+        let (storage, _dir) = storage_in_tempdir();
+        fs::write(storage.anchors_file_path(), "not valid json {{{").unwrap();
+
+        let anchors = storage.load_anchors();
+        assert_eq!(anchors.day.start_ts, 0, "corrupt file -> default anchor");
+    }
 }

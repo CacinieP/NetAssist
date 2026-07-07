@@ -1,9 +1,9 @@
 use crate::models::DNSStats;
+use hickory_proto::rr::Name;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Instant;
 use tokio::net::UdpSocket;
-use hickory_proto::rr::Name;
 
 /// Get system DNS servers
 #[tauri::command]
@@ -44,7 +44,7 @@ pub async fn test_dns(server: String) -> Result<DNSStats, String> {
     let total_queries = 5u64;
 
     // Test domains to query
-    let test_domains = vec!["google.com", "cloudflare.com", "example.com"];
+    let test_domains = ["google.com", "cloudflare.com", "example.com"];
 
     for i in 0..total_queries {
         let domain = test_domains[i as usize % test_domains.len()];
@@ -76,7 +76,7 @@ pub async fn test_dns(server: String) -> Result<DNSStats, String> {
     Ok(DNSStats {
         server: server.clone(),
         avg_latency_ms: avg_latency,
-        success_rate: success_rate,
+        success_rate,
         total_queries,
         failed_queries: total_queries - successful_queries,
         cache_hit_rate: 0.0,
@@ -102,7 +102,7 @@ async fn perform_dns_query(server: SocketAddr, domain: &str) -> Result<f64, Stri
 
     // Connect to DNS server
     let timeout_duration = tokio::time::Duration::from_secs(3);
-    let _ = tokio::time::timeout(timeout_duration, socket.connect(server))
+    tokio::time::timeout(timeout_duration, socket.connect(server))
         .await
         .map_err(|_| "DNS server connection timeout".to_string())?
         .map_err(|e| format!("Failed to connect to DNS server: {}", e))?;

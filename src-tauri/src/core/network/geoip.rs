@@ -17,10 +17,7 @@ pub async fn lookup_geoip(ip: &str) -> Option<GeoIPInfo> {
     }
 
     // Use online API to get GeoIP information
-    match lookup_geoip_online(ip).await {
-        Ok(info) => Some(info),
-        Err(_) => None,
-    }
+    lookup_geoip_online(ip).await.ok()
 }
 
 /// Look up GeoIP using online API with fallback

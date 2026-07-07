@@ -33,7 +33,7 @@ impl TrafficMonitor {
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(state.last_update).as_secs_f64();
 
-        let (current_rx, current_tx) = self.get_interface_stats()?;
+        let (current_rx, current_tx) = crate::platform::get_interface_total_bytes();
 
         // Calculate rates with minimum elapsed time check
         let download_bps = if elapsed > 0.001 {
@@ -60,109 +60,6 @@ impl TrafficMonitor {
             upload_bps,
             timestamp: chrono::Utc::now().timestamp_millis(),
         })
-    }
-
-    /// Get interface statistics (platform-specific)
-    #[cfg(target_os = "windows")]
-    fn get_interface_stats(&self) -> Result<(u64, u64), String> {
-        use windows::Win32::NetworkManagement::IpHelper::*;
-
-        unsafe {
-            // GetIfTable2 allocates memory and returns a pointer
-            let mut if_table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-
-            // GetIfTable2 returns WIN32_ERROR
-            let result = GetIfTable2(&mut if_table);
-
-            if result.is_ok() && !if_table.is_null() {
-                let table = &*if_table;
-                let mut total_rx = 0u64;
-                let mut total_tx = 0u64;
-
-                // Sum statistics from all interfaces
-                // Safety: Only iterate through actual number of entries
-                let num_entries = table.NumEntries as usize;
-                let table_ptr = table.Table.as_ptr();
-
-                for i in 0..num_entries {
-                    let row = &*table_ptr.add(i);
-                    // Check if interface is operational (OperStatus == 1 = Up)
-                    if row.OperStatus.0 == 1 {
-                        total_rx += row.InOctets;
-                        total_tx += row.OutOctets;
-                    }
-                }
-
-                // Free the memory allocated by GetIfTable2
-                FreeMibTable(if_table as *mut _);
-
-                Ok((total_rx, total_tx))
-            } else {
-                // Fallback: return zeros if we can't get stats
-                Ok((0, 0))
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn get_interface_stats(&self) -> Result<(u64, u64), String> {
-        use std::fs;
-
-        let mut total_rx = 0u64;
-        let mut total_tx = 0u64;
-
-        // Read from /proc/net/dev
-        if let Ok(content) = fs::read_to_string("/proc/net/dev") {
-            for line in content.lines().skip(2) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 10 {
-                    if let Ok(rx) = parts[1].parse::<u64>() {
-                        total_rx += rx;
-                    }
-                    if let Ok(tx) = parts[9].parse::<u64>() {
-                        total_tx += tx;
-                    }
-                }
-            }
-        }
-
-        Ok((total_rx, total_tx))
-    }
-
-    #[cfg(target_os = "macos")]
-    fn get_interface_stats(&self) -> Result<(u64, u64), String> {
-        use std::process::Command;
-
-        // Get the active interface dynamically
-        let interface =
-            crate::platform::get_default_interface().unwrap_or_else(|_| "en0".to_string());
-
-        // Use netstat to get interface statistics on macOS.
-        // -b reports byte counts. Output columns are (1-indexed):
-        //   1:Name 2:Mtu 3:Network 4:Address 5:Ipkts 6:Ierrs 7:Ibytes
-        //   8:Opkts 9:Oerrs 10:Obytes 11:Coll
-        // NOTE: the same interface prints multiple rows (Link / each address).
-        // Those rows all carry the SAME cumulative byte counters, so summing
-        // every row would multiply the totals. We take only the FIRST data row.
-        let output = Command::new("netstat")
-            .args(&["-b", "-I", &interface])
-            .output();
-
-        if let Ok(result) = output {
-            let content = String::from_utf8_lossy(&result.stdout);
-            // skip(1) drops the header; we then take only the first data row.
-            if let Some(line) = content.lines().skip(1).next() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                // Need at least 10 columns to read Ibytes(7) and Obytes(10).
-                if parts.len() >= 10 {
-                    let rx = parts[6].parse::<u64>().unwrap_or(0);
-                    let tx = parts[9].parse::<u64>().unwrap_or(0);
-                    return Ok((rx, tx));
-                }
-            }
-        }
-
-        Ok((0, 0))
     }
 }
 
@@ -202,15 +99,13 @@ fn compute_app_ranking() -> Result<Vec<AppTraffic>, String> {
 
     // macOS: real per-process traffic (1s delta from nettop).
     #[cfg(target_os = "macos")]
-    let process_traffic_stats =
-        crate::platform::get_process_traffic_stats().unwrap_or_default();
+    let process_traffic_stats = crate::platform::get_process_traffic_stats().unwrap_or_default();
 
     // Windows / Linux: per-PID active connection counts.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let connection_info: std::collections::HashMap<u32, usize> = {
         let conns = get_platform_connections();
-        let mut counts: std::collections::HashMap<u32, usize> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
         if let Ok(conns) = conns {
             for conn in conns {
                 if let Some(pid) = conn.pid {
@@ -223,24 +118,22 @@ fn compute_app_ranking() -> Result<Vec<AppTraffic>, String> {
 
     // Resolve process names.
     #[cfg(target_os = "windows")]
-    let pids: std::collections::HashSet<u32> =
-        sys.processes().keys().map(|p| p.as_u32()).collect();
+    let pids: std::collections::HashSet<u32> = sys.processes().keys().map(|p| p.as_u32()).collect();
     #[cfg(target_os = "windows")]
     let process_names = crate::platform::windows::get_process_names_batch(&pids);
 
     #[cfg(target_os = "macos")]
-    let process_names =
-        crate::platform::get_all_processes().unwrap_or_else(|_| {
-            sys.processes()
-                .iter()
-                .map(|(pid, p)| {
-                    (
-                        pid.as_u32(),
-                        p.name().to_str().unwrap_or("[unknown]").to_string(),
-                    )
-                })
-                .collect()
-        });
+    let process_names = crate::platform::get_all_processes().unwrap_or_else(|_| {
+        sys.processes()
+            .iter()
+            .map(|(pid, p)| {
+                (
+                    pid.as_u32(),
+                    p.name().to_str().unwrap_or("[unknown]").to_string(),
+                )
+            })
+            .collect()
+    });
 
     #[cfg(target_os = "linux")]
     let process_names: std::collections::HashMap<u32, String> = sys
@@ -254,7 +147,7 @@ fn compute_app_ranking() -> Result<Vec<AppTraffic>, String> {
         })
         .collect();
 
-    for (pid, _) in sys.processes() {
+    for pid in sys.processes().keys() {
         let pid_u32 = pid.as_u32();
         let name = process_names
             .get(&pid_u32)
@@ -324,7 +217,7 @@ pub async fn get_realtime_traffic() -> Result<TrafficStats, String> {
 /// it does not need to re-enter the async runtime.
 #[tauri::command]
 pub async fn get_app_traffic_ranking() -> Result<Vec<AppTraffic>, String> {
-    tokio::task::spawn_blocking(|| compute_app_ranking())
+    tokio::task::spawn_blocking(compute_app_ranking)
         .await
         .map_err(|e| format!("Task join error: {}", e))?
 }

@@ -18,4 +18,23 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  // 4. isolate the heaviest vendor (echarts ~1MB) into its own cacheable chunk
+  //    so app-code changes don't force users to re-download it. Other vendors
+  //    are left to Rollup's default chunking to avoid circular chunks.
+  build: {
+    // echarts itself is ~1MB unminified; its isolated vendor chunk legitimately
+    // exceeds Vite's default 500KB limit. Raise the floor rather than split a
+    // single library. App code chunks stay well under this.
+    chunkSizeWarningLimit: 1100,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("echarts")) return "echarts-vendor";
+            if (id.includes("i18next")) return "i18n-vendor";
+          }
+        },
+      },
+    },
+  },
 }));

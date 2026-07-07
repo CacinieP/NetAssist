@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useSettingsStore } from "./store/settingsStore";
@@ -8,11 +8,18 @@ import { notify } from "./utils/notify";
 import i18n from "./i18n";
 import StatusBar from "./components/StatusBar/StatusBar";
 import Navigation from "./components/Navigation/Navigation";
-import Dashboard from "./components/Dashboard/Dashboard";
-import TrafficMonitorEnhanced from "./components/TrafficMonitor/TrafficMonitorEnhanced";
-import ConnectionManager from "./components/ConnectionManager/ConnectionManager";
-import EmergencyKit from "./components/EmergencyKit/EmergencyKit";
-import Settings from "./components/Settings/Settings";
+
+// Route-level code-splitting: each page loads on demand so the initial bundle
+// only carries the shell (StatusBar/Navigation) plus the active route.
+const Dashboard = lazy(() => import("./components/Dashboard/Dashboard"));
+const TrafficMonitorEnhanced = lazy(
+  () => import("./components/TrafficMonitor/TrafficMonitorEnhanced")
+);
+const ConnectionManager = lazy(
+  () => import("./components/ConnectionManager/ConnectionManager")
+);
+const EmergencyKit = lazy(() => import("./components/EmergencyKit/EmergencyKit"));
+const Settings = lazy(() => import("./components/Settings/Settings"));
 
 function App() {
   const { settings, loadSettings } = useSettingsStore();
@@ -133,13 +140,21 @@ function App() {
         <div className="flex-1 flex overflow-hidden">
           <Navigation />
           <main className="flex-1 overflow-auto scrollbar-thin">
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/traffic" element={<TrafficMonitorEnhanced />} />
-              <Route path="/connections" element={<ConnectionManager />} />
-              <Route path="/emergency" element={<EmergencyKit />} />
-              <Route path="/settings" element={<Settings />} />
-            </Routes>
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center text-gray-400">
+                  加载中…
+                </div>
+              }
+            >
+              <Routes>
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/traffic" element={<TrafficMonitorEnhanced />} />
+                <Route path="/connections" element={<ConnectionManager />} />
+                <Route path="/emergency" element={<EmergencyKit />} />
+                <Route path="/settings" element={<Settings />} />
+              </Routes>
+            </Suspense>
           </main>
         </div>
       </div>
