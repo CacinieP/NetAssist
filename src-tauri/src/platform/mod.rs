@@ -221,6 +221,26 @@ pub struct PermissionStatusGeneric {
     pub warnings: Vec<String>,
 }
 
+/// Read cumulative (rx_bytes, tx_bytes) counters for the active network
+/// interface. These are the OS-authoritative totals used by both real-time
+/// rate calculation and cumulative-traffic anchoring.
+///
+/// Returns `Ok((0, 0))` when the counters cannot be read rather than an
+/// error, so callers degrade gracefully instead of failing the whole page.
+pub fn get_interface_total_bytes() -> (u64, u64) {
+    cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+            windows::get_interface_total_bytes()
+        } else if #[cfg(target_os = "linux")] {
+            linux::get_interface_total_bytes()
+        } else if #[cfg(target_os = "macos")] {
+            macos::get_interface_total_bytes()
+        } else {
+            (0, 0)
+        }
+    }
+}
+
 /// Get process traffic stats (platform-specific)
 #[cfg(target_os = "macos")]
 pub fn get_process_traffic_stats(

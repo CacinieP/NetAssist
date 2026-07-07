@@ -508,6 +508,40 @@ pub struct PermissionStatus {
     pub warnings: Vec<String>,
 }
 
+/// Read cumulative (rx_bytes, tx_bytes) for the active interface via
+/// `netstat -b -I <iface>`. Mirrors the parsing previously inlined in
+/// `TrafficMonitor::get_interface_stats`.
+///
+/// -b reports byte counts. Output columns (1-indexed):
+///   1:Name 2:Mtu 3:Network 4:Address 5:Ipkts 6:Ierrs 7:Ibytes
+///   8:Opkts 9:Oerrs 10:Obytes 11:Coll
+/// The same interface prints multiple rows (Link / each address) that all
+/// carry the SAME cumulative byte counters; we take only the FIRST data row
+/// to avoid multiplying the totals.
+pub fn get_interface_total_bytes() -> (u64, u64) {
+    let interface = get_default_interface().unwrap_or_else(|_| "en0".to_string());
+
+    let output = std::process::Command::new("netstat")
+        .args(["-b", "-I", &interface])
+        .output();
+
+    if let Ok(result) = output {
+        let content = String::from_utf8_lossy(&result.stdout);
+        // skip(1) drops the header; we then take only the first data row.
+        if let Some(line) = content.lines().skip(1).next() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            // Need at least 10 columns to read Ibytes(7) and Obytes(10).
+            if parts.len() >= 10 {
+                let rx = parts[6].parse::<u64>().unwrap_or(0);
+                let tx = parts[9].parse::<u64>().unwrap_or(0);
+                return (rx, tx);
+            }
+        }
+    }
+
+    (0, 0)
+}
+
 /// Get per-process network traffic statistics on macOS.
 ///
 /// `nettop` output is **CSV** (NOT json). With `-L 2 -s 1` it emits two

@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "netassist"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "cfg-if",
@@ -2361,6 +2361,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-notification",
  "tauri-plugin-shell",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
