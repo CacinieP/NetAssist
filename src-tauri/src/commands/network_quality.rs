@@ -509,7 +509,7 @@ async fn traceroute_linux(target: &str, max_hops: u32) -> Result<TracerouteResul
         // -w: per-hop probe timeout in seconds
         // -q: one probe per hop (simpler latency parsing)
         let output = Command::new("traceroute")
-            .args(&[
+            .args([
                 "-n",
                 "-m",
                 &max_hops.to_string(),

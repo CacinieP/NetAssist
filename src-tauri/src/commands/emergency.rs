@@ -140,7 +140,7 @@ async fn check_network_connectivity() -> DiagnosticItem {
 
             #[cfg(target_os = "linux")]
             let result = std::process::Command::new("ping")
-                .args(&["-c", "1", "-W", "3", "8.8.8.8"])
+                .args(["-c", "1", "-W", "3", "8.8.8.8"])
                 .output();
 
             #[cfg(target_os = "macos")]

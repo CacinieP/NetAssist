@@ -156,7 +156,7 @@ pub async fn kill_connection(
     {
         // Linux critical PIDs - kernel threads and essential system processes
         // Range check for kernel threads (2-500)
-        if pid == 1 || (pid >= 2 && pid <= 500) {
+        if pid == 1 || (2..=500).contains(&pid) {
             return Err(format!("Cannot kill system-critical process (PID {})", pid));
         }
 
@@ -255,7 +255,7 @@ pub async fn kill_connection(
     {
         use std::process::Command;
         let output = Command::new("kill")
-            .args(&["-15", &pid.to_string()]) // Try SIGTERM first (less aggressive)
+            .args(["-15", &pid.to_string()]) // Try SIGTERM first (less aggressive)
             .output()
             .map_err(|e| format!("Failed to execute kill: {}", e))?;
 
@@ -270,7 +270,7 @@ pub async fn kill_connection(
         } else {
             // Fall back to SIGKILL if SIGTERM fails
             let output = Command::new("kill")
-                .args(&["-9", &pid.to_string()])
+                .args(["-9", &pid.to_string()])
                 .output()
                 .map_err(|e| format!("Failed to execute kill -9: {}", e))?;
 
