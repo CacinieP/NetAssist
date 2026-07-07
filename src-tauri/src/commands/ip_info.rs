@@ -101,7 +101,10 @@ pub async fn get_network_status() -> Result<crate::models::NetworkStatus, String
     let (status, message) = if internet_ok {
         ("normal".to_string(), "网络连接正常".to_string())
     } else {
-        ("abnormal".to_string(), "已连接路由器但无法访问互联网".to_string())
+        (
+            "abnormal".to_string(),
+            "已连接路由器但无法访问互联网".to_string(),
+        )
     };
 
     Ok(crate::models::NetworkStatus {
@@ -203,7 +206,7 @@ async fn get_public_ip() -> Option<String> {
     use tokio::time::{timeout, Duration};
 
     // IPv4-only services for better GeoIP coverage
-    let services = vec![
+    let services = [
         "https://api4.ipify.org",     // IPv4-only endpoint
         "https://ipv4.icanhazip.com", // IPv4-only endpoint
         "https://ifconfig.me/ip",     // Returns IPv4 when available

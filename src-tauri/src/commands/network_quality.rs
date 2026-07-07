@@ -215,8 +215,8 @@ async fn ping_windows(target: &str, _ipv6: bool, count: u32) -> Result<PingResul
             packets_received += 1;
 
             // Extract latency: English "time=" or Chinese "时间=".
-            if let Some(latency) = parse_ping_latency(line, "time=")
-                .or_else(|| parse_ping_latency(line, "时间="))
+            if let Some(latency) =
+                parse_ping_latency(line, "time=").or_else(|| parse_ping_latency(line, "时间="))
             {
                 latencies.push(latency);
             }
@@ -301,8 +301,8 @@ async fn ping_linux(target: &str, ipv6: bool, count: u32) -> Result<PingResult, 
         if line.contains("bytes from") || line.contains("字节来自") {
             packets_received += 1;
 
-            if let Some(latency) = parse_ping_latency(line, "time=")
-                .or_else(|| parse_ping_latency(line, "时间="))
+            if let Some(latency) =
+                parse_ping_latency(line, "time=").or_else(|| parse_ping_latency(line, "时间="))
             {
                 latencies.push(latency);
             }
@@ -376,8 +376,8 @@ async fn ping_macos(target: &str, ipv6: bool, count: u32) -> Result<PingResult, 
             packets_received += 1;
 
             // English "time=" or Chinese "时间="
-            if let Some(latency) = parse_ping_latency(line, "time=")
-                .or_else(|| parse_ping_latency(line, "时间="))
+            if let Some(latency) =
+                parse_ping_latency(line, "time=").or_else(|| parse_ping_latency(line, "时间="))
             {
                 latencies.push(latency);
             }
@@ -587,7 +587,7 @@ async fn traceroute_macos(target: &str, max_hops: u32) -> Result<TracerouteResul
         // -w: per-hop probe timeout in seconds (fail fast on silent hops)
         // -q: one probe per hop (simpler latency parsing)
         let output = Command::new("traceroute")
-            .args(&[
+            .args([
                 "-n",
                 "-m",
                 &max_hops.to_string(),

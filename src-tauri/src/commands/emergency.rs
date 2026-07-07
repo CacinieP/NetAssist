@@ -26,33 +26,28 @@ pub async fn apply_quick_fix(fix_type: String) -> Result<bool, String> {
             // Use the DNS servers configured in Settings (falling back to
             // 8.8.8.8 / 1.1.1.1 if settings can't be read). This links the
             // Settings DNS fields to the EmergencyKit "切换DNS" action.
-            let (primary, secondary) =
-                crate::commands::settings::load_settings_from_file()
-                    .map(|s| {
-                        let sec = if s.secondary_dns.is_empty() {
-                            None
-                        } else {
-                            Some(s.secondary_dns.clone())
-                        };
-                        (s.primary_dns, sec)
-                    })
-                    .unwrap_or_else(|_| {
-                        ("8.8.8.8".to_string(), Some("1.1.1.1".to_string()))
-                    });
+            let (primary, secondary) = crate::commands::settings::load_settings_from_file()
+                .map(|s| {
+                    let sec = if s.secondary_dns.is_empty() {
+                        None
+                    } else {
+                        Some(s.secondary_dns.clone())
+                    };
+                    (s.primary_dns, sec)
+                })
+                .unwrap_or_else(|_| ("8.8.8.8".to_string(), Some("1.1.1.1".to_string())));
             crate::platform::set_dns_servers(&primary, secondary.as_deref())
                 .map_err(|e| format!("Failed to switch DNS: {}", e))?;
             Ok(true)
         }
         "toggle_ipv6" => {
             tracing::info!("Executing fix: toggle_ipv6");
-            crate::platform::toggle_ipv6()
-                .map_err(|e| format!("切换 IPv6 失败: {}", e))?;
+            crate::platform::toggle_ipv6().map_err(|e| format!("切换 IPv6 失败: {}", e))?;
             Ok(true)
         }
         "reset_adapter" => {
             tracing::info!("Executing fix: reset_adapter");
-            crate::platform::reset_adapter()
-                .map_err(|e| format!("重置网络适配器失败: {}", e))?;
+            crate::platform::reset_adapter().map_err(|e| format!("重置网络适配器失败: {}", e))?;
             Ok(true)
         }
         "restart_network_service" => {
@@ -150,7 +145,7 @@ async fn check_network_connectivity() -> DiagnosticItem {
 
             #[cfg(target_os = "macos")]
             let result = std::process::Command::new("ping")
-                .args(&["-c", "1", "-W", "3000", "8.8.8.8"])
+                .args(["-c", "1", "-W", "3000", "8.8.8.8"])
                 .output();
 
             result

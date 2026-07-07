@@ -1,0 +1,75 @@
+name: CI
+
+# Lightweight quality gate: lint + build + test on a single OS.
+# Deliberately does NOT run the full cross-platform build matrix here —
+# that lives in release.yml and is triggered manually only, to avoid the
+# excessive Actions usage that got the previous account suspended.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check + build
+        run: npm run build
+
+  backend:
+    name: Rust (lint + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libpcap-dev
+
+      # Build the frontend resources the Rust crate embeds at compile time.
+      - name: Build frontend
+        run: npm ci && npm run build
+
+      - name: cargo fmt
+        run: cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all --manifest-path src-tauri/Cargo.toml

@@ -99,15 +99,13 @@ fn compute_app_ranking() -> Result<Vec<AppTraffic>, String> {
 
     // macOS: real per-process traffic (1s delta from nettop).
     #[cfg(target_os = "macos")]
-    let process_traffic_stats =
-        crate::platform::get_process_traffic_stats().unwrap_or_default();
+    let process_traffic_stats = crate::platform::get_process_traffic_stats().unwrap_or_default();
 
     // Windows / Linux: per-PID active connection counts.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let connection_info: std::collections::HashMap<u32, usize> = {
         let conns = get_platform_connections();
-        let mut counts: std::collections::HashMap<u32, usize> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
         if let Ok(conns) = conns {
             for conn in conns {
                 if let Some(pid) = conn.pid {
@@ -120,24 +118,22 @@ fn compute_app_ranking() -> Result<Vec<AppTraffic>, String> {
 
     // Resolve process names.
     #[cfg(target_os = "windows")]
-    let pids: std::collections::HashSet<u32> =
-        sys.processes().keys().map(|p| p.as_u32()).collect();
+    let pids: std::collections::HashSet<u32> = sys.processes().keys().map(|p| p.as_u32()).collect();
     #[cfg(target_os = "windows")]
     let process_names = crate::platform::windows::get_process_names_batch(&pids);
 
     #[cfg(target_os = "macos")]
-    let process_names =
-        crate::platform::get_all_processes().unwrap_or_else(|_| {
-            sys.processes()
-                .iter()
-                .map(|(pid, p)| {
-                    (
-                        pid.as_u32(),
-                        p.name().to_str().unwrap_or("[unknown]").to_string(),
-                    )
-                })
-                .collect()
-        });
+    let process_names = crate::platform::get_all_processes().unwrap_or_else(|_| {
+        sys.processes()
+            .iter()
+            .map(|(pid, p)| {
+                (
+                    pid.as_u32(),
+                    p.name().to_str().unwrap_or("[unknown]").to_string(),
+                )
+            })
+            .collect()
+    });
 
     #[cfg(target_os = "linux")]
     let process_names: std::collections::HashMap<u32, String> = sys
@@ -151,7 +147,7 @@ fn compute_app_ranking() -> Result<Vec<AppTraffic>, String> {
         })
         .collect();
 
-    for (pid, _) in sys.processes() {
+    for pid in sys.processes().keys() {
         let pid_u32 = pid.as_u32();
         let name = process_names
             .get(&pid_u32)
@@ -221,7 +217,7 @@ pub async fn get_realtime_traffic() -> Result<TrafficStats, String> {
 /// it does not need to re-enter the async runtime.
 #[tauri::command]
 pub async fn get_app_traffic_ranking() -> Result<Vec<AppTraffic>, String> {
-    tokio::task::spawn_blocking(|| compute_app_ranking())
+    tokio::task::spawn_blocking(compute_app_ranking)
         .await
         .map_err(|e| format!("Task join error: {}", e))?
 }

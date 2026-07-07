@@ -57,7 +57,7 @@ impl TrafficHistoryStorage {
         let year = date_str[0..4]
             .parse::<i32>()
             .map_err(|_| "Invalid year".to_string())?;
-        if year < 2000 || year > 2100 {
+        if !(2000..=2100).contains(&year) {
             return Err("Date out of valid range (2000-2100)".to_string());
         }
 
@@ -136,8 +136,8 @@ impl TrafficHistoryStorage {
         let mut total_upload = 0u64;
 
         // Load data for each day in the period
-        let start_date = DateTime::from_timestamp(start_time, 0).unwrap_or_else(|| Utc::now());
-        let end_date = DateTime::from_timestamp(end_time, 0).unwrap_or_else(|| Utc::now());
+        let start_date = DateTime::from_timestamp(start_time, 0).unwrap_or_else(Utc::now);
+        let end_date = DateTime::from_timestamp(end_time, 0).unwrap_or_else(Utc::now);
         let mut current_date = start_date;
 
         // Convert to milliseconds for comparison with point.timestamp
@@ -166,7 +166,7 @@ impl TrafficHistoryStorage {
                     }
                 }
             }
-            current_date = current_date + chrono::Duration::days(1);
+            current_date += chrono::Duration::days(1);
         }
 
         Ok(CumulativeTraffic {
@@ -186,7 +186,7 @@ impl TrafficHistoryStorage {
         let mut all_data = Vec::new();
 
         let start_date =
-            DateTime::from_timestamp(start_time.timestamp(), 0).unwrap_or_else(|| Utc::now());
+            DateTime::from_timestamp(start_time.timestamp(), 0).unwrap_or_else(Utc::now);
         let mut current_date = start_date;
 
         while current_date <= now {
@@ -200,7 +200,7 @@ impl TrafficHistoryStorage {
                     }
                 }
             }
-            current_date = current_date + chrono::Duration::days(1);
+            current_date += chrono::Duration::days(1);
         }
 
         all_data.sort_by_key(|p| p.timestamp);
@@ -215,10 +215,7 @@ impl TrafficHistoryStorage {
     /// Compute the (start, end, label) bounds for a period relative to `now`.
     /// Extracted so it can be shared by the file-based and counter-based
     /// cumulative calculations and unit-tested in isolation.
-    fn period_bounds(
-        period: &str,
-        now: DateTime<Utc>,
-    ) -> Result<(i64, i64, String), String> {
+    fn period_bounds(period: &str, now: DateTime<Utc>) -> Result<(i64, i64, String), String> {
         match period {
             "day" => {
                 let start = now
@@ -348,21 +345,11 @@ impl TrafficHistoryStorage {
 
 /// Snapshot of the interface byte counters captured at the start of a period.
 /// `start_ts` lets us detect period rollover (new day/week/month).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PeriodAnchor {
     start_ts: i64,
     rx_bytes: u64,
     tx_bytes: u64,
-}
-
-impl Default for PeriodAnchor {
-    fn default() -> Self {
-        Self {
-            start_ts: 0,
-            rx_bytes: 0,
-            tx_bytes: 0,
-        }
-    }
 }
 
 /// On-disk anchor store: one anchor per supported period. Persisted at
@@ -523,8 +510,7 @@ impl TrafficAlertManager {
         if let Ok(settings) = crate::commands::settings::load_settings_from_file() {
             if settings.traffic_limit_gb > 0.0 {
                 let threshold_bytes = (settings.traffic_limit_gb * 1024.0 * 1024.0 * 1024.0) as u64;
-                let current_value =
-                    cumulative.total_download_bytes + cumulative.total_upload_bytes;
+                let current_value = cumulative.total_download_bytes + cumulative.total_upload_bytes;
                 let triggered = current_value >= threshold_bytes;
                 let percentage = if threshold_bytes > 0 {
                     (current_value as f64 / threshold_bytes as f64) * 100.0
@@ -710,8 +696,7 @@ mod tests {
     #[test]
     fn test_period_bounds_month_starts_first() {
         let now = Utc::now();
-        let (start, _end, _label) =
-            TrafficHistoryStorage::period_bounds("month", now).unwrap();
+        let (start, _end, _label) = TrafficHistoryStorage::period_bounds("month", now).unwrap();
         let start_dt = DateTime::<Utc>::from_timestamp(start, 0).unwrap();
         assert_eq!(start_dt.day(), 1, "month bound should be the 1st");
         assert_eq!(start_dt.hour(), 0);
