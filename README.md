@@ -31,4 +31,4 @@ npm run tauri build
 
 ## 许可证
 
-MIT © CacinieP
+AGPL-3.0 © CacinieP
