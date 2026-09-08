@@ -3,11 +3,16 @@ use std::sync::Arc;
 use sysinfo::System;
 use tokio::sync::Mutex;
 
-/// Traffic monitoring state
+/// Traffic monitoring state.
+///
+/// The baseline (last observed interface counters + the time they were read)
+/// is optional: before the FIRST successful counter read we have no baseline,
+/// so the first poll reports 0 bps instead of "uptime bytes / uptime seconds"
+/// (which produced GB/s spikes and poisoned history).
 struct TrafficState {
-    last_rx_bytes: u64,
-    last_tx_bytes: u64,
-    last_update: std::time::Instant,
+    last_rx_bytes: Option<u64>,
+    last_tx_bytes: Option<u64>,
+    last_update: Option<std::time::Instant>,
 }
 
 pub struct TrafficMonitor {
@@ -16,44 +21,47 @@ pub struct TrafficMonitor {
 
 impl TrafficMonitor {
     pub fn new() -> Self {
-        let (rx_bytes, tx_bytes) = (0, 0);
-
         Self {
             state: Arc::new(Mutex::new(TrafficState {
-                last_rx_bytes: rx_bytes,
-                last_tx_bytes: tx_bytes,
-                last_update: std::time::Instant::now(),
+                last_rx_bytes: None,
+                last_tx_bytes: None,
+                last_update: None,
             })),
         }
     }
 
     /// Get current traffic statistics
     pub async fn get_stats(&self) -> Result<TrafficStats, String> {
-        let mut state = self.state.lock().await;
+        // Read the OS counters OUTSIDE the lock (get_interface_total_bytes()
+        // may spawn external commands on macOS; holding the async mutex while
+        // doing blocking work would stall other commands).
+        let (current_rx, current_tx) =
+            tokio::task::spawn_blocking(crate::platform::get_interface_total_bytes)
+                .await
+                .unwrap_or((0, 0));
+
         let now = std::time::Instant::now();
-        let elapsed = now.duration_since(state.last_update).as_secs_f64();
+        let mut state = self.state.lock().await;
 
-        let (current_rx, current_tx) = crate::platform::get_interface_total_bytes();
-
-        // Calculate rates with minimum elapsed time check
-        let download_bps = if elapsed > 0.001 {
-            // Minimum 1ms to prevent extreme values
-            (current_rx.saturating_sub(state.last_rx_bytes)) as f64 / elapsed
-        } else {
-            0.0
-        };
-
-        let upload_bps = if elapsed > 0.001 {
-            // Minimum 1ms to prevent extreme values
-            (current_tx.saturating_sub(state.last_tx_bytes)) as f64 / elapsed
-        } else {
-            0.0
-        };
+        // Compute rate from the previous reading; no previous reading yet → 0.
+        let mut download_bps = 0.0f64;
+        let mut upload_bps = 0.0f64;
+        if let (Some(last_rx), Some(last_tx), Some(last_update)) = (
+            state.last_rx_bytes,
+            state.last_tx_bytes,
+            state.last_update,
+        ) {
+            let elapsed = now.duration_since(last_update).as_secs_f64();
+            if elapsed > 0.001 {
+                download_bps = (current_rx.saturating_sub(last_rx)) as f64 / elapsed;
+                upload_bps = (current_tx.saturating_sub(last_tx)) as f64 / elapsed;
+            }
+        }
 
         // Update state
-        state.last_rx_bytes = current_rx;
-        state.last_tx_bytes = current_tx;
-        state.last_update = now;
+        state.last_rx_bytes = Some(current_rx);
+        state.last_tx_bytes = Some(current_tx);
+        state.last_update = Some(now);
 
         Ok(TrafficStats {
             download_bps,
