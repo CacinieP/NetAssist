@@ -202,21 +202,20 @@ pub fn release_renew_ip() -> anyhow::Result<()> {
     // Fallback for non-NetworkManager systems: dhclient (add -1 so it never
     // blocks for 60s). This is inherently risky on NM systems, hence only a
     // fallback.
-    if std::process::Command::new("dhclient")
+    let released = std::process::Command::new("dhclient")
         .arg("-r")
         .arg("-1")
         .status()
         .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        if std::process::Command::new("dhclient")
+        .unwrap_or(false);
+    if released
+        && std::process::Command::new("dhclient")
             .arg("-1")
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
-        {
-            return Ok(());
-        }
+    {
+        return Ok(());
     }
     Err(anyhow::anyhow!(
         "无法续租 IP 地址（需要 NetworkManager 或 dhclient）"
