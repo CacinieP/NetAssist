@@ -4,8 +4,12 @@ use std::net::IpAddr;
 /// Get all active network connections
 #[tauri::command]
 pub async fn get_active_connections() -> Result<Vec<ConnectionInfo>, String> {
-    // Use platform abstraction layer
-    let raw_connections = crate::platform::get_active_connections().map_err(|e| e.to_string())?;
+    // The platform layer runs external commands (lsof/netstat/ss) that can
+    // take seconds; never block the async runtime directly.
+    let raw_connections = tokio::task::spawn_blocking(crate::platform::get_active_connections)
+        .await
+        .map_err(|e| format!("Connection task join error: {}", e))?
+        .map_err(|e| e.to_string())?;
 
     tracing::info!(
         "Got {} raw connections from platform layer",
@@ -14,14 +18,6 @@ pub async fn get_active_connections() -> Result<Vec<ConnectionInfo>, String> {
 
     let mut connections = Vec::new();
     for raw in &raw_connections {
-        let process_name = raw.process_name.as_deref().unwrap_or("-");
-        tracing::debug!(
-            "Connection: PID={:?}, process_name={}, remote={}",
-            raw.pid,
-            process_name,
-            raw.remote_addr
-        );
-
         connections.push(ConnectionInfo {
             pid: raw.pid.unwrap_or(0),
             process_name: raw.process_name.clone().unwrap_or_else(|| "-".to_string()),
@@ -37,16 +33,10 @@ pub async fn get_active_connections() -> Result<Vec<ConnectionInfo>, String> {
         });
     }
 
-    // Log first 5 connections for debugging
-    for (i, conn) in connections.iter().take(5).enumerate() {
-        tracing::info!(
-            "Connection {}: process_name='{}', PID={}, remote={}",
-            i,
-            conn.process_name,
-            conn.pid,
-            conn.remote_address
-        );
-    }
+    tracing::info!(
+        "Connection list assembled: {} entries",
+        connections.len()
+    );
 
     Ok(connections)
 }
@@ -72,41 +62,44 @@ pub async fn kill_connection(
     remote_addr: String,
     remote_port: u16,
 ) -> Result<bool, String> {
-    tracing::warn!(
-        "kill_connection invoked: will terminate entire process PID={} (connection {}:{}->{}:{})",
-        pid,
-        "?",
-        0,
-        remote_addr,
-        remote_port
-    );
-    // Validate PID range (prevent overflow and restrict reasonable range)
-    const MAX_PID: u32 = 4194304; // Reasonable max PID for most systems
-    if pid == 0 || pid > MAX_PID {
-        return Err(format!("Invalid PID: out of valid range (1-{})", MAX_PID));
-    }
+    // Validation + process teardown touch the platform layer (which spawns
+    // lsof/ss and runs kill/taskkill) — run off the async runtime.
+    tokio::task::spawn_blocking(move || {
+        tracing::warn!(
+            "kill_connection invoked: will terminate entire process PID={} (connection {}:{}->{}:{})",
+            pid,
+            "?",
+            0,
+            remote_addr,
+            remote_port
+        );
+        // Validate PID range (prevent overflow and restrict reasonable range)
+        const MAX_PID: u32 = 4194304; // Reasonable max PID for most systems
+        if pid == 0 || pid > MAX_PID {
+            return Err(format!("Invalid PID: out of valid range (1-{})", MAX_PID));
+        }
 
-    // Validate remote address
-    let parsed_addr: IpAddr = remote_addr
-        .parse()
-        .map_err(|_| "Invalid remote address format".to_string())?;
+        // Validate remote address
+        let parsed_addr: IpAddr = remote_addr
+            .parse()
+            .map_err(|_| "Invalid remote address format".to_string())?;
 
-    // Validate port is not zero
-    if remote_port == 0 {
-        return Err("Invalid remote port".to_string());
-    }
+        // Validate port is not zero
+        if remote_port == 0 {
+            return Err("Invalid remote port".to_string());
+        }
 
-    // Verify the connection exists before killing
-    let connections = crate::platform::get_active_connections()
-        .map_err(|e| format!("Failed to get connections: {}", e))?;
+        // Verify the connection exists before killing
+        let connections = crate::platform::get_active_connections()
+            .map_err(|e| format!("Failed to get connections: {}", e))?;
 
-    let connection_exists = connections.iter().any(|conn| {
-        conn.pid == Some(pid) && conn.remote_addr == parsed_addr && conn.remote_port == remote_port
-    });
+        let connection_exists = connections.iter().any(|conn| {
+            conn.pid == Some(pid) && conn.remote_addr == parsed_addr && conn.remote_port == remote_port
+        });
 
-    if !connection_exists {
-        return Err("Connection not found or PID mismatch".to_string());
-    }
+        if !connection_exists {
+            return Err("Connection not found or PID mismatch".to_string());
+        }
 
     // Platform-specific critical process protection
     #[cfg(windows)]
@@ -308,4 +301,7 @@ pub async fn kill_connection(
             Err("Failed to kill process".to_string())
         }
     }
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }

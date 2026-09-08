@@ -197,40 +197,47 @@ fn save_settings_to_file(settings: &Settings) -> anyhow::Result<()> {
 /// Get application settings
 #[tauri::command]
 pub async fn get_settings() -> Result<Settings, String> {
-    match load_settings_from_file() {
+    tokio::task::spawn_blocking(move || match load_settings_from_file() {
         Ok(settings) => Ok(settings),
         Err(e) => {
             tracing::warn!("Failed to load settings, using defaults: {}", e);
             Ok(Settings::default())
         }
-    }
+    })
+    .await
+    .map_err(|e| format!("Settings task join error: {}", e))?
 }
 
 /// Update application settings
 #[tauri::command]
 pub async fn update_settings(settings: Settings) -> Result<bool, String> {
-    // Validate settings before updating
-    if let Err(e) = validate_settings(&settings) {
-        let err_msg = format!("Settings validation failed: {}", e);
-        tracing::error!("{}", err_msg);
-        return Err(err_msg);
-    }
+    // Save + validate are file I/O — keep them off the async runtime.
+    tokio::task::spawn_blocking(move || {
+        // Validate settings before updating
+        if let Err(e) = validate_settings(&settings) {
+            let err_msg = format!("Settings validation failed: {}", e);
+            tracing::error!("{}", err_msg);
+            return Err(err_msg);
+        }
 
-    // Save to persistent storage
-    if let Err(e) = save_settings_to_file(&settings) {
-        let err_msg = format!("Failed to save settings: {}", e);
-        tracing::error!("{}", err_msg);
-        return Err(err_msg);
-    }
+        // Save to persistent storage
+        if let Err(e) = save_settings_to_file(&settings) {
+            let err_msg = format!("Failed to save settings: {}", e);
+            tracing::error!("{}", err_msg);
+            return Err(err_msg);
+        }
 
-    // Log without sensitive information
-    tracing::info!("Settings updated: auto_start={}, minimize_to_tray={}, refresh_interval_secs={}, dark_mode={}",
-        settings.auto_start,
-        settings.minimize_to_tray,
-        settings.refresh_interval_secs,
-        settings.dark_mode
-    );
-    Ok(true)
+        // Log without sensitive information
+        tracing::info!("Settings updated: auto_start={}, minimize_to_tray={}, refresh_interval_secs={}, dark_mode={}",
+            settings.auto_start,
+            settings.minimize_to_tray,
+            settings.refresh_interval_secs,
+            settings.dark_mode
+        );
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("Settings task join error: {}", e))?
 }
 
 /// Enable or disable launch-at-login. Mirrors the settings.auto_start boolean
@@ -265,38 +272,49 @@ pub async fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool,
 /// Reset settings to default
 #[tauri::command]
 pub async fn reset_settings() -> Result<Settings, String> {
-    let settings = Settings::default();
+    tokio::task::spawn_blocking(|| {
+        let settings = Settings::default();
 
-    if let Err(e) = save_settings_to_file(&settings) {
-        let err_msg = format!("Failed to save settings: {}", e);
-        tracing::error!("{}", err_msg);
-        return Err(err_msg);
-    }
+        if let Err(e) = save_settings_to_file(&settings) {
+            let err_msg = format!("Failed to save settings: {}", e);
+            tracing::error!("{}", err_msg);
+            return Err(err_msg);
+        }
 
-    tracing::info!("Settings reset to default");
-    Ok(settings)
+        tracing::info!("Settings reset to default");
+        Ok(settings)
+    })
+    .await
+    .map_err(|e| format!("Settings task join error: {}", e))?
 }
 
-/// Check platform-specific permissions
+/// Check platform-specific permissions.
+///
+/// The underlying check spawns platform tools (lsof, netstat) — run it on a
+/// blocking thread.
 #[tauri::command]
 pub async fn check_platform_permissions() -> Result<serde_json::Value, String> {
-    cfg_if::cfg_if! {
-        if #[cfg(target_os = "macos")] {
-            crate::platform::check_permissions()
-                .map(|status| serde_json::to_value(status).unwrap_or(serde_json::json!({"error": "serialization failed"})))
-                .map_err(|e| e.to_string())
-        } else if #[cfg(target_os = "linux")] {
-            crate::platform::check_permissions()
-                .map(|status| serde_json::to_value(status).unwrap_or(serde_json::json!({"error": "serialization failed"})))
-                .map_err(|e| e.to_string())
-        } else {
-            // Windows generally doesn't require special permissions for network monitoring
-            Ok(serde_json::json!({
-                "has_permissions": true,
-                "warnings": []
-            }))
+    tokio::task::spawn_blocking(|| {
+        cfg_if::cfg_if! {
+            if #[cfg(target_os = "macos")] {
+                crate::platform::check_permissions()
+                    .map(|status| serde_json::to_value(status).unwrap_or(serde_json::json!({"error": "serialization failed"})))
+                    .map_err(|e| e.to_string())
+            } else if #[cfg(target_os = "linux")] {
+                crate::platform::check_permissions()
+                    .map(|status| serde_json::to_value(status).unwrap_or(serde_json::json!({"error": "serialization failed"})))
+                    .map_err(|e| e.to_string())
+            } else {
+                // Windows generally doesn't require special permissions for network monitoring
+                Ok(serde_json::json!({
+                    "has_permissions": true,
+                    "warnings": []
+                }))
+            }
         }
-    }
+    })
+    .await
+    .map_err(|e| format!("Permission task join error: {}", e))?
 }
 
 /// Get macOS-specific diagnostics

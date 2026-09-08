@@ -530,7 +530,7 @@ async fn traceroute_windows(target: &str, max_hops: u32) -> Result<TracerouteRes
                 }
                 hops.push(TracerouteHop {
                     hop_number: hop_num,
-                    ip: ip_addr,
+                    ip: ip_addr.clone(),
                     hostname: None,
                     avg_latency_ms: 0.0,
                     success: ip_addr.is_some(),
