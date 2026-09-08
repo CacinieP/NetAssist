@@ -245,23 +245,10 @@ export default function Settings() {
               className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
             />
           </label>
-          <div>
-            <label className="text-gray-700 dark:text-gray-200 block mb-2">{t("settings.language")}</label>
-            <select
-              value={localSettings.language}
-              onChange={(e) => {
-                const lang = e.target.value;
-                setLocalSettings(prev => ({ ...prev, language: lang }));
-                setSettings({ language: lang });
-                setSaveSuccess(false);
-              }}
-              className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 w-40"
-            >
-              <option value="zh-CN">{t("settings.lang_zh")}</option>
-              <option value="en-US">{t("settings.lang_en")}</option>
-            </select>
-          </div>
         </div>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mt-3">
+          界面目前以简体中文提供。语言切换入口已暂时移除，待全部页面接入国际化后恢复。
+        </p>
       </div>
 
       {/* Monitoring Settings */}

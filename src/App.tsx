@@ -5,7 +5,6 @@ import { useSettingsStore } from "./store/settingsStore";
 import { useRealtimeTraffic } from "./hooks/useTrafficData";
 import { useNetworkData } from "./hooks/useNetworkData";
 import { notify } from "./utils/notify";
-import i18n from "./i18n";
 import StatusBar from "./components/StatusBar/StatusBar";
 import Navigation from "./components/Navigation/Navigation";
 
@@ -51,13 +50,6 @@ function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", settings.dark_mode);
   }, [settings.dark_mode]);
-
-  // Sync the active i18n language to the persisted settings.language value.
-  useEffect(() => {
-    if (settings.language && settings.language !== i18n.language) {
-      void i18n.changeLanguage(settings.language);
-    }
-  }, [settings.language]);
 
   // Network-abnormal notification: fire a native notification on the
   // normal→abnormal transition (only once per transition), gated by the
