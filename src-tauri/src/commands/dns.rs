@@ -14,29 +14,37 @@ pub async fn get_dns_servers() -> Result<Vec<String>, String> {
 /// Test DNS server response time using actual DNS queries
 #[tauri::command]
 pub async fn test_dns(server: String) -> Result<DNSStats, String> {
-    // Validate server address length to prevent buffer overflow
-    if server.len() > 253 {
-        return Err("DNS server address too long (max 253 characters)".to_string());
+    // The server must be an IP literal (IPv4 or IPv6). Hostnames were
+    // previously accepted here but then failed to parse as SocketAddr, so
+    // every named server would report 100% failure.
+    if server.parse::<std::net::IpAddr>().is_err() {
+        // Allow bracket-wrapped IPv6 ("[::1]") — strip the brackets.
+        let stripped = server.trim_start_matches('[').trim_end_matches(']');
+        if stripped.parse::<std::net::IpAddr>().is_err() {
+            return Err(format!("Invalid DNS server address: {}", server));
+        }
     }
 
-    // Parse server address, add default port if needed
-    let server_addr = if server.contains(':') {
-        // Could be IPv6 (contains colons) or already has port
-        if server.starts_with('[') || server.rsplit(':').count() == 2 {
-            // Already bracketed or "host:port" format — use as-is
-            server.clone()
+    // Normalize to a SocketAddr (IPv4, IPv6, bracketed or not, default :53).
+    let server_addr: SocketAddr = {
+        let raw = server.trim();
+        let candidate = if raw.parse::<SocketAddr>().is_ok() {
+            raw.to_string()
+        } else if raw.starts_with('[') {
+            // Bracket-wrapped (e.g. "[::1]") without a port.
+            format!("{}:53", raw)
+        } else if raw.contains(':') {
+            // Bare IPv6 without a port → "[::1]:53".
+            format!("[{}]:53", raw)
         } else {
-            // Bare IPv6 address — wrap in brackets and add port
-            format!("[{}]:53", server)
+            // IPv4 or hostname → "8.8.8.8:53". (Hostnames are rejected below.)
+            format!("{}:53", raw)
+        };
+        match candidate.parse::<SocketAddr>() {
+            Ok(addr) => addr,
+            Err(e) => return Err(format!("Invalid DNS server address: {}", e)),
         }
-    } else {
-        // IPv4 or hostname — just append port
-        format!("{}:53", server)
     };
-
-    let socket_addr: SocketAddr = server_addr
-        .parse()
-        .map_err(|e| format!("Invalid DNS server address: {}", e))?;
 
     // Test multiple queries for accuracy
     let mut latencies = Vec::new();
@@ -49,7 +57,7 @@ pub async fn test_dns(server: String) -> Result<DNSStats, String> {
     for i in 0..total_queries {
         let domain = test_domains[i as usize % test_domains.len()];
 
-        match perform_dns_query(socket_addr, domain).await {
+        match perform_dns_query(server_addr, domain).await {
             Ok(latency) => {
                 successful_queries += 1;
                 latencies.push(latency);
@@ -90,12 +98,16 @@ async fn perform_dns_query(server: SocketAddr, domain: &str) -> Result<f64, Stri
     // Validate domain name format
     let _name = Name::from_str(domain).map_err(|e| format!("Invalid domain name: {}", e))?;
 
-    // Create UDP socket for DNS query
-    let socket = UdpSocket::bind("0.0.0.0:0")
+    // Bind a UDP socket of the SAME family as the server (an IPv4-only socket
+    // cannot connect() to an IPv6 DNS server, which previously made every
+    // IPv6 DNS test fail).
+    let bind_addr = if server.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let socket = UdpSocket::bind(bind_addr)
         .await
         .map_err(|e| format!("Failed to bind socket: {}", e))?;
 
-    // Set timeout
+    // Give the OS 64s TTL for outbound packets (not a "timeout"; the timeout
+    // is applied separately around connect/send/recv below).
     socket
         .set_ttl(64)
         .map_err(|e| format!("Failed to set TTL: {}", e))?;
@@ -107,9 +119,11 @@ async fn perform_dns_query(server: SocketAddr, domain: &str) -> Result<f64, Stri
         .map_err(|_| "DNS server connection timeout".to_string())?
         .map_err(|e| format!("Failed to connect to DNS server: {}", e))?;
 
-    // Build DNS query packet
+    // Build DNS query packet with a transaction id derived from the clock
+    // (a fixed 0x1234 id is trivially spoofable and never validated anyway).
+    let txid: u16 = (start.elapsed().as_nanos() & 0xFFFF) as u16;
     let mut query_packet = vec![0u8; 512];
-    let query_len = build_dns_query(&mut query_packet, domain)?;
+    let query_len = build_dns_query(&mut query_packet, domain, txid)?;
 
     // Send query
     socket
@@ -125,9 +139,18 @@ async fn perform_dns_query(server: SocketAddr, domain: &str) -> Result<f64, Stri
         .map_err(|_| "DNS response timeout".to_string())?
         .map_err(|e| format!("Failed to receive DNS response: {}", e))?;
 
-    // Validate response buffer length before accessing
+    // Validate response buffer length (header is 12 bytes; anything shorter
+    // is not a DNS packet).
     if bytes_received < 12 {
         return Err("Invalid DNS response length (too short)".to_string());
+    }
+
+    // Match the response to OUR query (transaction id + QR flag).
+    if response_buffer[0] != (txid >> 8) as u8 || response_buffer[1] != (txid & 0xFF) as u8 {
+        return Err("DNS response transaction ID mismatch".to_string());
+    }
+    if response_buffer[2] & 0x80 == 0 {
+        return Err("DNS response is not a response (QR bit not set)".to_string());
     }
 
     // Check DNS response header
@@ -139,29 +162,28 @@ async fn perform_dns_query(server: SocketAddr, domain: &str) -> Result<f64, Stri
         ));
     }
 
-    // Check if we have answers (safely access buffer)
-    if bytes_received < 8 {
-        return Err("DNS response too short for answer count".to_string());
-    }
+    // Check if we have answers
     let answer_count = u16::from_be_bytes([response_buffer[6], response_buffer[7]]);
     if answer_count == 0 {
         return Err("DNS server returned no answers".to_string());
     }
 
-    Ok(start.elapsed().as_millis() as f64)
+    // Sub-millisecond precision: as_millis() truncates <1ms replies to 0,
+    // which made fast (router-cached) servers look like failures downstream.
+    Ok(start.elapsed().as_secs_f64() * 1000.0)
 }
 
 /// Build a simple DNS query packet
-fn build_dns_query(buffer: &mut [u8], domain: &str) -> Result<usize, String> {
+fn build_dns_query(buffer: &mut [u8], domain: &str, txid: u16) -> Result<usize, String> {
     if buffer.len() < 12 {
         return Err("Buffer too small".to_string());
     }
 
     // DNS Header
-    buffer[0] = 0x12; // Transaction ID (high byte)
-    buffer[1] = 0x34; // Transaction ID (low byte)
+    buffer[0] = (txid >> 8) as u8; // Transaction ID (high byte)
+    buffer[1] = (txid & 0xFF) as u8; // Transaction ID (low byte)
     buffer[2] = 0x01; // Flags: standard query
-    buffer[3] = 0x00; // Flags: 0 questions, 0 answers, 0 authority, 0 additional
+    buffer[3] = 0x00;
     buffer[4] = 0x00; // Questions: high byte
     buffer[5] = 0x01; // Questions: low byte (1 question)
     buffer[6] = 0x00; // Answer RRs: high byte

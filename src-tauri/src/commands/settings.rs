@@ -60,7 +60,12 @@ impl std::fmt::Display for ValidationError {
     }
 }
 
-/// Validate DNS server address format with comprehensive security checks
+/// Validate DNS server address format with comprehensive security checks.
+///
+/// Only IP literals (IPv4 or IPv6) are accepted: hostnames cannot be used
+/// with `networksetup`/`netsh`/`resolvectl` directly nor by the DNS probe
+/// (which requires a SocketAddr), so accepting them silently broke those
+/// paths later.
 fn validate_dns_server(addr: &str) -> Result<(), ValidationError> {
     if addr.is_empty() {
         return Err(ValidationError::InvalidDnsServer(
@@ -75,74 +80,18 @@ fn validate_dns_server(addr: &str) -> Result<(), ValidationError> {
         ));
     }
 
+    // Accept bracketed IPv6 ("[::1]") by stripping brackets first.
+    let stripped = addr.trim_start_matches('[').trim_end_matches(']');
+
     // Check if it's a valid IP address (IPv4 or IPv6)
-    if addr.parse::<std::net::IpAddr>().is_ok() {
+    if stripped.parse::<std::net::IpAddr>().is_ok() {
         return Ok(());
     }
 
-    // Strict hostname validation according to RFC 1123
-    if addr.len() > 253 {
-        return Err(ValidationError::InvalidDnsServer(
-            "DNS server hostname too long (max 253 chars)".to_string(),
-        ));
-    }
-
-    if addr.is_empty() {
-        return Err(ValidationError::InvalidDnsServer(
-            "DNS server hostname too short".to_string(),
-        ));
-    }
-
-    // Check each label (segment between dots)
-    let labels: Vec<&str> = addr.split('.').collect();
-    if labels.len() < 2 {
-        return Err(ValidationError::InvalidDnsServer(
-            "DNS server hostname must have at least 2 labels".to_string(),
-        ));
-    }
-
-    for label in labels {
-        if label.is_empty() {
-            return Err(ValidationError::InvalidDnsServer(
-                "DNS server hostname contains empty label (consecutive dots)".to_string(),
-            ));
-        }
-        if label.len() > 63 {
-            return Err(ValidationError::InvalidDnsServer(
-                "DNS server hostname label too long (max 63 chars)".to_string(),
-            ));
-        }
-        // Labels must start and end with alphanumeric, can contain hyphens in between
-        if !label
-            .chars()
-            .next()
-            .map(|c| c.is_alphanumeric())
-            .unwrap_or(false)
-        {
-            return Err(ValidationError::InvalidDnsServer(
-                "DNS server hostname label must start with alphanumeric".to_string(),
-            ));
-        }
-        if !label
-            .chars()
-            .last()
-            .map(|c| c.is_alphanumeric())
-            .unwrap_or(false)
-        {
-            return Err(ValidationError::InvalidDnsServer(
-                "DNS server hostname label must end with alphanumeric".to_string(),
-            ));
-        }
-        // Only allow alphanumeric and hyphens in labels
-        if !label.chars().all(|c| c.is_alphanumeric() || c == '-') {
-            return Err(ValidationError::InvalidDnsServer(format!(
-                "DNS server hostname contains invalid characters in label: {}",
-                label
-            )));
-        }
-    }
-
-    Ok(())
+    Err(ValidationError::InvalidDnsServer(format!(
+        "must be a valid IPv4 or IPv6 address, got '{}'",
+        addr
+    )))
 }
 
 /// Validate settings
