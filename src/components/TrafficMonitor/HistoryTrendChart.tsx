@@ -59,10 +59,17 @@ export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrend
     fetchHistory();
   }, [hours]);
 
-  // Initialize chart instance + resize listener (re-init on theme change)
+  // Initialize chart instance + resize listener (re-init on theme change).
+  // The chart container div is ALWAYS rendered (loading/empty states are
+  // overlays), so echarts.init never binds to a node that is later swapped
+  // out by conditional rendering.
   useEffect(() => {
     if (!chartRef.current) return;
 
+    if (chartInstance.current) {
+      chartInstance.current.dispose();
+      chartInstance.current = null;
+    }
     chartInstance.current = echarts.init(chartRef.current, isDark ? "dark" : undefined);
 
     const handleResize = () => {
@@ -197,8 +204,6 @@ export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrend
     chartInstance.current.setOption(option, true);
   }, [history, hours, axisColor, splitColor, titleColor]);
 
-  const isEmpty = !loading && history && history.data.length === 0;
-
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
       <div className="flex items-center justify-between mb-4">
@@ -228,23 +233,30 @@ export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrend
         </div>
       )}
 
-      {loading ? (
-        <div className="flex items-center justify-center" style={{ height: "300px" }}>
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-        </div>
-      ) : isEmpty ? (
-        <div className="flex flex-col items-center justify-center text-center" style={{ height: "300px" }}>
-          <div className="text-4xl mb-3 opacity-60">📊</div>
-          <p className="text-gray-500 dark:text-gray-400 text-sm">暂无历史数据</p>
-          <p className="text-gray-400 dark:text-gray-500 text-xs mt-1">
-            流量数据每分钟记录一次，请保持应用运行后稍后查看
-          </p>
-        </div>
-      ) : (
-        <div ref={chartRef} style={{ width: "100%", height: "300px" }} />
-      )}
+      {/* Chart container stays mounted at all times; loading and empty
+          states are absolutely-positioned overlays so the ECharts instance
+          is never bound to a node that gets unmounted. */}
+      <div className="relative" style={{ width: "100%", height: "300px" }}>
+        <div ref={chartRef} style={{ width: "100%", height: "100%" }} />
 
-      {!loading && history && !isEmpty && (
+        {loading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-white/60 dark:bg-gray-800/60 rounded">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+          </div>
+        )}
+
+        {!loading && history && history.data.length === 0 && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+            <div className="text-4xl mb-3 opacity-60">📊</div>
+            <p className="text-gray-500 dark:text-gray-400 text-sm">暂无历史数据</p>
+            <p className="text-gray-400 dark:text-gray-500 text-xs mt-1">
+              流量数据每 5 秒记录一次，请保持应用运行后稍后查看
+            </p>
+          </div>
+        )}
+      </div>
+
+      {!loading && history && history.data.length > 0 && (
         <div className="mt-2 text-xs text-gray-500 dark:text-gray-400 text-center">
           {history.data.length} 个数据点
           {history.start_timestamp && history.end_timestamp && (

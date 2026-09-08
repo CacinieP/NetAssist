@@ -2,7 +2,12 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Application settings
+///
+/// `#[serde(default)]` on the container means a settings.json written by an
+/// older version (missing a field added later) still deserializes instead of
+/// failing and being silently reset to defaults.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(default)]
 pub struct Settings {
     pub auto_start: bool,
     pub minimize_to_tray: bool,
@@ -60,7 +65,12 @@ impl std::fmt::Display for ValidationError {
     }
 }
 
-/// Validate DNS server address format with comprehensive security checks
+/// Validate DNS server address format with comprehensive security checks.
+///
+/// Only IP literals (IPv4 or IPv6) are accepted: hostnames cannot be used
+/// with `networksetup`/`netsh`/`resolvectl` directly nor by the DNS probe
+/// (which requires a SocketAddr), so accepting them silently broke those
+/// paths later.
 fn validate_dns_server(addr: &str) -> Result<(), ValidationError> {
     if addr.is_empty() {
         return Err(ValidationError::InvalidDnsServer(
@@ -75,74 +85,18 @@ fn validate_dns_server(addr: &str) -> Result<(), ValidationError> {
         ));
     }
 
+    // Accept bracketed IPv6 ("[::1]") by stripping brackets first.
+    let stripped = addr.trim_start_matches('[').trim_end_matches(']');
+
     // Check if it's a valid IP address (IPv4 or IPv6)
-    if addr.parse::<std::net::IpAddr>().is_ok() {
+    if stripped.parse::<std::net::IpAddr>().is_ok() {
         return Ok(());
     }
 
-    // Strict hostname validation according to RFC 1123
-    if addr.len() > 253 {
-        return Err(ValidationError::InvalidDnsServer(
-            "DNS server hostname too long (max 253 chars)".to_string(),
-        ));
-    }
-
-    if addr.is_empty() {
-        return Err(ValidationError::InvalidDnsServer(
-            "DNS server hostname too short".to_string(),
-        ));
-    }
-
-    // Check each label (segment between dots)
-    let labels: Vec<&str> = addr.split('.').collect();
-    if labels.len() < 2 {
-        return Err(ValidationError::InvalidDnsServer(
-            "DNS server hostname must have at least 2 labels".to_string(),
-        ));
-    }
-
-    for label in labels {
-        if label.is_empty() {
-            return Err(ValidationError::InvalidDnsServer(
-                "DNS server hostname contains empty label (consecutive dots)".to_string(),
-            ));
-        }
-        if label.len() > 63 {
-            return Err(ValidationError::InvalidDnsServer(
-                "DNS server hostname label too long (max 63 chars)".to_string(),
-            ));
-        }
-        // Labels must start and end with alphanumeric, can contain hyphens in between
-        if !label
-            .chars()
-            .next()
-            .map(|c| c.is_alphanumeric())
-            .unwrap_or(false)
-        {
-            return Err(ValidationError::InvalidDnsServer(
-                "DNS server hostname label must start with alphanumeric".to_string(),
-            ));
-        }
-        if !label
-            .chars()
-            .last()
-            .map(|c| c.is_alphanumeric())
-            .unwrap_or(false)
-        {
-            return Err(ValidationError::InvalidDnsServer(
-                "DNS server hostname label must end with alphanumeric".to_string(),
-            ));
-        }
-        // Only allow alphanumeric and hyphens in labels
-        if !label.chars().all(|c| c.is_alphanumeric() || c == '-') {
-            return Err(ValidationError::InvalidDnsServer(format!(
-                "DNS server hostname contains invalid characters in label: {}",
-                label
-            )));
-        }
-    }
-
-    Ok(())
+    Err(ValidationError::InvalidDnsServer(format!(
+        "must be a valid IPv4 or IPv6 address, got '{}'",
+        addr
+    )))
 }
 
 /// Validate settings
@@ -241,47 +195,58 @@ fn save_settings_to_file(settings: &Settings) -> anyhow::Result<()> {
 
     let settings_path = get_settings_path()?;
     let content = serde_json::to_string_pretty(settings)?;
-    fs::write(&settings_path, content)?;
+    // Atomic write: write to a temp file then rename, so an interrupted
+    // save can never leave a truncated settings.json behind.
+    let tmp_path = settings_path.with_extension("json.tmp");
+    fs::write(&tmp_path, content)?;
+    fs::rename(&tmp_path, &settings_path)?;
     Ok(())
 }
 
 /// Get application settings
 #[tauri::command]
 pub async fn get_settings() -> Result<Settings, String> {
-    match load_settings_from_file() {
+    tokio::task::spawn_blocking(move || match load_settings_from_file() {
         Ok(settings) => Ok(settings),
         Err(e) => {
             tracing::warn!("Failed to load settings, using defaults: {}", e);
             Ok(Settings::default())
         }
-    }
+    })
+    .await
+    .map_err(|e| format!("Settings task join error: {}", e))?
 }
 
 /// Update application settings
 #[tauri::command]
 pub async fn update_settings(settings: Settings) -> Result<bool, String> {
-    // Validate settings before updating
-    if let Err(e) = validate_settings(&settings) {
-        let err_msg = format!("Settings validation failed: {}", e);
-        tracing::error!("{}", err_msg);
-        return Err(err_msg);
-    }
+    // Save + validate are file I/O — keep them off the async runtime.
+    tokio::task::spawn_blocking(move || {
+        // Validate settings before updating
+        if let Err(e) = validate_settings(&settings) {
+            let err_msg = format!("Settings validation failed: {}", e);
+            tracing::error!("{}", err_msg);
+            return Err(err_msg);
+        }
 
-    // Save to persistent storage
-    if let Err(e) = save_settings_to_file(&settings) {
-        let err_msg = format!("Failed to save settings: {}", e);
-        tracing::error!("{}", err_msg);
-        return Err(err_msg);
-    }
+        // Save to persistent storage
+        if let Err(e) = save_settings_to_file(&settings) {
+            let err_msg = format!("Failed to save settings: {}", e);
+            tracing::error!("{}", err_msg);
+            return Err(err_msg);
+        }
 
-    // Log without sensitive information
-    tracing::info!("Settings updated: auto_start={}, minimize_to_tray={}, refresh_interval_secs={}, dark_mode={}",
-        settings.auto_start,
-        settings.minimize_to_tray,
-        settings.refresh_interval_secs,
-        settings.dark_mode
-    );
-    Ok(true)
+        // Log without sensitive information
+        tracing::info!("Settings updated: auto_start={}, minimize_to_tray={}, refresh_interval_secs={}, dark_mode={}",
+            settings.auto_start,
+            settings.minimize_to_tray,
+            settings.refresh_interval_secs,
+            settings.dark_mode
+        );
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("Settings task join error: {}", e))?
 }
 
 /// Enable or disable launch-at-login. Mirrors the settings.auto_start boolean
@@ -316,38 +281,49 @@ pub async fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool,
 /// Reset settings to default
 #[tauri::command]
 pub async fn reset_settings() -> Result<Settings, String> {
-    let settings = Settings::default();
+    tokio::task::spawn_blocking(|| {
+        let settings = Settings::default();
 
-    if let Err(e) = save_settings_to_file(&settings) {
-        let err_msg = format!("Failed to save settings: {}", e);
-        tracing::error!("{}", err_msg);
-        return Err(err_msg);
-    }
+        if let Err(e) = save_settings_to_file(&settings) {
+            let err_msg = format!("Failed to save settings: {}", e);
+            tracing::error!("{}", err_msg);
+            return Err(err_msg);
+        }
 
-    tracing::info!("Settings reset to default");
-    Ok(settings)
+        tracing::info!("Settings reset to default");
+        Ok(settings)
+    })
+    .await
+    .map_err(|e| format!("Settings task join error: {}", e))?
 }
 
-/// Check platform-specific permissions
+/// Check platform-specific permissions.
+///
+/// The underlying check spawns platform tools (lsof, netstat) — run it on a
+/// blocking thread.
 #[tauri::command]
 pub async fn check_platform_permissions() -> Result<serde_json::Value, String> {
-    cfg_if::cfg_if! {
-        if #[cfg(target_os = "macos")] {
-            crate::platform::check_permissions()
-                .map(|status| serde_json::to_value(status).unwrap_or(serde_json::json!({"error": "serialization failed"})))
-                .map_err(|e| e.to_string())
-        } else if #[cfg(target_os = "linux")] {
-            crate::platform::check_permissions()
-                .map(|status| serde_json::to_value(status).unwrap_or(serde_json::json!({"error": "serialization failed"})))
-                .map_err(|e| e.to_string())
-        } else {
-            // Windows generally doesn't require special permissions for network monitoring
-            Ok(serde_json::json!({
-                "has_permissions": true,
-                "warnings": []
-            }))
+    tokio::task::spawn_blocking(|| {
+        cfg_if::cfg_if! {
+            if #[cfg(target_os = "macos")] {
+                crate::platform::check_permissions()
+                    .map(|status| serde_json::to_value(status).unwrap_or(serde_json::json!({"error": "serialization failed"})))
+                    .map_err(|e| e.to_string())
+            } else if #[cfg(target_os = "linux")] {
+                crate::platform::check_permissions()
+                    .map(|status| serde_json::to_value(status).unwrap_or(serde_json::json!({"error": "serialization failed"})))
+                    .map_err(|e| e.to_string())
+            } else {
+                // Windows generally doesn't require special permissions for network monitoring
+                Ok(serde_json::json!({
+                    "has_permissions": true,
+                    "warnings": []
+                }))
+            }
         }
-    }
+    })
+    .await
+    .map_err(|e| format!("Permission task join error: {}", e))?
 }
 
 /// Get macOS-specific diagnostics

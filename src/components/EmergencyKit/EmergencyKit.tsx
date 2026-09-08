@@ -53,8 +53,8 @@ const FIX_ICONS: Record<FixType, JSX.Element> = {
 
 const FIX_WARNINGS: Record<FixType, { title: string; message: string }> = {
   reset_network_stack: {
-    title: "刷新 DNS 解析服务",
-    message: "将重启 mDNSResponder 解析服务并清空 DNS 缓存，可能短暂影响域名解析。"
+    title: "重置网络协议栈",
+    message: "将重置本机网络协议栈/网络服务（Windows 重置 Winsock 与 TCP/IP、macOS 重启 mDNSResponder、Linux 重启 NetworkManager），需要管理员权限，网络可能短暂中断甚至需重启系统。"
   },
   flush_dns_cache: {
     title: "清空 DNS 缓存",
@@ -66,7 +66,7 @@ const FIX_WARNINGS: Record<FixType, { title: string; message: string }> = {
   },
   switch_dns: {
     title: "切换 DNS 服务器",
-    message: "此操作将把主网络服务切换到备用 DNS 服务器（8.8.8.8 / 1.1.1.1）。"
+    message: "此操作将把主网络服务切换到设置中配置的备用 DNS 服务器。"
   },
   toggle_ipv6: {
     title: "切换 IPv6",
@@ -77,8 +77,8 @@ const FIX_WARNINGS: Record<FixType, { title: string; message: string }> = {
     message: "将禁用并重新启用主网络适配器（需要管理员授权，会弹出系统密码框），期间网络会短暂中断。"
   },
   restart_network_service: {
-    title: "刷新网络解析服务",
-    message: "将重启 DNS 解析服务以重置网络通信，可能短暂影响域名解析。"
+    title: "重启网络服务",
+    message: "将重启本机的网络服务/协议栈（需要管理员权限），网络可能短暂中断。"
   }
 };
 
@@ -150,13 +150,19 @@ export default function EmergencyKit() {
       success,
       error,
     };
-    const newHistory = [entry, ...fixHistory].slice(0, 10); // Keep last 10
-    setFixHistory(newHistory);
-    try {
-      localStorage.setItem("netassist_fix_history", JSON.stringify(newHistory));
-    } catch (e) {
-      console.error("Failed to save fix history:", e);
-    }
+    // Functional update so repeated saves inside one loop (auto-fix) each
+    // build on the LATEST state instead of a stale render-frame snapshot
+    // (previously every entry was prepended to the same old array and only
+    // the last one survived).
+    setFixHistory(prev => {
+      const newHistory = [entry, ...prev].slice(0, 10); // Keep last 10
+      try {
+        localStorage.setItem("netassist_fix_history", JSON.stringify(newHistory));
+      } catch (e) {
+        console.error("Failed to save fix history:", e);
+      }
+      return newHistory;
+    });
   };
 
   const startDiagnosis = async () => {
@@ -446,12 +452,22 @@ export default function EmergencyKit() {
           <div className="space-y-2">
             {([
               { key: "connectivity", title: "网络连接", item: result.network_connectivity, extra: null as null | JSX.Element },
-              { key: "ip", title: "IP 配置", item: result.ip_configuration, extra: result.ip_configuration.details.ipv4 ? (
+              { key: "ip", title: "IP 配置", item: result.ip_configuration, extra: (
                 <div className="ml-7 mt-2 p-2 bg-gray-50 dark:bg-gray-700/50 rounded text-sm">
-                  <span className="text-gray-500 dark:text-gray-400">IPv4: </span>
-                  <span className="font-mono text-gray-800 dark:text-gray-200">{result.ip_configuration.details.ipv4}</span>
+                  {result.ip_configuration.details.local_ipv4 && (
+                    <div>
+                      <span className="text-gray-500 dark:text-gray-400">本地 IPv4: </span>
+                      <span className="font-mono text-gray-800 dark:text-gray-200">{result.ip_configuration.details.local_ipv4}</span>
+                    </div>
+                  )}
+                  {result.ip_configuration.details.local_ipv6 && (
+                    <div>
+                      <span className="text-gray-500 dark:text-gray-400">本地 IPv6: </span>
+                      <span className="font-mono text-gray-800 dark:text-gray-200">{result.ip_configuration.details.local_ipv6}</span>
+                    </div>
+                  )}
                 </div>
-              ) : null },
+              ) },
               { key: "dns", title: "DNS 解析", item: result.dns_resolution, extra: null },
               { key: "quality", title: "网络质量", item: result.network_quality, extra: null },
             ]).map(({ key, title, item, extra }) => {

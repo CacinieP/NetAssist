@@ -21,9 +21,15 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 fn main() {
-    // Initialize tracing with debug level for process name resolution
+    // Initialize tracing: debug level in debug builds (for process name
+    // resolution), info level in release — release builds were running with
+    // DEBUG logs (and per-connection debug lines), which slowed it down.
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(if cfg!(debug_assertions) {
+            tracing::Level::DEBUG
+        } else {
+            tracing::Level::INFO
+        })
         .init();
 
     tauri::Builder::default()
@@ -43,7 +49,12 @@ fn main() {
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
             let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(app.default_window_icon().cloned().unwrap_or_else(|| {
+                    // Icons are packaged with the app; if one is missing in a
+                    // broken build, fall back to a plain generated image rather
+                    // than panicking at startup.
+                    tauri::image::Image::new_owned(vec![0, 0, 0, 0], 1, 1)
+                }))
                 .menu(&menu)
                 .tooltip("NetAssist")
                 .on_menu_event(|app, event| match event.id.as_ref() {

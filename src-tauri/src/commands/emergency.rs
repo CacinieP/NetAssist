@@ -3,9 +3,21 @@ use tokio::time::{timeout, Duration};
 
 /// Apply a quick fix action
 /// Accepts snake_case format matching RepairType serialization
+///
+/// Runs the (potentially long-running, privilege-prompting) platform repair
+/// on a blocking thread with a generous timeout — the macOS "reset adapter"
+/// path waits on an osascript admin authorization dialog which could
+/// otherwise stall the async runtime indefinitely.
 #[tauri::command]
 pub async fn apply_quick_fix(fix_type: String) -> Result<bool, String> {
-    match fix_type.as_str() {
+    let fix_type_for_task = fix_type.clone();
+    tokio::task::spawn_blocking(move || apply_quick_fix_blocking(&fix_type_for_task))
+        .await
+        .map_err(|e| format!("Fix task error: {}", e))?
+}
+
+fn apply_quick_fix_blocking(fix_type: &str) -> Result<bool, String> {
+    match fix_type {
         "flush_dns_cache" => {
             tracing::info!("Executing fix: flush_dns_cache");
             crate::platform::flush_dns_cache().map_err(|e| e.to_string())?;
@@ -42,7 +54,9 @@ pub async fn apply_quick_fix(fix_type: String) -> Result<bool, String> {
         }
         "toggle_ipv6" => {
             tracing::info!("Executing fix: toggle_ipv6");
-            crate::platform::toggle_ipv6().map_err(|e| format!("切换 IPv6 失败: {}", e))?;
+            let desc =
+                crate::platform::toggle_ipv6().map_err(|e| format!("切换 IPv6 失败: {}", e))?;
+            tracing::info!("toggle_ipv6 result: {}", desc);
             Ok(true)
         }
         "reset_adapter" => {
@@ -52,9 +66,8 @@ pub async fn apply_quick_fix(fix_type: String) -> Result<bool, String> {
         }
         "restart_network_service" => {
             tracing::info!("Executing fix: restart_network_service");
-            // Restart network service - reset network stack
             crate::platform::reset_network_stack()
-                .map_err(|e| format!("Failed to restart network service: {}", e))?;
+                .map_err(|e| format!("重启网络服务失败: {}", e))?;
             Ok(true)
         }
         _ => {
@@ -125,113 +138,119 @@ pub async fn run_diagnostics() -> Result<DiagnosticResult, String> {
     })
 }
 
-/// Check network connectivity
+/// Check network connectivity: first the local gateway, then the internet.
+///
+/// The old check only pinged 8.8.8.8 and labeled a failure "无法连接到网关"
+/// even when the LAN itself was fine (and many ISPs block ICMP to public
+/// servers, producing false failures). Now we probe the actual gateway
+/// first and only then check the internet, with distinct messages.
 async fn check_network_connectivity() -> DiagnosticItem {
     let start = std::time::Instant::now();
+    let gateway = crate::platform::get_default_gateway().ok().flatten();
 
-    // Try to ping a reliable server with timeout (5 seconds)
-    let ping_result = timeout(
+    // Gateway reachability (probe the real default gateway).
+    let gateway_ok = match gateway {
+        Some(gw) => {
+            let target = gw.to_string();
+            timeout(
+                Duration::from_secs(4),
+                tokio::task::spawn_blocking(move || ping_one(&target)),
+            )
+            .await
+            .map(|r| r.unwrap_or(false))
+            .unwrap_or(false)
+        }
+        None => false,
+    };
+
+    if !gateway_ok {
+        let gw_label = gateway
+            .map(|g| g.to_string())
+            .unwrap_or_else(|| "未检测到网关".to_string());
+        return DiagnosticItem {
+            status: DiagnosticStatus::Fail,
+            message: format!("无法连接到网关 {}", gw_label),
+            details: serde_json::json!({ "gateway_reachable": false }),
+            duration_ms: start.elapsed().as_millis() as u64,
+        };
+    }
+
+    // Gateway reachable → probe the internet.
+    let internet_ok = timeout(
         Duration::from_secs(5),
-        tokio::task::spawn_blocking(|| {
-            #[cfg(target_os = "windows")]
-            let result = std::process::Command::new("ping")
-                .args(&["-n", "1", "-w", "3000", "8.8.8.8"])
-                .output();
-
-            #[cfg(target_os = "linux")]
-            let result = std::process::Command::new("ping")
-                .args(["-c", "1", "-W", "3", "8.8.8.8"])
-                .output();
-
-            #[cfg(target_os = "macos")]
-            let result = std::process::Command::new("ping")
-                .args(["-c", "1", "-W", "3000", "8.8.8.8"])
-                .output();
-
-            result
-        }),
+        tokio::task::spawn_blocking(|| ping_one("8.8.8.8")),
     )
-    .await;
+    .await
+    .map(|r| r.unwrap_or(false))
+    .unwrap_or(false);
 
-    match ping_result {
-        Ok(join_result) => match join_result {
-            Ok(output_result) => match output_result {
-                Ok(output) => {
-                    // Prefer the ping process exit code over parsing its
-                    // (locale-dependent) text output: ping exits 0 on success
-                    // regardless of system language, which is more reliable
-                    // than matching "TTL="/"bytes from" strings.
-                    let success = output.status.success();
-
-                    if success {
-                        DiagnosticItem {
-                            status: DiagnosticStatus::Pass,
-                            message: "网络连接正常".to_string(),
-                            details: serde_json::json!({ "gateway_reachable": true }),
-                            duration_ms: start.elapsed().as_millis() as u64,
-                        }
-                    } else {
-                        DiagnosticItem {
-                            status: DiagnosticStatus::Fail,
-                            message: "无法连接到网关".to_string(),
-                            details: serde_json::json!({}),
-                            duration_ms: start.elapsed().as_millis() as u64,
-                        }
-                    }
-                }
-                Err(_) => {
-                    tracing::warn!("Ping command execution failed");
-                    DiagnosticItem {
-                        status: DiagnosticStatus::Fail,
-                        message: "Ping命令执行失败".to_string(),
-                        details: serde_json::json!({}),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::warn!("Ping task join failed");
-                DiagnosticItem {
-                    status: DiagnosticStatus::Fail,
-                    message: "Ping任务失败".to_string(),
-                    details: serde_json::json!({}),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                }
-            }
-        },
-        Err(_) => {
-            tracing::warn!("Network connectivity check timed out after 5 seconds");
-            DiagnosticItem {
-                status: DiagnosticStatus::Fail,
-                message: "网络诊断超时".to_string(),
-                details: serde_json::json!({ "timeout": true }),
-                duration_ms: start.elapsed().as_millis() as u64,
-            }
+    if internet_ok {
+        DiagnosticItem {
+            status: DiagnosticStatus::Pass,
+            message: "网络连接正常".to_string(),
+            details: serde_json::json!({ "gateway_reachable": true, "internet_reachable": true }),
+            duration_ms: start.elapsed().as_millis() as u64,
+        }
+    } else {
+        // LAN works but the public probe failed — ICMP to 8.8.8.8 is often
+        // blocked by ISPs, so do not label this a hard failure.
+        DiagnosticItem {
+            status: DiagnosticStatus::Warning,
+            message: "网关可达，但无法访问公网".to_string(),
+            details: serde_json::json!({ "gateway_reachable": true, "internet_reachable": false }),
+            duration_ms: start.elapsed().as_millis() as u64,
         }
     }
+}
+
+/// Ping one destination on the blocking thread pool and report success
+/// (exit code 0, locale-independent).
+fn ping_one(target: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("ping")
+        .args(["-n", "1", "-w", "3000", target])
+        .output();
+
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("ping")
+        .args(["-c", "1", "-W", "3", target])
+        .output();
+
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("ping")
+        .args(["-c", "1", "-W", "3000", target])
+        .output();
+
+    matches!(result, Ok(output) if output.status.success())
 }
 
 /// Check IP configuration
 async fn check_ip_configuration() -> DiagnosticItem {
     let start = std::time::Instant::now();
 
-    // Add timeout to IP info check (20 seconds - needs to fetch public IP)
+    // Local-only probe: never performs external HTTP requests (public IP
+    // fetch or GeoIP), so it is fast and offline-safe.
     let ip_info_result = timeout(
-        Duration::from_secs(20),
-        crate::commands::ip_info::get_ip_info(None),
+        Duration::from_secs(5),
+        crate::commands::ip_info::get_local_ip_info_only(),
     )
     .await;
 
     match ip_info_result {
         Ok(Ok(info)) => {
-            let has_valid_ip = info.ipv4.is_some() || info.ipv6.is_some();
-            if has_valid_ip {
+            // A valid IP configuration means we have a usable LOCAL address
+            // (the public `ipv4`/`ipv6` fields are None when there is no
+            // internet, even though the LAN works — using them caused
+            // false "未配置有效的IP地址" failures).
+            let has_local_ipv4 = info.local_ipv4.is_some();
+            let has_local_ipv6 = info.local_ipv6.is_some();
+            if has_local_ipv4 || has_local_ipv6 {
                 DiagnosticItem {
                     status: DiagnosticStatus::Pass,
                     message: "IP地址配置正常".to_string(),
                     details: serde_json::json!({
-                        "ipv4": info.ipv4,
-                        "ipv6": info.ipv6,
+                        "local_ipv4": info.local_ipv4,
+                        "local_ipv6": info.local_ipv6,
                         "dual_stack": info.dual_stack_enabled
                     }),
                     duration_ms: start.elapsed().as_millis() as u64,
@@ -239,7 +258,7 @@ async fn check_ip_configuration() -> DiagnosticItem {
             } else {
                 DiagnosticItem {
                     status: DiagnosticStatus::Fail,
-                    message: "未配置有效的IP地址".to_string(),
+                    message: "未检测到有效的本地IP地址".to_string(),
                     details: serde_json::json!({}),
                     duration_ms: start.elapsed().as_millis() as u64,
                 }
@@ -255,7 +274,7 @@ async fn check_ip_configuration() -> DiagnosticItem {
             }
         }
         Err(_) => {
-            tracing::warn!("IP info check timed out after 20 seconds");
+            tracing::warn!("IP info check timed out after 10 seconds");
             DiagnosticItem {
                 status: DiagnosticStatus::Warning,
                 message: "IP信息检测超时".to_string(),
@@ -348,6 +367,27 @@ async fn check_network_quality() -> DiagnosticItem {
     }
 }
 
+/// Platform-specific description of what "reset network stack" actually does.
+fn reset_network_stack_description() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        "重置 Winsock 与 TCP/IP 协议栈（需要管理员权限，通常需要重启电脑，会清空部分网络配置）"
+            .to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "重启 NetworkManager 网络服务（需要 root 权限）".to_string()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "重启 mDNSResponder 解析服务并清空 DNS 缓存（需要管理员权限）".to_string()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        "重置网络协议栈".to_string()
+    }
+}
+
 /// Generate repair recommendations
 fn generate_recommendations(
     network_connectivity: &DiagnosticItem,
@@ -361,7 +401,7 @@ fn generate_recommendations(
         recommendations.push(RepairAction {
             action_type: RepairType::SwitchDNS,
             name: "切换DNS服务器".to_string(),
-            description: "切换到备用DNS服务器（8.8.8.8 或 1.1.1.1）".to_string(),
+            description: "切换到设置中配置的备用 DNS 服务器".to_string(),
             priority: 1,
             estimated_time_seconds: 5,
         });
@@ -391,23 +431,17 @@ fn generate_recommendations(
         });
     }
 
-    if network_quality.status != DiagnosticStatus::Pass {
+    if network_quality.status != DiagnosticStatus::Pass
+        || network_connectivity.status != DiagnosticStatus::Pass
+    {
+        // One stack-reset recommendation (the old code emitted two options
+        // with different names that both ran the same reset_network_stack).
         recommendations.push(RepairAction {
             action_type: RepairType::ResetNetworkStack,
-            name: "刷新DNS解析服务".to_string(),
-            description: "重启mDNSResponder解析服务并清空DNS缓存".to_string(),
+            name: "重置网络协议栈".to_string(),
+            description: reset_network_stack_description(),
             priority: 1,
             estimated_time_seconds: 30,
-        });
-    }
-
-    if network_connectivity.status != DiagnosticStatus::Pass {
-        recommendations.push(RepairAction {
-            action_type: RepairType::RestartNetworkService,
-            name: "刷新网络解析服务".to_string(),
-            description: "重启DNS解析服务以重置网络通信".to_string(),
-            priority: 1,
-            estimated_time_seconds: 20,
         });
     }
 

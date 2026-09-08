@@ -53,7 +53,7 @@
     "cumulative_stats": "累计流量统计",
     "traffic_alerts": "流量告警",
     "manage_alerts": "管理告警",
-    "app_list": "应用进程列表",
+    "app_list": "应用进程列表 ({{count}})",
     "app_pie": "应用流量占比 (Top 10)",
     "history_trend": "历史趋势图",
     "search_apps": "搜索应用...",

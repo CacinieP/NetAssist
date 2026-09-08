@@ -4,8 +4,12 @@ use std::net::IpAddr;
 /// Get all active network connections
 #[tauri::command]
 pub async fn get_active_connections() -> Result<Vec<ConnectionInfo>, String> {
-    // Use platform abstraction layer
-    let raw_connections = crate::platform::get_active_connections().map_err(|e| e.to_string())?;
+    // The platform layer runs external commands (lsof/netstat/ss) that can
+    // take seconds; never block the async runtime directly.
+    let raw_connections = tokio::task::spawn_blocking(crate::platform::get_active_connections)
+        .await
+        .map_err(|e| format!("Connection task join error: {}", e))?
+        .map_err(|e| e.to_string())?;
 
     tracing::info!(
         "Got {} raw connections from platform layer",
@@ -14,14 +18,6 @@ pub async fn get_active_connections() -> Result<Vec<ConnectionInfo>, String> {
 
     let mut connections = Vec::new();
     for raw in &raw_connections {
-        let process_name = raw.process_name.as_deref().unwrap_or("-");
-        tracing::debug!(
-            "Connection: PID={:?}, process_name={}, remote={}",
-            raw.pid,
-            process_name,
-            raw.remote_addr
-        );
-
         connections.push(ConnectionInfo {
             pid: raw.pid.unwrap_or(0),
             process_name: raw.process_name.clone().unwrap_or_else(|| "-".to_string()),
@@ -37,16 +33,7 @@ pub async fn get_active_connections() -> Result<Vec<ConnectionInfo>, String> {
         });
     }
 
-    // Log first 5 connections for debugging
-    for (i, conn) in connections.iter().take(5).enumerate() {
-        tracing::info!(
-            "Connection {}: process_name='{}', PID={}, remote={}",
-            i,
-            conn.process_name,
-            conn.pid,
-            conn.remote_address
-        );
-    }
+    tracing::info!("Connection list assembled: {} entries", connections.len());
 
     Ok(connections)
 }
@@ -72,41 +59,44 @@ pub async fn kill_connection(
     remote_addr: String,
     remote_port: u16,
 ) -> Result<bool, String> {
-    tracing::warn!(
-        "kill_connection invoked: will terminate entire process PID={} (connection {}:{}->{}:{})",
-        pid,
-        "?",
-        0,
-        remote_addr,
-        remote_port
-    );
-    // Validate PID range (prevent overflow and restrict reasonable range)
-    const MAX_PID: u32 = 4194304; // Reasonable max PID for most systems
-    if pid == 0 || pid > MAX_PID {
-        return Err(format!("Invalid PID: out of valid range (1-{})", MAX_PID));
-    }
+    // Validation + process teardown touch the platform layer (which spawns
+    // lsof/ss and runs kill/taskkill) — run off the async runtime.
+    tokio::task::spawn_blocking(move || {
+        tracing::warn!(
+            "kill_connection invoked: will terminate entire process PID={} (connection {}:{}->{}:{})",
+            pid,
+            "?",
+            0,
+            remote_addr,
+            remote_port
+        );
+        // Validate PID range (prevent overflow and restrict reasonable range)
+        const MAX_PID: u32 = 4194304; // Reasonable max PID for most systems
+        if pid == 0 || pid > MAX_PID {
+            return Err(format!("Invalid PID: out of valid range (1-{})", MAX_PID));
+        }
 
-    // Validate remote address
-    let parsed_addr: IpAddr = remote_addr
-        .parse()
-        .map_err(|_| "Invalid remote address format".to_string())?;
+        // Validate remote address
+        let parsed_addr: IpAddr = remote_addr
+            .parse()
+            .map_err(|_| "Invalid remote address format".to_string())?;
 
-    // Validate port is not zero
-    if remote_port == 0 {
-        return Err("Invalid remote port".to_string());
-    }
+        // Validate port is not zero
+        if remote_port == 0 {
+            return Err("Invalid remote port".to_string());
+        }
 
-    // Verify the connection exists before killing
-    let connections = crate::platform::get_active_connections()
-        .map_err(|e| format!("Failed to get connections: {}", e))?;
+        // Verify the connection exists before killing
+        let connections = crate::platform::get_active_connections()
+            .map_err(|e| format!("Failed to get connections: {}", e))?;
 
-    let connection_exists = connections.iter().any(|conn| {
-        conn.pid == Some(pid) && conn.remote_addr == parsed_addr && conn.remote_port == remote_port
-    });
+        let connection_exists = connections.iter().any(|conn| {
+            conn.pid == Some(pid) && conn.remote_addr == parsed_addr && conn.remote_port == remote_port
+        });
 
-    if !connection_exists {
-        return Err("Connection not found or PID mismatch".to_string());
-    }
+        if !connection_exists {
+            return Err("Connection not found or PID mismatch".to_string());
+        }
 
     // Platform-specific critical process protection
     #[cfg(windows)]
@@ -154,22 +144,33 @@ pub async fn kill_connection(
 
     #[cfg(target_os = "linux")]
     {
-        // Linux critical PIDs - kernel threads and essential system processes
-        // Range check for kernel threads (2-500)
-        if pid == 1 || (2..=500).contains(&pid) {
+        // PID 1 (init/systemd) is always protected. Kernel threads occupy a
+        // range that varies by boot — blocking the whole 2-500 range also
+        // blocks legitimate user processes in containers/small systems, so
+        // rely on the process-name check below instead of a numeric window.
+        if pid == 1 {
             return Err(format!("Cannot kill system-critical process (PID {})", pid));
         }
 
-        // Also check process name to protect system processes
+        // Check process name to protect system processes
         if let Some(conn) = connections.iter().find(|c| c.pid == Some(pid)) {
             if let Some(ref name) = conn.process_name {
+                let name_lower = name.to_lowercase();
+                // Prefix entries (e.g. "rcu_", "systemd-", "migration/") must
+                // match by prefix; plain entries match exactly or as "[name]"
+                // kernel-thread notation.
                 let protected_processes = [
                     "systemd",
                     "init",
                     "kthreadd",
                     "ksoftirqd",
-                    "migration",
+                    "migration/",
+                    "rcu",
                     "rcu_",
+                    "rcuog",
+                    "rcuos",
+                    "rcuob",
+                    "rcu_preempt",
                     "chronyd",
                     "NetworkManager",
                     "sshd",
@@ -178,10 +179,11 @@ pub async fn kill_connection(
                     "udisks2",
                     "systemd-",
                 ];
-                let name_lower = name.to_lowercase();
                 for protected in protected_processes {
-                    if name_lower == protected.to_lowercase()
-                        || name_lower.starts_with(&format!("{}[", protected.to_lowercase()))
+                    let p = protected.to_lowercase();
+                    if name_lower == p
+                        || name_lower.starts_with(&p)
+                        || name_lower.starts_with(&format!("[{}", p))
                     {
                         return Err(format!("Cannot kill protected system process: {}", name));
                     }
@@ -192,9 +194,10 @@ pub async fn kill_connection(
 
     #[cfg(target_os = "macos")]
     {
-        // macOS critical PIDs
-        // Range check for kernel and early system processes (2-200)
-        if pid == 1 || (2..=200).contains(&pid) {
+        // PID 1 is launchd — always protected. A numeric window (2-200)
+        // catches early boot daemons, but macOS assigns small PIDs to regular
+        // user processes too, so keep the window tight and rely on names.
+        if pid == 1 {
             return Err(format!("Cannot kill system-critical process (PID {})", pid));
         }
 
@@ -308,4 +311,7 @@ pub async fn kill_connection(
             Err("Failed to kill process".to_string())
         }
     }
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }

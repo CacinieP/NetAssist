@@ -1,4 +1,8 @@
 // Linux-specific implementations
+//
+// The pure parsers live in `platform::common` so they are compiled and
+// unit-tested on every host; this file only performs the file/process I/O
+// around them.
 
 use super::{ConnectionRawInfo, NetworkInterfaceInfo};
 use std::net::IpAddr;
@@ -60,9 +64,17 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
             if let Ok(addr_output) = super::common::exec_command("ip", &["addr", "show", name]) {
                 let mut ipv4_addrs = Vec::new();
                 let mut ipv6_addrs = Vec::new();
+                let mut is_up = false;
 
                 for line in addr_output.lines() {
-                    if line.contains("inet ") {
+                    // Interface header: "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 ..."
+                    if line.contains("mtu") && line.contains(':') {
+                        if let Some(flags) =
+                            line.split_once('<').and_then(|(_, r)| r.split_once('>'))
+                        {
+                            is_up = flags.0.split(',').any(|f| f == "UP");
+                        }
+                    } else if line.contains("inet ") {
                         let parts: Vec<&str> = line.split_whitespace().collect();
                         if let Some(addr_str) = parts.get(1) {
                             if let Ok(addr) =
@@ -74,8 +86,14 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
                     } else if line.contains("inet6 ") && !line.contains("scope link") {
                         let parts: Vec<&str> = line.split_whitespace().collect();
                         if let Some(addr_str) = parts.get(1) {
-                            if let Ok(addr) =
-                                addr_str.split('/').next().unwrap_or("").parse::<IpAddr>()
+                            if let Ok(addr) = addr_str
+                                .split('/')
+                                .next()
+                                .unwrap_or("")
+                                .split('%')
+                                .next()
+                                .unwrap_or("")
+                                .parse::<IpAddr>()
                             {
                                 ipv6_addrs.push(addr);
                             }
@@ -88,7 +106,7 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
                     display_name: name.to_string(),
                     ipv4_addresses: ipv4_addrs,
                     ipv6_addresses: ipv6_addrs,
-                    is_up: true, // TODO: Check actual status
+                    is_up,
                     is_loopback: name == "lo",
                     gateway: None,
                 });
@@ -99,164 +117,128 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
     Ok(interfaces)
 }
 
-/// Get active connections on Linux
+/// Get active connections on Linux.
+///
+/// `ss -H -tuanp` is the single source of truth: with both `-t` and `-u` the
+/// output carries a leading `Netid` column, human-readable state names and,
+/// where permitted, the owning `users:(("name",pid=N,...))` suffix. Falling
+/// back to `/proc/net/{tcp,tcp6,udp,udp6}` (byte-order corrected, all four
+/// files read) only when `ss` is unavailable.
 pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
-    // Use: ss -tunap to get connections with process info
-    // Or fallback to /proc/net/tcp + lsof
+    let ss = super::common::exec_command("ss", &["-H", "-t", "-u", "-a", "-n", "-p"]);
+    if let Ok(ss_output) = ss {
+        if !ss_output.trim().is_empty() {
+            return Ok(super::common::parse_ss_connections(&ss_output));
+        }
+    }
+    Ok(parse_proc_net_connections())
+}
+
+/// Fallback connection listing from `/proc/net/{tcp,tcp6,udp,udp6}` with
+/// correct byte order and state-code mapping (pid join impossible without ss).
+fn parse_proc_net_connections() -> Vec<ConnectionRawInfo> {
     let mut connections = Vec::new();
-
-    // First try to get process info using ss (modern Linux)
-    let ss_output = super::common::exec_command("ss", &["-tunap"]).unwrap_or_default();
-    let mut process_map: std::collections::HashMap<String, (u32, String)> =
-        std::collections::HashMap::new();
-
-    for line in ss_output.lines().skip(1) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 7 {
-            continue;
-        }
-
-        // ss output format: State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
-        // Example: ESTAB 0 0 192.168.1.1:1234 192.168.1.2:5678 users:(("chrome",pid=1234,fd=45))
-        let proc_info = parts.last().unwrap_or(&"");
-        if let Some(pid_str) = proc_info.split("pid=").nth(1) {
-            let pid: u32 = pid_str
-                .split(',')
-                .next()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0);
-            if pid > 0 {
-                if let Some(name) = proc_info.split('"').nth(1) {
-                    // Extract local and remote addresses
-                    let local = parts.get(3).unwrap_or(&"");
-                    let remote = parts.get(4).unwrap_or(&"");
-                    let key = format!("{}->{}", local, remote);
-                    process_map.insert(key, (pid, name.to_string()));
+    for (file, proto, v6) in [
+        ("/proc/net/tcp", "TCP", false),
+        ("/proc/net/tcp6", "TCP", true),
+        ("/proc/net/udp", "UDP", false),
+        ("/proc/net/udp6", "UDP", true),
+    ] {
+        if let Ok(content) = std::fs::read_to_string(file) {
+            for line in content.lines().skip(1) {
+                if let Some(conn) = super::common::parse_proc_net_line(line, proto, v6) {
+                    connections.push(conn);
                 }
             }
         }
     }
-
-    // Read TCP connections from /proc/net/tcp
-    if let Ok(tcp_output) = std::fs::read_to_string("/proc/net/tcp") {
-        for line in tcp_output.lines().skip(1) {
-            if let Some(mut conn) = parse_proc_net_line(line, "TCP") {
-                // Try to find process info
-                let key = format!(
-                    "{}:{}->{}:{}",
-                    conn.local_addr, conn.local_port, conn.remote_addr, conn.remote_port
-                );
-                if let Some((pid, name)) = process_map.get(&key) {
-                    conn.pid = Some(*pid);
-                    conn.process_name = Some(name.clone());
-                }
-                connections.push(conn);
-            }
-        }
-    }
-
-    // Read UDP connections from /proc/net/udp
-    if let Ok(udp_output) = std::fs::read_to_string("/proc/net/udp") {
-        for line in udp_output.lines().skip(1) {
-            if let Some(mut conn) = parse_proc_net_line(line, "UDP") {
-                // Try to find process info
-                let key = format!(
-                    "{}:{}->{}:{}",
-                    conn.local_addr, conn.local_port, conn.remote_addr, conn.remote_port
-                );
-                if let Some((pid, name)) = process_map.get(&key) {
-                    conn.pid = Some(*pid);
-                    conn.process_name = Some(name.clone());
-                }
-                connections.push(conn);
-            }
-        }
-    }
-
-    Ok(connections)
+    connections
 }
 
-fn parse_proc_net_line(line: &str, protocol: &str) -> Option<ConnectionRawInfo> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 10 {
-        return None;
-    }
-
-    let local_addr = parse_hex_addr(parts[1])?;
-    let remote_addr = parse_hex_addr(parts[2])?;
-
-    Some(ConnectionRawInfo {
-        protocol: protocol.to_string(),
-        local_addr: local_addr.0,
-        local_port: local_addr.1,
-        remote_addr: remote_addr.0,
-        remote_port: remote_addr.1,
-        state: parts[3].to_string(),
-        pid: None,
-        process_name: None,
-    })
-}
-
-fn parse_hex_addr(addr: &str) -> Option<(IpAddr, u16)> {
-    let parts: Vec<&str> = addr.split(':').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-
-    let ip_hex = u32::from_str_radix(parts[0], 16).ok()?;
-    let port = u16::from_str_radix(parts[1], 16).ok()?;
-
-    let ip = IpAddr::from(std::net::Ipv4Addr::from(ip_hex));
-    Some((ip, port))
-}
-
-/// Flush DNS cache on Linux
+/// Flush DNS cache on Linux.
+///
+/// Tries `resolvectl`/`systemd-resolve` directly (may need root) and reports
+/// real failures instead of returning Ok on a non-zero exit.
 pub fn flush_dns_cache() -> anyhow::Result<()> {
-    // Try systemd-resolved first
-    if std::process::Command::new("systemd-resolve")
-        .args(["--flush-caches"])
-        .status()
-        .is_ok()
-    {
-        return Ok(());
+    for cmd in ["resolvectl", "systemd-resolve"] {
+        let out = std::process::Command::new(cmd)
+            .arg("--flush-caches")
+            .output();
+        if let Ok(out) = out {
+            if out.status.success() {
+                return Ok(());
+            }
+            tracing::warn!(
+                "{} --flush-caches failed: {}",
+                cmd,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
     }
-
-    // Try dnsmasq
-    if std::process::Command::new("systemctl")
-        .args(["restart", "dnsmasq"])
-        .status()
-        .is_ok()
-    {
-        return Ok(());
-    }
-
-    // No DNS cache to flush
-    Ok(())
+    Err(anyhow::anyhow!(
+        "无法刷新 DNS 缓存（需要 systemd-resolved，或需要 root 权限）"
+    ))
 }
 
-/// Release and renew IP on Linux
+/// Release and renew IP on Linux.
+///
+/// Uses `nmcli device reapply` (NetworkManager) when available — the old
+/// `dhclient -r` released ALL leases and conflicts with NetworkManager.
 pub fn release_renew_ip() -> anyhow::Result<()> {
-    // Use dhclient or dhcpcd
-    if std::process::Command::new("dhclient")
-        .arg("-r")
-        .status()
-        .is_ok()
-    {
-        std::process::Command::new("dhclient").status()?;
+    if super::common::exec_command("nmcli", &["--version"]).is_ok() {
+        let iface = get_default_interface()?;
+        let out = std::process::Command::new("nmcli")
+            .args(["device", "reapply", &iface])
+            .output()?;
+        if out.status.success() {
+            return Ok(());
+        }
+        return Err(anyhow::anyhow!(
+            "nmcli device reapply failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
 
-    Ok(())
+    // Fallback for non-NetworkManager systems: dhclient (add -1 so it never
+    // blocks for 60s). This is inherently risky on NM systems, hence only a
+    // fallback.
+    let released = std::process::Command::new("dhclient")
+        .arg("-r")
+        .arg("-1")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if released
+        && std::process::Command::new("dhclient")
+            .arg("-1")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "无法续租 IP 地址（需要 NetworkManager 或 dhclient）"
+    ))
 }
 
-/// Reset network stack on Linux
+/// Reset network stack on Linux.
+///
+/// Restarts the network management daemon (needs root — surface the failure
+/// instead of returning Ok on a permission error).
 pub fn reset_network_stack() -> anyhow::Result<()> {
-    // Reload network configuration
-    std::process::Command::new("systemctl")
+    let out = std::process::Command::new("systemctl")
         .args(["restart", "NetworkManager"])
-        .status()?;
-
-    Ok(())
+        .output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    // Non-root is the common GUI case; give a useful message instead of Ok.
+    Err(anyhow::anyhow!(
+        "重启 NetworkManager 失败（需要 root）: {}",
+        stderr
+    ))
 }
 
 /// Get DNS servers on Linux
@@ -277,78 +259,109 @@ pub fn get_dns_servers() -> anyhow::Result<Vec<String>> {
     Ok(servers)
 }
 
-/// Check if running with root privileges
+/// Check if running with root privileges (euid == 0), read from
+/// /proc/self/status so no libc dependency is required.
 fn check_root_privileges() -> anyhow::Result<bool> {
-    // Check effective user ID (euid) - root is 0
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // Try to check if we can read /etc/shadow (only root can)
-        if let Ok(metadata) = std::fs::metadata("/etc/shadow") {
-            // If we can stat it, check ownership
-            return Ok(metadata.uid() == 0 && unsafe { libc::geteuid() } == 0);
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            // "Uid:	0	0	0	0" — first value is the real uid; the second
+            // is euid. Privilege checks should use the effective uid.
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            return Ok(fields.get(1).copied().unwrap_or("") == "0");
         }
-        // Fallback: check euid directly
-        Ok(unsafe { libc::geteuid() } == 0)
     }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        Ok(false)
-    }
+    Ok(false)
 }
 
-/// Set DNS servers on Linux with privilege check
+/// Validate that a string is a parseable IP address (IPv4 or IPv6).
+fn validate_ip(addr: &str) -> Result<(), anyhow::Error> {
+    addr.parse::<IpAddr>()
+        .map(|_| ())
+        .map_err(|_| anyhow::anyhow!("invalid IP address: {}", addr))
+}
+
+/// Set DNS servers on Linux.
+///
+/// Prefers per-interface tools (`resolvectl`, `nmcli`) that work with
+/// systemd-resolved / NetworkManager instead of clobbering the
+/// `/etc/resolv.conf` symlink (which is usually managed by resolved). Falls
+/// back to writing `/etc/resolv.conf` only when no manager tool exists, and
+/// only after validating the inputs as real IPs (no line injection) and
+/// requiring root.
 pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result<()> {
-    // Check for root privileges before attempting to write
-    let has_root = check_root_privileges()?;
-    if !has_root {
-        return Err(anyhow::anyhow!(
-            "Setting DNS requires root privileges. Please run with sudo or as root."
+    validate_ip(primary)?;
+    if let Some(sec) = secondary {
+        validate_ip(sec)?;
+    }
+
+    let iface = get_default_interface()?;
+
+    // 1) systemd-resolved: resolvectl dns <iface> <primary> [secondary]
+    let mut manager: Option<(&'static str, Vec<String>)> = None;
+    if super::common::exec_command("resolvectl", &["--help"]).is_ok() {
+        let mut args: Vec<String> = vec!["dns".into(), iface.clone(), primary.to_string()];
+        if let Some(sec) = secondary {
+            args.push(sec.to_string());
+        }
+        manager = Some(("resolvectl", args));
+    }
+
+    // 2) NetworkManager: nmcli con mod <name> ipv4.dns ...
+    if manager.is_none() && super::common::exec_command("nmcli", &["--version"]).is_ok() {
+        let mut dns = primary.to_string();
+        if let Some(sec) = secondary {
+            dns.push(' ');
+            dns.push_str(sec);
+        }
+        manager = Some((
+            "nmcli",
+            vec![
+                "con".to_string(),
+                "mod".to_string(),
+                iface,
+                "ipv4.dns".to_string(),
+                dns,
+                "ipv4.method".to_string(),
+                "auto".to_string(),
+            ],
         ));
     }
 
-    // Validate DNS server addresses
-    if primary.is_empty() {
-        return Err(anyhow::anyhow!("Primary DNS server cannot be empty"));
-    }
-    if let Some(sec) = secondary {
-        if sec.is_empty() {
-            return Err(anyhow::anyhow!("Secondary DNS server cannot be empty"));
+    if let Some((tool, args)) = manager {
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        // Prepend pkexec when not root (matches GUI usage).
+        let out = if check_root_privileges()? {
+            std::process::Command::new(tool).args(&arg_refs).output()?
+        } else {
+            let mut cmd = std::process::Command::new("pkexec");
+            cmd.arg(tool).args(&arg_refs);
+            cmd.output()?
+        };
+        if out.status.success() {
+            return Ok(());
         }
+        return Err(anyhow::anyhow!(
+            "failed to set DNS via {}: {}",
+            tool,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
 
-    // Verify /etc/resolv.conf exists and is writable
+    // 3) Fallback: direct /etc/resolv.conf write (last resort, needs root).
+    if !check_root_privileges()? {
+        return Err(anyhow::anyhow!(
+            "cannot write /etc/resolv.conf without root; install systemd-resolved or NetworkManager"
+        ));
+    }
+
     let resolv_path = std::path::Path::new("/etc/resolv.conf");
-    if !resolv_path.exists() {
-        return Err(anyhow::anyhow!("/etc/resolv.conf does not exist"));
-    }
-
-    // Check if we can write to it (metadata check)
-    if let Ok(metadata) = std::fs::metadata(resolv_path) {
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let readonly = metadata.permissions().mode() & 0o444 == 0o444;
-            if readonly {
-                tracing::warn!("/etc/resolv.conf appears to be read-only");
-            }
-        }
-    }
-
-    // Update /etc/resolv.conf
     let mut content = String::from("# Generated by NetAssist\n");
     content.push_str(&format!("nameserver {}\n", primary));
     if let Some(secondary) = secondary {
         content.push_str(&format!("nameserver {}\n", secondary));
     }
-
     std::fs::write(resolv_path, content)?;
-    tracing::info!(
-        "DNS servers updated successfully: primary={}, secondary={:?}",
-        primary,
-        secondary
-    );
     Ok(())
 }
 

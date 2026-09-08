@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useRealtimeTraffic, useRecordTrafficPoint } from "../../hooks/useTrafficData";
+import { useSettingsStore } from "../../store/settingsStore";
 import { formatSpeed, formatBytes } from "../../utils/formatUtils";
 import NetworkStatus from "./NetworkStatus";
 import IPInfoCard from "./IPInfoCard";
@@ -41,6 +42,9 @@ export default function Dashboard() {
   const [connections, setConnections] = useState("加载中...");
   const [cumulative, setCumulative] = useState<CumulativeTraffic | null>(null);
   const [period, setPeriod] = useState<Period>("day");
+  const { settings } = useSettingsStore();
+  const dnsServerRef = useRef(settings.primary_dns || "8.8.8.8");
+  dnsServerRef.current = settings.primary_dns || "8.8.8.8";
 
   // Individual error states for each metric
   const [errors, setErrors] = useState({
@@ -85,7 +89,7 @@ export default function Dashboard() {
           setLatency("错误");
         }),
 
-      invoke<DNSStats>("test_dns", { server: "8.8.8.8" })
+      invoke<DNSStats>("test_dns", { server: dnsServerRef.current })
         .then(dnsRes => {
           setDns(`${Math.round(dnsRes.avg_latency_ms)}`);
           setErrors(prev => ({ ...prev, dns: null }));
@@ -123,17 +127,22 @@ export default function Dashboard() {
     fetchMetrics();
     fetchCumulative();
 
-    // Poll for metric updates (every 2 seconds) — traffic is handled by shared hook
-    const interval = setInterval(fetchMetrics, 2000);
+    // Poll metrics honoring the user's refresh interval (these hit the
+    // network: HTTP probe + DNS + connection list). Minimum 2s to avoid
+    // hammering the external probes, but no longer a hard-coded 2s.
+    const metricIntervalMs = Math.max(2000, (settings.refresh_interval_secs || 5) * 1000);
+    const interval = setInterval(fetchMetrics, metricIntervalMs);
 
-    // Poll cumulative traffic every 5 seconds
-    const cumulativeInterval = setInterval(fetchCumulative, 5000);
+    // Cumulative totals come from OS counters (cheap); poll at the same
+    // cadence but at least 5s.
+    const cumulativeIntervalMs = Math.max(5000, (settings.refresh_interval_secs || 5) * 1000);
+    const cumulativeInterval = setInterval(fetchCumulative, cumulativeIntervalMs);
 
     return () => {
       clearInterval(interval);
       clearInterval(cumulativeInterval);
     };
-  }, [fetchMetrics, fetchCumulative]);
+  }, [fetchMetrics, fetchCumulative, settings.refresh_interval_secs]);
 
   // Re-fetch cumulative when period changes
   useEffect(() => {
@@ -183,7 +192,7 @@ export default function Dashboard() {
         ) : cumulative ? (
           (cumulative.total_download_bytes === 0 && cumulative.total_upload_bytes === 0) ? (
             <div className="text-center text-gray-400 dark:text-gray-500 py-4 text-sm">
-              数据采集中…流量每分钟记录一次，请稍候查看
+              数据采集中…流量每 5 秒记录一次，请稍候查看
             </div>
           ) : (
             <div className="grid grid-cols-3 gap-4">

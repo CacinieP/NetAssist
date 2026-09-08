@@ -1,4 +1,7 @@
+import { useEffect, useState } from "react";
 import { Activity, ArrowDown, ArrowUp } from "lucide-react";
+import { getVersion } from "@tauri-apps/api/app";
+import { useTranslation } from "react-i18next";
 import { formatSpeed } from "../../utils/formatUtils";
 
 interface StatusBarProps {
@@ -18,7 +21,16 @@ export default function StatusBar({
   downloadSpeed = 0,
   uploadSpeed = 0,
 }: StatusBarProps) {
-  const statusText = networkStatus === "normal" ? "正常" : "异常";
+  const { t } = useTranslation();
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  // Read the real app version from the Tauri backend (was hardcoded v0.3.0,
+  // which drifted from package.json/tauri.conf.json).
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => setAppVersion(null));
+  }, []);
+
+  const statusText = networkStatus === "normal" ? t("status.normal") : t("status.abnormal");
   const statusIcon = networkStatus === "normal" ? "✓" : "✗";
 
   return (
@@ -27,7 +39,7 @@ export default function StatusBar({
         {/* Network Status */}
         <div className="flex items-center gap-2">
           <span className="text-lg">{statusIcon}</span>
-          <span className="text-gray-600 dark:text-gray-400">网络:</span>
+          <span className="text-gray-600 dark:text-gray-400">{t("status.network")}:</span>
           <span
             className={`font-medium ${
               networkStatus === "normal" ? "text-green-600" : "text-red-600"
@@ -53,7 +65,7 @@ export default function StatusBar({
 
         {/* Location */}
         <div className="flex items-center gap-2">
-          <span className="text-gray-600 dark:text-gray-400">位置:</span>
+          <span className="text-gray-600 dark:text-gray-400">{t("status.location")}:</span>
           <span className="text-gray-700 dark:text-gray-300">{location}</span>
         </div>
 
@@ -70,7 +82,7 @@ export default function StatusBar({
         </div>
       </div>
 
-      <div className="text-xs text-gray-400 dark:text-gray-500">NetAssist v0.3.0</div>
+      <div className="text-xs text-gray-400 dark:text-gray-500">NetAssist v{appVersion || "—"}</div>
     </div>
   );
 }
