@@ -23,10 +23,11 @@ async fn build_ip_info(do_geoip: bool, skip_public_probe: bool) -> Result<IPInfo
     let local_ipv6 = local_ipv6_addrs.first().cloned();
 
     // Public IPv4 (external); skipped for the local-only diagnostic probe.
+    // Cached so a 1-2s poll interval never spams the external services.
     let public_ipv4 = if skip_public_probe {
         None
     } else {
-        get_public_ip().await
+        get_public_ip_cached().await
     };
 
     // Use public IP for ipv4 field (external address)
@@ -307,6 +308,41 @@ async fn get_public_ip() -> Option<String> {
     }
 
     overall_timeout.ok().flatten()
+}
+
+/// Short-lived cache for the public-IP lookup so a fast refresh interval
+/// (down to 1s in Settings) never hammers the external services on every
+/// tick — the OS-authoritative local data stays fresh, only the WAN lookup
+/// is throttled to once per `TTL`.
+async fn get_public_ip_cached() -> Option<String> {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    const TTL: std::time::Duration = std::time::Duration::from_secs(15);
+    struct Cache {
+        value: Option<String>,
+        fetched_at: Instant,
+    }
+    static CACHE: OnceLock<std::sync::Mutex<Cache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        std::sync::Mutex::new(Cache {
+            value: None,
+            fetched_at: Instant::now() - TTL, // force first fetch
+        })
+    });
+
+    {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.value.is_some() && guard.fetched_at.elapsed() < TTL {
+            return guard.value.clone();
+        }
+    }
+
+    let value = get_public_ip().await;
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    guard.value = value.clone();
+    guard.fetched_at = Instant::now();
+    value
 }
 
 /// Fetch public IPv4 from a specific service with validation

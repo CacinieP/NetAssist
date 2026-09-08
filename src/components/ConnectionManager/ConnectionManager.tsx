@@ -1,18 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-
-interface GeoIPInfo {
-  country: string;
-  region: string;
-  city: string;
-}
-
-interface IPInfo {
-  ipv4: string | null;
-  ipv6: string | null;
-  ipv4_geoip: GeoIPInfo | null;
-  ipv6_geoip: GeoIPInfo | null;
-}
+import { useNetworkData } from "../../hooks/useNetworkData";
+import { useSettingsStore } from "../../store/settingsStore";
 
 interface ConnectionInfo {
   pid: number;
@@ -26,48 +15,52 @@ interface ConnectionInfo {
 }
 
 export default function ConnectionManager() {
-  const [ipInfo, setIpInfo] = useState<IPInfo | null>(null);
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { settings } = useSettingsStore();
 
-  const fetchData = async () => {
+  // IP info comes from the app-level shared poll (owned by App.tsx). This
+  // page previously called get_ip_info (with GeoIP) on its own 3s timer,
+  // i.e. a public-IP + GeoIP HTTP request every 3 seconds.
+  const { ipInfo } = useNetworkData();
+
+  // Guard against out-of-order responses: only apply the result of the most
+  // recent request.
+  const requestSeq = useRef(0);
+
+  const fetchConnections = useCallback(async () => {
+    const seq = ++requestSeq.current;
     try {
       setLoading(true);
       setError(null);
-
-      const ip = await invoke<IPInfo>("get_ip_info");
-      setIpInfo(ip);
-
       const conns = await invoke<ConnectionInfo[]>("get_active_connections");
+      if (seq !== requestSeq.current) return; // stale response
       setTotalCount(conns.length);
       setConnections(conns.slice(0, 100)); // Limit display to 100 for performance
-
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "获取连接数据失败";
+      if (seq !== requestSeq.current) return;
+      // Tauri rejects invoke() with a string, NOT an Error instance — the old
+      // `instanceof Error` check always fell through to the generic message.
+      const errorMsg = typeof err === "string" ? err : String(err ?? "获取连接数据失败");
       console.error("Failed to fetch connection data:", err);
       setError(errorMsg);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    fetchData();
-
-    // Auto-refresh every 3 seconds
-    const interval = setInterval(fetchData, 3000);
-
-    return () => clearInterval(interval);
   }, []);
 
-  const formatLocation = (geoip: GeoIPInfo | null | undefined) => {
-    if (geoip && geoip.country) {
-      return `${geoip.country} ${geoip.region} ${geoip.city}`;
-    }
-    return "未知地区";
-  };
+  useEffect(() => {
+    fetchConnections();
+
+    // Auto-refresh honoring the user's refresh interval (min 3s for the
+    // connection snapshot).
+    const intervalMs = Math.max(3000, (settings.refresh_interval_secs || 5) * 1000);
+    const interval = setInterval(fetchConnections, intervalMs);
+
+    return () => clearInterval(interval);
+  }, [fetchConnections, settings.refresh_interval_secs]);
 
   return (
     <div className="p-6 space-y-6">
@@ -101,7 +94,7 @@ export default function ConnectionManager() {
             </div>
             <div className="flex items-start gap-3 pl-16">
               <span className="text-gray-500 dark:text-gray-400 text-sm">📍</span>
-              <span className="text-gray-600 dark:text-gray-400 text-sm">{formatLocation(ipInfo?.ipv4_geoip)}</span>
+              <span className="text-gray-600 dark:text-gray-400 text-sm">{ipInfo?.ipv4_geoip?.country || "未知地区"}</span>
             </div>
           </div>
 
@@ -112,18 +105,9 @@ export default function ConnectionManager() {
             </div>
             <div className="flex items-start gap-3 pl-16">
               <span className="text-gray-500 dark:text-gray-400 text-sm">📍</span>
-              <span className="text-gray-600 dark:text-gray-400 text-sm">{formatLocation(ipInfo?.ipv6_geoip)}</span>
+              <span className="text-gray-600 dark:text-gray-400 text-sm">{ipInfo?.ipv6_geoip?.country || "未知地区"}</span>
             </div>
           </div>
-        </div>
-
-        <div className="mt-4 flex gap-2">
-          <button
-            onClick={fetchData}
-            className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            刷新数据
-          </button>
         </div>
       </div>
 
@@ -140,7 +124,7 @@ export default function ConnectionManager() {
           </div>
           <div className="flex gap-2">
             <button
-              onClick={fetchData}
+              onClick={fetchConnections}
               className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
               disabled={loading}
             >

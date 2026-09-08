@@ -4,7 +4,9 @@ import { useNetworkData } from "../../hooks/useNetworkData";
 
 export default function NetworkStatus() {
   const { stats: trafficStats } = useRealtimeTraffic(1000);
-  const { networkStatus } = useNetworkData(5, false);
+  // Subscribe to the app-level network poll (owned by App.tsx). This card
+  // must NOT restart the global interval or drop GeoIP for the whole app.
+  const { networkStatus } = useNetworkData();
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {

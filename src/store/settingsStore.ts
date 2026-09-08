@@ -36,8 +36,8 @@ interface SettingsStore {
   error: string | null;
   loadSettings: () => Promise<void>;
   setSettings: (partial: Partial<Settings>) => void;
-  saveSettings: () => Promise<boolean>;
-  resetSettings: () => Promise<void>;
+  saveSettings: (next?: Settings) => Promise<boolean>;
+  resetSettings: () => Promise<Settings | null>;
 }
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
@@ -62,18 +62,23 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set({ settings: { ...get().settings, ...partial } });
   },
 
-  saveSettings: async () => {
-    // Store previous settings for rollback
+  saveSettings: async (next) => {
+    // Snapshot the CURRENT persisted store before touching it. The caller
+    // may pass the object to save (the local draft); only merge it into the
+    // store AFTER the backend accepted it — so a validation failure rolls
+    // back to the real previous value instead of to the unpersisted draft.
     const previousSettings = get().settings;
+    const toSave = next ?? previousSettings;
     try {
       set({ saving: true, error: null });
-      const ok = await invoke<boolean>("update_settings", { settings: get().settings });
+      const ok = await invoke<boolean>("update_settings", { settings: toSave });
       if (!ok) {
         throw new Error("保存设置失败: 服务器返回 false");
       }
-      return ok;
+      set({ settings: toSave });
+      return true;
     } catch (e: any) {
-      // Rollback to previous settings on error
+      // Real rollback: keep the previously persisted settings.
       set({ settings: previousSettings, error: e?.toString?.() ?? "保存设置失败" });
       return false;
     } finally {
@@ -86,8 +91,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       set({ loading: true, error: null });
       const settings = await invoke<Settings>("reset_settings");
       set({ settings });
+      return settings;
     } catch (e: any) {
       set({ error: e?.toString?.() ?? "恢复默认设置失败" });
+      return null;
     } finally {
       set({ loading: false });
     }

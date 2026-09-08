@@ -22,23 +22,22 @@ const EmergencyKit = lazy(() => import("./components/EmergencyKit/EmergencyKit")
 const Settings = lazy(() => import("./components/Settings/Settings"));
 
 function App() {
-  const { settings, loadSettings } = useSettingsStore();
+  const { settings, loadSettings, error: settingsError } = useSettingsStore();
   const { t } = useTranslation();
 
   // Error state with user feedback
   const [error, setError] = useState<string | null>(null);
-  const retryCountRef = useRef(0);
-  const errorRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Use shared traffic hook — single global 1s poll
   const { stats: traffic } = useRealtimeTraffic(1000);
 
-  // Use shared network data hook — single global poll with settings interval
-  const intervalSecs = Math.max(
-    5,
-    Math.min(settings.refresh_interval_secs || 10, 60)
-  );
-  const { networkStatus, ipInfo } = useNetworkData(intervalSecs, settings.show_geoip);
+  // Use shared network data hook — the app shell owns the single global poll
+  // (interval from settings, geoip from settings). Child pages only subscribe.
+  // No hidden 5s floor: the Settings 1s/2s options must actually work. The
+  // backend caches the external public-IP/GeoIP lookups, so a fast poll
+  // cannot hammer the network.
+  const intervalSecs = Math.max(1, Math.min(settings.refresh_interval_secs || 5, 300));
+  const { networkStatus, ipInfo } = useNetworkData(intervalSecs, settings.show_geoip, { owner: true });
 
   // Load persisted settings
   useEffect(() => {
@@ -77,26 +76,12 @@ function App() {
     prevStatusRef.current = current;
   }, [networkStatus, settings.notify_network_abnormal]);
 
-  // Derive error state from network data (replaces old retry logic)
+  // Surface settings-load failures (loadSettings sets store error).
   useEffect(() => {
-    if (networkStatus === null && ipInfo === null) {
-      // Still loading or both failed — no action needed, hook handles polling
+    if (settingsError) {
+      setError(settingsError);
     }
-    // Clear error when we get successful data
-    if (networkStatus || ipInfo) {
-      setError(null);
-      retryCountRef.current = 0;
-    }
-  }, [networkStatus, ipInfo]);
-
-  // Cleanup retry timer on unmount
-  useEffect(() => {
-    return () => {
-      if (errorRetryTimerRef.current) {
-        clearTimeout(errorRetryTimerRef.current);
-      }
-    };
-  }, []);
+  }, [settingsError]);
 
   // Format location string
   const getLocationString = useCallback(() => {

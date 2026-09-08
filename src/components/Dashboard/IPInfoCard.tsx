@@ -1,35 +1,18 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RefreshCw } from "lucide-react";
 import { useSettingsStore } from "../../store/settingsStore";
-
-interface IPInfo {
-  ipv4?: string;
-  ipv4_type?: string;
-  ipv4_geoip?: {
-    country: string;
-    city: string;
-    region: string;
-  };
-  ipv6?: string;
-  ipv6_type?: string;
-  ipv6_geoip?: {
-    country: string;
-    city: string;
-    region: string;
-  };
-  local_ipv4?: string;
-  local_ipv6?: string;
-  dual_stack_enabled?: boolean;
-  ipv6_priority?: boolean;
-}
+import { useNetworkData } from "../../hooks/useNetworkData";
 
 export default function IPInfoCard() {
   const { settings } = useSettingsStore();
 
-  const [ipInfo, setIpInfo] = useState<IPInfo>({});
+  // Subscribe to the app-level network poll (owned by App.tsx). This card
+  // used to run its own invoke loop on a second timer, doubling the
+  // public-IP/GeoIP requests. Now it just renders the shared data.
+  const { ipInfo, setIpInfo } = useNetworkData();
   const [refreshing, setRefreshing] = useState(false);
-  const errorCountRef = useRef(0);
+  const [refreshError, setRefreshError] = useState(false);
 
   const fetchIPInfo = useCallback(async () => {
     setRefreshing(true);
@@ -37,39 +20,15 @@ export default function IPInfoCard() {
       const info = await invoke<any>("get_ip_info", {
         includeGeoip: settings.show_geoip,
       });
-      setIpInfo({
-        ipv4: info.ipv4 || undefined,
-        ipv4_type: info.ipv4_type,
-        ipv4_geoip: info.ipv4_geoip,
-        ipv6: info.ipv6 || undefined,
-        ipv6_type: info.ipv6_type,
-        ipv6_geoip: info.ipv6_geoip,
-        local_ipv4: info.local_ipv4 || undefined,
-        local_ipv6: info.local_ipv6 || undefined,
-      });
-      errorCountRef.current = 0;
+      setIpInfo(info);
+      setRefreshError(false);
     } catch (error) {
       console.error("Failed to fetch IP info:", error);
-      // Only clear data after 3 consecutive failures (avoid flash on transient errors)
-      errorCountRef.current += 1;
-      if (errorCountRef.current >= 3) {
-        setIpInfo({});
-      }
+      setRefreshError(true);
     } finally {
       setRefreshing(false);
     }
-  }, [settings.show_geoip]);
-
-  useEffect(() => {
-    // Initial fetch
-    fetchIPInfo();
-
-    // Avoid over-polling public IP / geoip
-    const intervalMs = Math.max(5000, (settings.refresh_interval_secs || 10) * 1000);
-    const interval = setInterval(fetchIPInfo, intervalMs);
-
-    return () => clearInterval(interval);
-  }, [settings.refresh_interval_secs, settings.show_geoip, fetchIPInfo]);
+  }, [settings.show_geoip, setIpInfo]);
 
   // Format location for display
   const formatLocation = (geoip?: { country: string; city: string; region: string }, type?: string) => {
@@ -102,14 +61,14 @@ export default function IPInfoCard() {
         <div className="flex items-center gap-2 mb-2">
           <span className="text-blue-600 font-medium text-sm">公网 IPv4:</span>
           <span className="font-mono text-sm text-gray-800 dark:text-gray-200">
-            {ipInfo.ipv4 || "加载中..."}
+            {refreshError ? "加载失败" : ipInfo?.ipv4 || "加载中..."}
           </span>
         </div>
-        {settings.show_geoip && ipInfo.ipv4_geoip && (
+        {settings.show_geoip && ipInfo?.ipv4_geoip && (
           <div className="flex items-center gap-2 pl-6">
             <span className="text-gray-500 dark:text-gray-400 text-sm">位置:</span>
             <span className="text-gray-600 dark:text-gray-300 text-sm">
-              {formatLocation(ipInfo.ipv4_geoip)}
+              {formatLocation(ipInfo.ipv4_geoip, ipInfo.ipv4_type)}
             </span>
           </div>
         )}
@@ -120,7 +79,7 @@ export default function IPInfoCard() {
         <div className="flex items-center gap-2 mb-2">
           <span className="text-green-600 font-medium text-sm">本地 IPv4:</span>
           <span className="font-mono text-sm text-gray-800 dark:text-gray-200">
-            {ipInfo.local_ipv4 || "未检测到"}
+            {ipInfo?.local_ipv4 || "未检测到"}
           </span>
         </div>
         <div className="flex items-center gap-2 pl-6">
@@ -130,7 +89,7 @@ export default function IPInfoCard() {
       </div>
 
       {/* IPv6 */}
-      {ipInfo.ipv6 && (
+      {ipInfo?.ipv6 ? (
         <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
           <div className="flex items-center gap-2 mb-2">
             <span className="text-purple-600 font-medium text-sm">IPv6:</span>
@@ -144,15 +103,12 @@ export default function IPInfoCard() {
             <div className="flex items-center gap-2 pl-6">
               <span className="text-gray-500 dark:text-gray-400 text-sm">位置:</span>
               <span className="text-gray-600 dark:text-gray-300 text-sm">
-                {formatLocation(ipInfo.ipv6_geoip)}
+                {formatLocation(ipInfo.ipv6_geoip, ipInfo.ipv6_type)}
               </span>
             </div>
           )}
         </div>
-      )}
-
-      {/* No IPv6 message */}
-      {!ipInfo.ipv6 && (
+      ) : (
         <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
           <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-sm">
             <span>IPv6: 未检测到</span>

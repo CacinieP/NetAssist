@@ -27,11 +27,29 @@ let globalNetworkData: { status: NetworkStatus | null; ipInfo: IPInfo | null } =
   status: null,
   ipInfo: null,
 };
+// Config of the running poll, used to detect owner re-config (e.g. the user
+// changed refresh_interval_secs / show_geoip in Settings).
+let globalNetworkConfig: { intervalSecs: number; includeGeoip: boolean } | null = null;
 
 function startGlobalNetworkPolling(intervalSecs: number, includeGeoip: boolean) {
   if (globalNetworkInterval) {
+    if (
+      globalNetworkConfig &&
+      globalNetworkConfig.intervalSecs === intervalSecs &&
+      globalNetworkConfig.includeGeoip === includeGeoip
+    ) {
+      // An owner already configured an identical poll; never restart it from
+      // a child component (previously the last-mounted useNetworkData — e.g.
+      // the dashboard's NetworkStatus card with (5s, no-geoip) — would
+      // hijack the interval and drop GeoIP for the whole app).
+      return;
+    }
+    // Owner changed its configuration: restart with the new settings.
     clearInterval(globalNetworkInterval);
+    globalNetworkInterval = null;
   }
+
+  globalNetworkConfig = { intervalSecs, includeGeoip };
 
   const poll = async () => {
     try {
@@ -58,16 +76,28 @@ function stopGlobalNetworkPolling() {
     clearInterval(globalNetworkInterval);
     globalNetworkInterval = null;
   }
+  globalNetworkConfig = null;
+}
+
+interface UseNetworkDataOptions {
+  /** Only the owning component (App) may start/configure the shared poll. */
+  owner?: boolean;
 }
 
 /**
  * Shared hook for network status and IP info.
- * Polls once per settings.refresh_interval_secs globally.
+ *
+ * Exactly one owner (the app shell) configures the global poll with the
+ * user's settings (`refresh_interval_secs`, `show_geoip`); every other
+ * consumer only subscribes to the latest values, so entering a page can no
+ * longer change the global cadence or disable GeoIP app-wide.
  */
 export function useNetworkData(
   intervalSecs: number = 5,
-  includeGeoip: boolean = true
+  includeGeoip: boolean = true,
+  options?: UseNetworkDataOptions
 ) {
+  const isOwner = options?.owner ?? false;
   const [networkStatus, setNetworkStatus] = useState<NetworkStatus | null>(globalNetworkData.status);
   const [ipInfo, setIpInfo] = useState<IPInfo | null>(globalNetworkData.ipInfo);
 
@@ -81,15 +111,18 @@ export function useNetworkData(
     };
 
     globalNetworkListeners.add(listener);
-    startGlobalNetworkPolling(intervalSecs, includeGeoip);
+
+    if (isOwner) {
+      startGlobalNetworkPolling(intervalSecs, includeGeoip);
+    }
 
     return () => {
       globalNetworkListeners.delete(listener);
-      if (globalNetworkListeners.size === 0) {
+      if (isOwner && globalNetworkListeners.size === 0) {
         stopGlobalNetworkPolling();
       }
     };
-  }, [intervalSecs, includeGeoip]);
+  }, [intervalSecs, includeGeoip, isOwner]);
 
   return { networkStatus, ipInfo, setNetworkStatus, setIpInfo };
 }

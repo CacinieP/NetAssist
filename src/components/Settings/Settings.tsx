@@ -1,28 +1,50 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import { useSettingsStore } from "../../store/settingsStore";
 import type { Settings as SettingsType } from "../../store/settingsStore";
 
 export default function Settings() {
-  const { settings, setSettings, saveSettings, saving, error: storeError } = useSettingsStore();
+  const { settings, setSettings, saveSettings, loading, saving, error: storeError } = useSettingsStore();
   const { t } = useTranslation();
 
   // Local state for form data
   const [localSettings, setLocalSettings] = useState<SettingsType>(settings);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Update local state when store changes
+  // Only sync the store → draft once, after the initial load completes.
+  // Immediate-effect toggles (dark mode, autostart…) must NOT clobber the
+  // user's un-saved text fields (previously every setSettings() wrote the
+  // store, which triggered this effect and wiped the DNS draft).
+  const syncedRef = useRef(false);
   useEffect(() => {
-    setLocalSettings(settings);
-  }, [settings]);
+    if (syncedRef.current) return;
+    if (!loading) {
+      setLocalSettings(settings);
+      syncedRef.current = true;
+    }
+  }, [loading, settings]);
 
-  // DNS validation function
+  useEffect(() => () => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    if (successTimerRef.current) clearTimeout(successTimerRef.current);
+  }, []);
+
+  // DNS validation — mirrors the backend (which only accepts IPv4/IPv6
+  // literals): empties are rejected, IPv6 (incl. bracketed) is allowed.
   const validateDNS = (ip: string): boolean => {
-    if (!ip) return true; // Empty is allowed (will use default)
-    const dnsRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-    return dnsRegex.test(ip);
+    const stripped = ip.trim().replace(/^\[|\]$/g, "");
+    if (!stripped) return false;
+    return /^[0-9a-fA-F:.]+$/.test(stripped) && (() => {
+      try {
+        return stripped.includes(":") ? true : stripped.split(".").length === 4;
+      } catch {
+        return false;
+      }
+    })();
   };
 
   // Handle DNS input change with validation
@@ -30,10 +52,10 @@ export default function Settings() {
     setLocalSettings(prev => ({ ...prev, [field]: value }));
     setSaveSuccess(false);
 
-    if (value && !validateDNS(value)) {
+    if (!validateDNS(value)) {
       setValidationErrors(prev => ({
         ...prev,
-        [field]: '请输入有效的 IP 地址格式 (如 8.8.8.8)'
+        [field]: '请输入有效的 IP 地址 (IPv4 或 IPv6，如 8.8.8.8 / 2400:cb00::1)'
       }));
     } else {
       setValidationErrors(prev => ({ ...prev, [field]: '' }));
@@ -95,7 +117,7 @@ export default function Settings() {
       errors.primary_dns = '请输入有效的主 DNS 地址';
     }
 
-    if (localSettings.secondary_dns && !validateDNS(localSettings.secondary_dns)) {
+    if (!validateDNS(localSettings.secondary_dns)) {
       errors.secondary_dns = '请输入有效的备用 DNS 地址';
     }
 
@@ -110,11 +132,13 @@ export default function Settings() {
     setValidationErrors(errors);
 
     if (Object.keys(errors).length === 0) {
-      setSettings(localSettings);
-      const success = await saveSettings();
+      // Persist the draft object directly: the store only adopts it AFTER a
+      // successful backend write, so a failed save truly rolls back.
+      const success = await saveSettings(localSettings);
       if (success) {
         setSaveSuccess(true);
-        setTimeout(() => setSaveSuccess(false), 3000);
+        if (successTimerRef.current) clearTimeout(successTimerRef.current);
+        successTimerRef.current = setTimeout(() => setSaveSuccess(false), 3000);
       }
     }
   };
@@ -122,10 +146,26 @@ export default function Settings() {
   // Handle reset
   const handleReset = async () => {
     if (confirm('确定要恢复默认设置吗？')) {
-      await useSettingsStore.getState().resetSettings();
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
+      const defaults = await useSettingsStore.getState().resetSettings();
+      if (defaults) {
+        setLocalSettings(defaults);
+        setValidationErrors({});
+        setSaveSuccess(true);
+        if (successTimerRef.current) clearTimeout(successTimerRef.current);
+        successTimerRef.current = setTimeout(() => setSaveSuccess(false), 3000);
+      }
     }
+  };
+
+  const persistToggle = async (partial: Partial<SettingsType>) => {
+    // Immediate-effect switches also persist their (merged) value now, so a
+    // toggle that is never followed by "保存设置" is not silently reverted on
+    // next launch by the stale settings.json.
+    const merged = { ...settings, ...partial };
+    const ok = await saveSettings(merged);
+    setSaveSuccess(ok);
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => setSaveSuccess(false), 3000);
   };
 
   return (
@@ -163,9 +203,10 @@ export default function Settings() {
               onChange={async (e) => {
                 const enabled = e.target.checked;
                 setLocalSettings(prev => ({ ...prev, auto_start: enabled }));
-                setSettings({ auto_start: enabled });
                 setSaveSuccess(false);
-                // Apply launch-at-login immediately via the autostart plugin.
+                // Apply launch-at-login immediately AND persist it, so an
+                // unsaved toggle is not silently reverted on the next start.
+                await persistToggle({ auto_start: enabled });
                 try {
                   await invoke("set_autostart", { enabled });
                 } catch (err) {
