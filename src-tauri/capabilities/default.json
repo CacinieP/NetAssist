@@ -1,8 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main NetAssist window. Grants the IPC permissions required by the frontend: core window/event access, the dialog save picker (file exports), and fs write access for the user-selected export path.",
-  "windows": ["main"],
+  "description": "Default capability for the main NetAssist window. Grants the IPC permissions required by the frontend: core window/event access, the dialog save picker (file exports), and fs write access limited to user-owned directories ($HOME/$DOWNLOAD/$DOCUMENT/$DESKTOP).",
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -10,11 +12,37 @@
     "dialog:allow-save",
     {
       "identifier": "fs:allow-write-file",
-      "allow": [{ "path": "**" }]
+      "allow": [
+        {
+          "path": "$HOME/**"
+        },
+        {
+          "path": "$DOWNLOAD/**"
+        },
+        {
+          "path": "$DOCUMENT/**"
+        },
+        {
+          "path": "$DESKTOP/**"
+        }
+      ]
     },
     {
       "identifier": "fs:allow-write-text-file",
-      "allow": [{ "path": "**" }]
+      "allow": [
+        {
+          "path": "$HOME/**"
+        },
+        {
+          "path": "$DOWNLOAD/**"
+        },
+        {
+          "path": "$DOCUMENT/**"
+        },
+        {
+          "path": "$DESKTOP/**"
+        }
+      ]
     },
     "shell:allow-open",
     "autostart:default",

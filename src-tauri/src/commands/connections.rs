@@ -147,22 +147,33 @@ pub async fn kill_connection(
 
     #[cfg(target_os = "linux")]
     {
-        // Linux critical PIDs - kernel threads and essential system processes
-        // Range check for kernel threads (2-500)
-        if pid == 1 || (2..=500).contains(&pid) {
+        // PID 1 (init/systemd) is always protected. Kernel threads occupy a
+        // range that varies by boot — blocking the whole 2-500 range also
+        // blocks legitimate user processes in containers/small systems, so
+        // rely on the process-name check below instead of a numeric window.
+        if pid == 1 {
             return Err(format!("Cannot kill system-critical process (PID {})", pid));
         }
 
-        // Also check process name to protect system processes
+        // Check process name to protect system processes
         if let Some(conn) = connections.iter().find(|c| c.pid == Some(pid)) {
             if let Some(ref name) = conn.process_name {
+                let name_lower = name.to_lowercase();
+                // Prefix entries (e.g. "rcu_", "systemd-", "migration/") must
+                // match by prefix; plain entries match exactly or as "[name]"
+                // kernel-thread notation.
                 let protected_processes = [
                     "systemd",
                     "init",
                     "kthreadd",
                     "ksoftirqd",
-                    "migration",
+                    "migration/",
+                    "rcu",
                     "rcu_",
+                    "rcuog",
+                    "rcuos",
+                    "rcuob",
+                    "rcu_preempt",
                     "chronyd",
                     "NetworkManager",
                     "sshd",
@@ -171,10 +182,11 @@ pub async fn kill_connection(
                     "udisks2",
                     "systemd-",
                 ];
-                let name_lower = name.to_lowercase();
                 for protected in protected_processes {
-                    if name_lower == protected.to_lowercase()
-                        || name_lower.starts_with(&format!("{}[", protected.to_lowercase()))
+                    let p = protected.to_lowercase();
+                    if name_lower == p
+                        || name_lower.starts_with(&p)
+                        || name_lower.starts_with(&format!("[{}", p))
                     {
                         return Err(format!("Cannot kill protected system process: {}", name));
                     }
@@ -185,9 +197,10 @@ pub async fn kill_connection(
 
     #[cfg(target_os = "macos")]
     {
-        // macOS critical PIDs
-        // Range check for kernel and early system processes (2-200)
-        if pid == 1 || (2..=200).contains(&pid) {
+        // PID 1 is launchd — always protected. A numeric window (2-200)
+        // catches early boot daemons, but macOS assigns small PIDs to regular
+        // user processes too, so keep the window tight and rely on names.
+        if pid == 1 {
             return Err(format!("Cannot kill system-critical process (PID {})", pid));
         }
 

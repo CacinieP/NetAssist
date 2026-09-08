@@ -1,6 +1,4 @@
-// Network information module
+// Network-related helper modules (only GeoIP is currently used; the former
+// dual_stack / interface / ip_info stubs were dead code — see #16/#21).
 
-pub mod dual_stack;
 pub mod geoip;
-pub mod interface;
-pub mod ip_info;

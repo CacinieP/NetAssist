@@ -2,7 +2,12 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Application settings
+///
+/// `#[serde(default)]` on the container means a settings.json written by an
+/// older version (missing a field added later) still deserializes instead of
+/// failing and being silently reset to defaults.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(default)]
 pub struct Settings {
     pub auto_start: bool,
     pub minimize_to_tray: bool,
@@ -190,7 +195,11 @@ fn save_settings_to_file(settings: &Settings) -> anyhow::Result<()> {
 
     let settings_path = get_settings_path()?;
     let content = serde_json::to_string_pretty(settings)?;
-    fs::write(&settings_path, content)?;
+    // Atomic write: write to a temp file then rename, so an interrupted
+    // save can never leave a truncated settings.json behind.
+    let tmp_path = settings_path.with_extension("json.tmp");
+    fs::write(&tmp_path, content)?;
+    fs::rename(&tmp_path, &settings_path)?;
     Ok(())
 }
 
