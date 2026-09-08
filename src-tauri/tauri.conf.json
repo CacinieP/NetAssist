@@ -38,7 +38,8 @@
       "entitlements": null,
       "exceptionDomain": "",
       "frameworks": [],
-      "hardenedRuntime": true
+      "hardenedRuntime": true,
+      "signingIdentity": "Developer ID Application: Yichun Deng (5CFSU44B7Q)"
     }
   },
   "plugins": {
