@@ -46,11 +46,9 @@ impl TrafficMonitor {
         // Compute rate from the previous reading; no previous reading yet → 0.
         let mut download_bps = 0.0f64;
         let mut upload_bps = 0.0f64;
-        if let (Some(last_rx), Some(last_tx), Some(last_update)) = (
-            state.last_rx_bytes,
-            state.last_tx_bytes,
-            state.last_update,
-        ) {
+        if let (Some(last_rx), Some(last_tx), Some(last_update)) =
+            (state.last_rx_bytes, state.last_tx_bytes, state.last_update)
+        {
             let elapsed = now.duration_since(last_update).as_secs_f64();
             if elapsed > 0.001 {
                 download_bps = (current_rx.saturating_sub(last_rx)) as f64 / elapsed;

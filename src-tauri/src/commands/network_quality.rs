@@ -77,29 +77,29 @@ pub async fn test_http_connectivity(url: Option<String>) -> Result<HttpConnectiv
     // IPv6 link-local and unspecified addresses.
     let blocked = {
         let parsed = reqwest::Url::parse(&url).ok();
-        parsed.and_then(|u| u.host_str().map(str::to_string)).map(|host| {
-            // Literal IP forms.
-            let literal_blocked = host
-                .parse::<std::net::IpAddr>()
-                .ok()
-                .map(|ip| is_restricted_ip(&ip))
-                .unwrap_or(false);
-            if literal_blocked {
-                return true;
-            }
-            // Hostname: resolve and reject any restricted address.
-            host.parse::<std::net::IpAddr>().is_err()
-                && (std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), 80)))
-                    .map(|mut it| {
-                        it.any(|sa| {
-                            let ip = sa.ip();
-                            is_restricted_ip(&ip)
-                                || ip.is_unspecified()
-                                || ip.is_multicast()
+        parsed
+            .and_then(|u| u.host_str().map(str::to_string))
+            .map(|host| {
+                // Literal IP forms.
+                let literal_blocked = host
+                    .parse::<std::net::IpAddr>()
+                    .ok()
+                    .map(|ip| is_restricted_ip(&ip))
+                    .unwrap_or(false);
+                if literal_blocked {
+                    return true;
+                }
+                // Hostname: resolve and reject any restricted address.
+                host.parse::<std::net::IpAddr>().is_err()
+                    && (std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), 80)))
+                        .map(|mut it| {
+                            it.any(|sa| {
+                                let ip = sa.ip();
+                                is_restricted_ip(&ip) || ip.is_unspecified() || ip.is_multicast()
+                            })
                         })
-                    })
-                    .unwrap_or(false)
-        })
+                        .unwrap_or(false)
+            })
     };
 
     if blocked.unwrap_or(false) {
@@ -108,9 +108,7 @@ pub async fn test_http_connectivity(url: Option<String>) -> Result<HttpConnectiv
             success: false,
             latency_ms: 0.0,
             status_code: None,
-            error: Some(
-                "Cannot test connectivity to private/local/loopback addresses".to_string(),
-            ),
+            error: Some("Cannot test connectivity to private/local/loopback addresses".to_string()),
         });
     }
 
@@ -342,8 +340,7 @@ async fn ping_linux(target: &str, ipv6: bool, count: u32) -> Result<PingResult, 
         }
         packets_received = packets_received.saturating_add(1);
 
-        if let Some(latency) =
-            parse_ping_latency(line, "time=")
+        if let Some(latency) = parse_ping_latency(line, "time=")
             .or_else(|| parse_ping_latency(line, "时间="))
             .or_else(|| parse_ping_latency(line, "time<"))
             .or_else(|| parse_ping_latency(line, "时间<"))
@@ -388,8 +385,7 @@ async fn ping_macos(target: &str, ipv6: bool, count: u32) -> Result<PingResult, 
             continue;
         }
         packets_received = packets_received.saturating_add(1);
-        if let Some(latency) =
-            parse_ping_latency(line, "time=")
+        if let Some(latency) = parse_ping_latency(line, "time=")
             .or_else(|| parse_ping_latency(line, "时间="))
             .or_else(|| parse_ping_latency(line, "time<"))
             .or_else(|| parse_ping_latency(line, "时间<"))
@@ -704,8 +700,7 @@ mod tests {
 
     #[test]
     fn traceroute_hop_line() {
-        let (hop, ip, lat, ok) =
-            parse_traceroute_hop_line("1  192.168.1.1  1.234 ms").unwrap();
+        let (hop, ip, lat, ok) = parse_traceroute_hop_line("1  192.168.1.1  1.234 ms").unwrap();
         assert_eq!(hop, 1);
         assert_eq!(ip.as_deref(), Some("192.168.1.1"));
         assert!(ok);

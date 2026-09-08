@@ -153,10 +153,7 @@ pub fn get_default_interface() -> anyhow::Result<String> {
             let mut cur = head;
             while !cur.is_null() {
                 let a = unsafe { &*cur };
-                if a.OperStatus.0 == 1
-                    && a.IfType != 24
-                    && !a.FirstUnicastAddress.is_null()
-                {
+                if a.OperStatus.0 == 1 && a.IfType != 24 && !a.FirstUnicastAddress.is_null() {
                     chosen = Some(unsafe { wide_to_string(a.FriendlyName.0) });
                     return;
                 }
@@ -279,9 +276,7 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
                     pids.insert(row.dwOwningPid);
                     connections.push(ConnectionRawInfo {
                         protocol: "TCP".to_string(),
-                        local_addr: IpAddr::V4(std::net::Ipv4Addr::new(
-                            lb[0], lb[1], lb[2], lb[3],
-                        )),
+                        local_addr: IpAddr::V4(std::net::Ipv4Addr::new(lb[0], lb[1], lb[2], lb[3])),
                         local_port: mib_port(row.dwLocalPort),
                         remote_addr: IpAddr::V4(std::net::Ipv4Addr::new(
                             rb[0], rb[1], rb[2], rb[3],
@@ -324,9 +319,7 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
                     pids.insert(row.dwOwningPid);
                     connections.push(ConnectionRawInfo {
                         protocol: "UDP".to_string(),
-                        local_addr: IpAddr::V4(std::net::Ipv4Addr::new(
-                            lb[0], lb[1], lb[2], lb[3],
-                        )),
+                        local_addr: IpAddr::V4(std::net::Ipv4Addr::new(lb[0], lb[1], lb[2], lb[3])),
                         local_port: mib_port(row.dwLocalPort),
                         remote_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                         remote_port: 0,
@@ -496,9 +489,7 @@ pub fn reset_network_stack() -> anyhow::Result<()> {
         (vec!["winsock", "reset"], "netsh winsock reset"),
         (vec!["int", "ip", "reset"], "netsh int ip reset"),
     ] {
-        let output = std::process::Command::new("netsh")
-            .args(&args)
-            .output()?;
+        let output = std::process::Command::new("netsh").args(&args).output()?;
         if !output.status.success() {
             return Err(anyhow::anyhow!(
                 "{} failed (needs administrator): {}",
@@ -545,8 +536,7 @@ pub fn get_dns_servers() -> anyhow::Result<Vec<String>> {
                 KEY_READ,
                 &mut hkey,
             )
-            .0
-                == 0
+            .0 == 0
             {
                 for value_name in ["NameServer\0", "DhcpNameServer\0"] {
                     let mut buf = [0u8; 2048];
@@ -624,23 +614,23 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
     let mut interface_name: Option<String> = None;
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("Admin State")
-            || trimmed.starts_with('-')
-        {
+        if trimmed.is_empty() || trimmed.starts_with("Admin State") || trimmed.starts_with('-') {
             continue;
         }
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
         if parts.len() >= 4
-            && parts.get(1).map(|s| s.eq_ignore_ascii_case("Connected")).unwrap_or(false)
+            && parts
+                .get(1)
+                .map(|s| s.eq_ignore_ascii_case("Connected"))
+                .unwrap_or(false)
         {
             interface_name = Some(parts[3..].join(" "));
             break;
         }
     }
 
-    let interface_name = interface_name
-        .ok_or_else(|| anyhow::anyhow!("no connected network interface found"))?;
+    let interface_name =
+        interface_name.ok_or_else(|| anyhow::anyhow!("no connected network interface found"))?;
     validate_interface_name(&interface_name)?;
 
     let name_arg = format!("name={}", interface_name);

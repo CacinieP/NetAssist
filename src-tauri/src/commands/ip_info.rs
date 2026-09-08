@@ -197,10 +197,7 @@ fn get_local_addresses() -> (Vec<String>, Vec<String>) {
             for ip in intf.ipv6_addresses {
                 match ip {
                     IpAddr::V6(v6) => {
-                        if v6.is_unspecified()
-                            || v6.is_loopback()
-                            || v6.is_unicast_link_local()
-                        {
+                        if v6.is_unspecified() || v6.is_loopback() || v6.is_unicast_link_local() {
                             continue;
                         }
                         let s = ip.to_string();
@@ -221,8 +218,7 @@ fn get_local_addresses() -> (Vec<String>, Vec<String>) {
             if socket.connect("8.8.8.8:53").is_ok() {
                 if let Ok(addr) = socket.local_addr() {
                     if let IpAddr::V4(ipv4) = addr.ip() {
-                        if !ipv4.is_unspecified() && !ipv4.is_loopback() && !ipv4.is_link_local()
-                        {
+                        if !ipv4.is_unspecified() && !ipv4.is_loopback() && !ipv4.is_link_local() {
                             ipv4_addrs.push(ipv4.to_string());
                         }
                     }

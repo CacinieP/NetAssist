@@ -657,15 +657,8 @@ pub fn reset_adapter() -> anyhow::Result<()> {
     // The interface name is interpolated into an AppleScript string that runs
     // a root shell; reject anything that is not a plain BSD interface name so
     // it can never be used as an injection vector.
-    if iface.is_empty()
-        || !iface
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return Err(anyhow::anyhow!(
-            "拒绝重置适配器：非法接口名 {:?}",
-            iface
-        ));
+    if iface.is_empty() || !iface.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(anyhow::anyhow!("拒绝重置适配器：非法接口名 {:?}", iface));
     }
 
     // osascript: run a privileged shell that bounces the interface.
@@ -721,8 +714,7 @@ pub fn check_permissions() -> anyhow::Result<PermissionStatus> {
     // USER column against the current user to detect FDA.
     if let Ok(current_user) = super::common::exec_command("id", &["-un"]) {
         let current_user = current_user.trim().to_string();
-        let lsof = super::common::exec_command("lsof", &["-i", "-n", "-P"])
-            .unwrap_or_default();
+        let lsof = super::common::exec_command("lsof", &["-i", "-n", "-P"]).unwrap_or_default();
         let sees_other_users = lsof.lines().skip(1).any(|line| {
             let parts: Vec<&str> = line.split_whitespace().collect();
             parts.len() >= 3 && parts[2] != current_user && !parts[2].is_empty()
@@ -811,21 +803,19 @@ pub fn get_interface_total_bytes() -> (u64, u64) {
         let mut lines = content.lines();
 
         // Locate the Ibytes/Obytes column indexes from the header.
-        let (rx_idx, tx_idx, header_len) =
-            match lines.next().map(|h| h.split_whitespace().collect::<Vec<_>>()) {
-                Some(header) => {
-                    let find = |name: &str| {
-                        header
-                            .iter()
-                            .position(|c| c.eq_ignore_ascii_case(name))
-                    };
-                    match (find("Ibytes"), find("Obytes")) {
-                        (Some(rx), Some(tx)) => (rx, tx, header.len()),
-                        _ => return (0, 0),
-                    }
+        let (rx_idx, tx_idx, header_len) = match lines
+            .next()
+            .map(|h| h.split_whitespace().collect::<Vec<_>>())
+        {
+            Some(header) => {
+                let find = |name: &str| header.iter().position(|c| c.eq_ignore_ascii_case(name));
+                match (find("Ibytes"), find("Obytes")) {
+                    (Some(rx), Some(tx)) => (rx, tx, header.len()),
+                    _ => return (0, 0),
                 }
-                None => return (0, 0),
-            };
+            }
+            None => return (0, 0),
+        };
 
         for line in lines {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -834,10 +824,7 @@ pub fn get_interface_total_bytes() -> (u64, u64) {
             if parts.len() < header_len || parts.len() <= tx_idx.max(rx_idx) {
                 continue;
             }
-            if let (Ok(rx), Ok(tx)) = (
-                parts[rx_idx].parse::<u64>(),
-                parts[tx_idx].parse::<u64>(),
-            ) {
+            if let (Ok(rx), Ok(tx)) = (parts[rx_idx].parse::<u64>(), parts[tx_idx].parse::<u64>()) {
                 return (rx, tx);
             }
         }
@@ -873,7 +860,17 @@ pub fn get_process_traffic_stats(
     // -L 2 : emit exactly 2 samples
     // -s 1 : 1 second between samples -> sample #2 is a 1s delta
     let output = std::process::Command::new("nettop")
-        .args(["-P", "-d", "-j", "bytes_in,bytes_out", "-x", "-L", "2", "-s", "1"])
+        .args([
+            "-P",
+            "-d",
+            "-j",
+            "bytes_in,bytes_out",
+            "-x",
+            "-L",
+            "2",
+            "-s",
+            "1",
+        ])
         .output();
 
     let content = match output {
@@ -1119,9 +1116,7 @@ pub fn run_network_diagnostics() -> anyhow::Result<MacOSDiagnostics> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
             let mut wifi_info = WiFiInfo::default();
-            if let Some(net) = json
-                .pointer("/SPAirPortDataType/spairport_network_infos/0")
-            {
+            if let Some(net) = json.pointer("/SPAirPortDataType/spairport_network_infos/0") {
                 if let Some(ssid) = net.get("spairport_network_info_SSID") {
                     if let Some(ssid) = ssid.as_str() {
                         wifi_info.ssid = ssid.to_string();
@@ -1236,8 +1231,16 @@ mod tests {
         let lsof_local = parse_lsof_endpoint("127.0.0.1:7890");
         let lsof_remote = parse_lsof_endpoint("127.0.0.1:61778");
         assert_eq!(
-            format!("{}->{}", net_local.key(IpFamily::V4), net_remote.key(IpFamily::V4)),
-            format!("{}->{}", lsof_local.key(IpFamily::V4), lsof_remote.key(IpFamily::V4))
+            format!(
+                "{}->{}",
+                net_local.key(IpFamily::V4),
+                net_remote.key(IpFamily::V4)
+            ),
+            format!(
+                "{}->{}",
+                lsof_local.key(IpFamily::V4),
+                lsof_remote.key(IpFamily::V4)
+            )
         );
     }
 
@@ -1249,8 +1252,16 @@ mod tests {
         let lsof_local = parse_lsof_endpoint("*:49152");
         let lsof_remote = parse_lsof_endpoint("");
         assert_eq!(
-            format!("{}->{}", net_local.key(IpFamily::V6), net_remote.key(IpFamily::V6)),
-            format!("{}->{}", lsof_local.key(IpFamily::V6), lsof_remote.key(IpFamily::V6))
+            format!(
+                "{}->{}",
+                net_local.key(IpFamily::V6),
+                net_remote.key(IpFamily::V6)
+            ),
+            format!(
+                "{}->{}",
+                lsof_local.key(IpFamily::V6),
+                lsof_remote.key(IpFamily::V6)
+            )
         );
     }
 
@@ -1285,7 +1296,10 @@ mod live_tests {
         // With >0 established connections on this machine, at least one pid
         // should be resolvable (lsof join works).
         let tcp = conns.iter().filter(|c| c.protocol == "TCP").count();
-        assert!(tcp > 0, "expected at least one TCP connection on a live Mac");
+        assert!(
+            tcp > 0,
+            "expected at least one TCP connection on a live Mac"
+        );
     }
 
     #[test]

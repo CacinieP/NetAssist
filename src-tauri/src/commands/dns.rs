@@ -101,7 +101,11 @@ async fn perform_dns_query(server: SocketAddr, domain: &str) -> Result<f64, Stri
     // Bind a UDP socket of the SAME family as the server (an IPv4-only socket
     // cannot connect() to an IPv6 DNS server, which previously made every
     // IPv6 DNS test fail).
-    let bind_addr = if server.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let bind_addr = if server.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
     let socket = UdpSocket::bind(bind_addr)
         .await
         .map_err(|e| format!("Failed to bind socket: {}", e))?;

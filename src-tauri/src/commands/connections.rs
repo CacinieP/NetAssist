@@ -33,10 +33,7 @@ pub async fn get_active_connections() -> Result<Vec<ConnectionInfo>, String> {
         });
     }
 
-    tracing::info!(
-        "Connection list assembled: {} entries",
-        connections.len()
-    );
+    tracing::info!("Connection list assembled: {} entries", connections.len());
 
     Ok(connections)
 }

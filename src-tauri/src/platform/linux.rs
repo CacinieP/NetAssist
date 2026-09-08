@@ -69,9 +69,8 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
                 for line in addr_output.lines() {
                     // Interface header: "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 ..."
                     if line.contains("mtu") && line.contains(':') {
-                        if let Some(flags) = line
-                            .split_once('<')
-                            .and_then(|(_, r)| r.split_once('>'))
+                        if let Some(flags) =
+                            line.split_once('<').and_then(|(_, r)| r.split_once('>'))
                         {
                             is_up = flags.0.split(',').any(|f| f == "UP");
                         }
@@ -219,7 +218,9 @@ pub fn release_renew_ip() -> anyhow::Result<()> {
             return Ok(());
         }
     }
-    Err(anyhow::anyhow!("无法续租 IP 地址（需要 NetworkManager 或 dhclient）"))
+    Err(anyhow::anyhow!(
+        "无法续租 IP 地址（需要 NetworkManager 或 dhclient）"
+    ))
 }
 
 /// Reset network stack on Linux.

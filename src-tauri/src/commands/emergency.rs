@@ -54,8 +54,8 @@ fn apply_quick_fix_blocking(fix_type: &str) -> Result<bool, String> {
         }
         "toggle_ipv6" => {
             tracing::info!("Executing fix: toggle_ipv6");
-            let desc = crate::platform::toggle_ipv6()
-                .map_err(|e| format!("切换 IPv6 失败: {}", e))?;
+            let desc =
+                crate::platform::toggle_ipv6().map_err(|e| format!("切换 IPv6 失败: {}", e))?;
             tracing::info!("toggle_ipv6 result: {}", desc);
             Ok(true)
         }

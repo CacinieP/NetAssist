@@ -302,7 +302,8 @@ mod tests {
     #[test]
     fn proc_tcp6_address() {
         // ::1 → 32 chars with the last 32-bit word "01000000" (little-endian)
-        let (ip, port) = parse_proc_hex_addr("00000000000000000000000001000000:01BB", true).unwrap();
+        let (ip, port) =
+            parse_proc_hex_addr("00000000000000000000000001000000:01BB", true).unwrap();
         assert_eq!(ip, IpAddr::V6(Ipv6Addr::LOCALHOST));
         assert_eq!(port, 443);
     }

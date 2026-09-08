@@ -148,8 +148,7 @@ impl TrafficHistoryStorage {
         let mut total_upload = 0u64;
 
         // Load data for each day in the period (local calendar days)
-        let start_date = local_from_epoch(start_time)
-            .unwrap_or_else(Local::now);
+        let start_date = local_from_epoch(start_time).unwrap_or_else(Local::now);
         let end_date = local_from_epoch(end_time).unwrap_or_else(Local::now);
         let mut current_date = start_date;
 
@@ -179,8 +178,7 @@ impl TrafficHistoryStorage {
                     if end_eff <= point.timestamp {
                         continue;
                     }
-                    let interval_seconds = ((end_eff - point.timestamp) as f64 / 1000.0)
-                        .min(300.0);
+                    let interval_seconds = ((end_eff - point.timestamp) as f64 / 1000.0).min(300.0);
                     if interval_seconds <= 0.0 {
                         continue;
                     }
@@ -211,8 +209,7 @@ impl TrafficHistoryStorage {
 
         let mut all_data = Vec::new();
 
-        let start_date =
-            local_from_epoch(start_time.timestamp()).unwrap_or_else(Local::now);
+        let start_date = local_from_epoch(start_time.timestamp()).unwrap_or_else(Local::now);
         let mut current_date = start_date;
 
         while current_date <= now {
@@ -455,8 +452,7 @@ impl TrafficAlertManager {
         let content = serde_json::to_string_pretty(alerts)
             .map_err(|e| format!("Failed to serialize alerts: {}", e))?;
         let tmp = self.alerts_file.with_extension("tmp");
-        fs::write(&tmp, &content)
-            .map_err(|e| format!("Failed to write alerts file: {}", e))?;
+        fs::write(&tmp, &content).map_err(|e| format!("Failed to write alerts file: {}", e))?;
         fs::rename(&tmp, &self.alerts_file)
             .map_err(|e| format!("Failed to finalize alerts file: {}", e))?;
         Ok(())
@@ -557,12 +553,7 @@ impl TrafficAlertManager {
             let cumulative = match storage.get_cumulative_traffic_via_counters(&alert.period) {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::warn!(
-                        "alert {} ({}) skipped: {}",
-                        alert.name,
-                        alert.period,
-                        e
-                    );
+                    tracing::warn!("alert {} ({}) skipped: {}", alert.name, alert.period, e);
                     continue;
                 }
             };
@@ -885,9 +876,7 @@ mod tests {
             .unwrap();
 
         // Counters reset to a small value (interface flap / reboot).
-        let r3 = storage
-            .cumulative_from_counters("day", 100, 50)
-            .unwrap();
+        let r3 = storage.cumulative_from_counters("day", 100, 50).unwrap();
         assert_eq!(
             r3.total_download_bytes, 100,
             "accrued survives a counter reset"
@@ -895,9 +884,7 @@ mod tests {
         assert_eq!(r3.total_upload_bytes, 0);
 
         // New traffic after reset accrues from the new anchor.
-        let r4 = storage
-            .cumulative_from_counters("day", 200, 150)
-            .unwrap();
+        let r4 = storage.cumulative_from_counters("day", 200, 150).unwrap();
         assert_eq!(r4.total_download_bytes, 200, "100 old + 100 new");
         assert_eq!(r4.total_upload_bytes, 100);
     }
