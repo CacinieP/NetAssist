@@ -468,7 +468,7 @@ pub async fn traceroute(target: String, max_hops: Option<u32>) -> Result<Tracero
 /// Shared hop-line parser for `traceroute -n` output (Linux/macOS format:
 /// `<hop> <ip-or-*> <latencies...>`). Returns (hop_number, ip, latency, success).
 fn parse_traceroute_hop_line(line: &str) -> Option<(u32, Option<String>, f64, bool)> {
-    let parts: Vec<&str> = line.trim().split_whitespace().collect();
+    let parts: Vec<&str> = line.split_whitespace().collect();
     let hop_num = parts.first()?.parse::<u32>().ok()?;
     if parts.len() < 2 {
         return None;

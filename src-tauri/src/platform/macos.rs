@@ -382,7 +382,7 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
             continue;
         }
         let remote = match parts.get(4) {
-            Some(tok) => parse_netstat_endpoint(tok).unwrap_or_else(|| EndPoint::wildcard()),
+            Some(tok) => parse_netstat_endpoint(tok).unwrap_or_else(EndPoint::wildcard),
             None => EndPoint::wildcard(),
         };
 

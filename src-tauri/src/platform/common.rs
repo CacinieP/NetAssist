@@ -102,7 +102,7 @@ pub fn parse_ss_connections(output: &str) -> Vec<super::ConnectionRawInfo> {
                 let suffix = &line[idx..];
                 if let Some(pid_str) = suffix.split("pid=").nth(1) {
                     let pid_num: u32 = pid_str
-                        .split(|c| c == ',' || c == ')')
+                        .split([',', ')'])
                         .next()
                         .unwrap_or("0")
                         .trim()
