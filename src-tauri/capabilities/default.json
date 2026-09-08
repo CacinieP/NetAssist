@@ -6,6 +6,8 @@
     "main"
   ],
   "permissions": [
+    "core:app:default",
+    "core:app:allow-version",
     "core:default",
     "core:window:allow-start-dragging",
     "dialog:default",
