@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d4ed8"/>
+      <stop offset="0.55" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#0e7490"/>
+    </linearGradient>
+    <radialGradient id="core" cx="0.35" cy="0.3" r="1">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="0.6" stop-color="#06b6d4"/>
+      <stop offset="1" stop-color="#155e75"/>
+    </radialGradient>
+    <radialGradient id="node" cx="0.4" cy="0.35" r="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#c7d2fe"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="url(#bg)"/>
+
+  <!-- Faint scan grid dots (network fabric) -->
+  <g fill="#ffffff" opacity="0.10">
+    <circle cx="150" cy="170" r="16"/>
+    <circle cx="300" cy="140" r="12"/>
+    <circle cx="860" cy="150" r="16"/>
+    <circle cx="930" cy="320" r="12"/>
+    <circle cx="900" cy="820" r="16"/>
+    <circle cx="760" cy="930" r="12"/>
+    <circle cx="150" cy="900" r="16"/>
+    <circle cx="70" cy="680" r="12"/>
+  </g>
+
+  <!-- Links from edge nodes to the hub -->
+  <g stroke="#ffffff" stroke-opacity="0.38" stroke-width="26" stroke-linecap="round">
+    <line x1="260" y1="300" x2="470" y2="470"/>
+    <line x1="764" y1="292" x2="554" y2="470"/>
+    <line x1="760" y1="724" x2="554" y2="554"/>
+    <line x1="262" y1="722" x2="470" y2="554"/>
+  </g>
+
+  <!-- Edge nodes -->
+  <g>
+    <circle cx="236" cy="276" r="108" fill="url(#node)"/>
+    <circle cx="236" cy="276" r="108" fill="none" stroke="#ffffff" stroke-opacity="0.45" stroke-width="10"/>
+    <circle cx="236" cy="276" r="40" fill="#0e7490"/>
+
+    <circle cx="788" cy="268" r="108" fill="url(#node)"/>
+    <circle cx="788" cy="268" r="108" fill="none" stroke="#ffffff" stroke-opacity="0.45" stroke-width="10"/>
+    <circle cx="788" cy="268" r="40" fill="#0e7490"/>
+
+    <circle cx="788" cy="756" r="108" fill="url(#node)"/>
+    <circle cx="788" cy="756" r="108" fill="none" stroke="#ffffff" stroke-opacity="0.45" stroke-width="10"/>
+    <circle cx="788" cy="756" r="40" fill="#0e7490"/>
+
+    <circle cx="236" cy="748" r="108" fill="url(#node)"/>
+    <circle cx="236" cy="748" r="108" fill="none" stroke="#ffffff" stroke-opacity="0.45" stroke-width="10"/>
+    <circle cx="236" cy="748" r="40" fill="#0e7490"/>
+  </g>
+
+  <!-- Central hub -->
+  <circle cx="512" cy="512" r="176" fill="#ffffff" opacity="0.22"/>
+  <circle cx="512" cy="512" r="146" fill="url(#core)"/>
+  <circle cx="512" cy="512" r="146" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="18"/>
+
+  <!-- Pulse: expanding echo ring -->
+  <circle cx="512" cy="512" r="220" fill="none" stroke="#67e8f9" stroke-opacity="0.35" stroke-width="12"/>
+
+  <!-- Heartbeat -->
+  <g fill="none" stroke="#ffffff" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="392,560 448,560 480,432 536,656 568,512 632,512"/>
+  </g>
+</svg>
