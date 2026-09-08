@@ -107,6 +107,34 @@ jobs:
       - name: Build Tauri app
         run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
+      # Notarize + staple the macOS DMG with Apple. Runs only on the macOS
+      # runners and only when the three secrets exist (shell guard; `if` can't
+      # read step env). tauri's own notarization hook is disabled here (no
+      # APPLE_* env on the build step) so we get one clean submission.
+      - name: Notarize and staple DMG
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID secrets missing — skipping notarization."
+            exit 0
+          fi
+          shopt -s nullglob
+          for dmg in src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
+            echo "Notarizing ${dmg} ..."
+            xcrun notarytool submit "$dmg" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait
+            echo "Stapling ${dmg} ..."
+            xcrun stapler staple "$dmg"
+          done
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
