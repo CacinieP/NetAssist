@@ -8,278 +8,196 @@ use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::NetworkManagement::IpHelper::*;
 use windows::Win32::Networking::WinSock::*;
 use windows::Win32::System::Diagnostics::ToolHelp::*;
-use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExA, HKEY_LOCAL_MACHINE, KEY_READ};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegOpenKeyExA, RegQueryValueExA, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
+};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_INFORMATION,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-/// Get default gateway on Windows
-pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
-    use windows::Win32::NetworkManagement::IpHelper::GET_ADAPTERS_ADDRESSES_FLAGS;
+/// Flags required for FirstGatewayAddress/FirstDnsServerAddress to be filled.
+const GAA_FLAGS: GET_ADAPTERS_ADDRESSES_FLAGS = GAA_FLAG_INCLUDE_GATEWAYS;
 
+/// Read the adapter linked list; runs `f` with the head pointer.
+///
+/// The buffer is allocated as `Vec<u64>` so the pointer is 8-byte aligned,
+/// satisfying IP_ADAPTER_ADDRESSES_LH's alignment (avoids the Vec<u8>
+/// alignment UB). Handles ERROR_BUFFER_OVERFLOW on both calls by retrying.
+fn with_adapters<R>(
+    family: u32,
+    mut f: impl FnMut(*mut IP_ADAPTER_ADDRESSES_LH) -> R,
+) -> Option<R> {
     unsafe {
-        let mut adapter_addresses: *mut IP_ADAPTER_ADDRESSES_LH = std::ptr::null_mut();
-        let mut size = 0;
-
-        // First call to get the buffer size needed
-        let result = GetAdaptersAddresses(
-            AF_INET.0 as u32,
-            GET_ADAPTERS_ADDRESSES_FLAGS(0),
-            None,
-            None,
-            &mut size,
-        );
-
-        if result != 111 {
-            // ERROR_BUFFER_OVERFLOW
-            return Ok(None);
-        }
-
-        // Allocate buffer using Vec
-        let mut buffer = vec![0u8; size as usize];
-        adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
-
-        // Second call to get the actual data
-        let result = GetAdaptersAddresses(
-            AF_INET.0 as u32,
-            GET_ADAPTERS_ADDRESSES_FLAGS(0),
-            None,
-            Some(adapter_addresses),
-            &mut size,
-        );
-
-        if result != 0 {
-            // NO_ERROR is 0
-            return Ok(None);
-        }
-
-        // Iterate through adapters to find default gateway
-        let mut current = adapter_addresses;
-        while !current.is_null() {
-            let adapter = &*current;
-
-            // Check first gateway address
-            let mut gateway = adapter.FirstGatewayAddress;
-            while !gateway.is_null() {
-                let addr = &*gateway;
-                let sockaddr = &*addr.Address.lpSockaddr;
-
-                let family = sockaddr.sa_family.0 as i32;
-                if family == AF_INET.0 as i32 {
-                    let inet_sockaddr =
-                        &*(addr.Address.lpSockaddr as *const _ as *const SOCKADDR_IN);
-                    let ip_bytes = inet_sockaddr.sin_addr.S_un.S_addr.to_ne_bytes();
-                    let ip = IpAddr::V4(std::net::Ipv4Addr::new(
-                        ip_bytes[0],
-                        ip_bytes[1],
-                        ip_bytes[2],
-                        ip_bytes[3],
-                    ));
-                    return Ok(Some(ip));
-                }
-
-                gateway = addr.Next;
+        for _ in 0..4 {
+            let mut size: u32 = 0;
+            if GetAdaptersAddresses(family, GAA_FLAGS, None, None, &mut size) != 111 {
+                return None;
             }
-
-            current = adapter.Next;
+            // Guard against size == 0 (defensive; never observed in practice).
+            let mut buf: Vec<u64> = vec![0; (size.max(1) as usize + 7) / 8];
+            let ptr = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+            let rc = GetAdaptersAddresses(family, GAA_FLAGS, None, Some(ptr), &mut size);
+            if rc == 0 {
+                return Some(f(ptr));
+            }
+            if rc != 111 {
+                return None;
+            }
+            // Adapters changed between calls; retry with the fresh size.
         }
-
-        Ok(None)
+        None
     }
 }
 
-/// Get default network interface on Windows
-pub fn get_default_interface() -> anyhow::Result<String> {
-    use windows::Win32::NetworkManagement::IpHelper::GET_ADAPTERS_ADDRESSES_FLAGS;
-
-    unsafe {
-        let mut adapter_addresses: *mut IP_ADAPTER_ADDRESSES_LH = std::ptr::null_mut();
-        let mut size = 0;
-
-        // First call to get the buffer size needed
-        let result = GetAdaptersAddresses(
-            AF_INET.0 as u32,
-            GET_ADAPTERS_ADDRESSES_FLAGS(0),
-            None,
-            None,
-            &mut size,
-        );
-
-        if result != 111 {
-            // ERROR_BUFFER_OVERFLOW
-            return Ok("Ethernet0".to_string());
-        }
-
-        // Allocate buffer using Vec
-        let mut buffer = vec![0u8; size as usize];
-        adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
-
-        // Second call to get the actual data
-        let result = GetAdaptersAddresses(
-            AF_INET.0 as u32,
-            GET_ADAPTERS_ADDRESSES_FLAGS(0),
-            None,
-            Some(adapter_addresses),
-            &mut size,
-        );
-
-        if result != 0 {
-            // NO_ERROR is 0
-            return Ok("Ethernet0".to_string());
-        }
-
-        // Return first active adapter
-        let mut current = adapter_addresses;
-        while !current.is_null() {
-            let adapter = &*current;
-
-            // Convert FriendlyName to String
-            let name = String::from_utf16_lossy(std::slice::from_raw_parts(
-                adapter.FriendlyName.as_ptr(),
-                adapter.FriendlyName.len(),
-            ));
-
-            // Check if adapter is operational and has a gateway
-            let gateway = adapter.FirstGatewayAddress;
-            if !gateway.is_null() {
-                return Ok(name);
-            }
-
-            current = adapter.Next;
-        }
-
-        Ok("Ethernet0".to_string())
+/// Interpret a `sockaddr` pointer as IPv4/IPv6.
+unsafe fn sockaddr_to_ip(sa: *const SOCKADDR) -> Option<IpAddr> {
+    if sa.is_null() {
+        return None;
     }
+    let family = (*sa).sa_family.0 as i32;
+    if family == AF_INET.0 as i32 {
+        let s4 = &*(sa as *const SOCKADDR_IN);
+        let bytes = s4.sin_addr.S_un.S_addr.to_le_bytes();
+        Some(IpAddr::V4(std::net::Ipv4Addr::new(
+            bytes[0], bytes[1], bytes[2], bytes[3],
+        )))
+    } else if family == AF_INET6.0 as i32 {
+        let s6 = &*(sa as *const SOCKADDR_IN6);
+        let bytes = &s6.sin6_addr.u.Byte;
+        Some(IpAddr::V6(std::net::Ipv6Addr::from(*bytes)))
+    } else {
+        None
+    }
+}
+
+/// Convert a NUL-terminated UTF-16 string to a Rust String.
+unsafe fn wide_to_string(mut ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while *ptr != 0 {
+        len += 1;
+        ptr = ptr.add(1);
+    }
+    if len == 0 {
+        return String::new();
+    }
+    let slice = std::slice::from_raw_parts(ptr.sub(len), len);
+    String::from_utf16_lossy(slice)
+}
+
+/// Convert an ANSI (char*) string to a Rust String (interface GUIDs are pure
+/// ASCII, so from_utf8 is safe).
+unsafe fn ansi_to_string(mut ptr: *const u8) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while *ptr != 0 {
+        len += 1;
+        ptr = ptr.add(1);
+    }
+    if len == 0 {
+        return String::new();
+    }
+    let bytes = std::slice::from_raw_parts(ptr.sub(len), len);
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Get default gateway on Windows (the default-route gateway of the first
+/// usable adapter).
+pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
+    let mut found: Option<IpAddr> = None;
+    with_adapters(AF_INET.0 as u32, |head| {
+        let mut cur = head;
+        while !cur.is_null() {
+            let a = unsafe { &*cur };
+            // Only operational adapters are considered.
+            if a.OperStatus.0 == 1 {
+                let mut gw = a.FirstGatewayAddress;
+                while !gw.is_null() {
+                    let g = unsafe { &*gw };
+                    if let Some(ip) = unsafe { sockaddr_to_ip(g.Address.lpSockaddr) } {
+                        found = Some(ip);
+                        return;
+                    }
+                    gw = g.Next;
+                }
+            }
+            cur = unsafe { (*cur).Next };
+        }
+    });
+    Ok(found)
+}
+
+/// Get the friendly name of the default network interface.
+pub fn get_default_interface() -> anyhow::Result<String> {
+    let mut chosen: Option<String> = None;
+    with_adapters(AF_INET.0 as u32, |head| {
+        let mut cur = head;
+        while !cur.is_null() {
+            let a = unsafe { &*cur };
+            if a.OperStatus.0 == 1 && !a.FirstGatewayAddress.is_null() {
+                chosen = Some(unsafe { wide_to_string(a.FriendlyName.0) });
+                return;
+            }
+            cur = unsafe { (*cur).Next };
+        }
+    });
+
+    // Fall back to the first operational non-loopback adapter with an address.
+    if chosen.is_none() {
+        with_adapters(0, |head| {
+            let mut cur = head;
+            while !cur.is_null() {
+                let a = unsafe { &*cur };
+                if a.OperStatus.0 == 1
+                    && a.IfType != 24
+                    && !a.FirstUnicastAddress.is_null()
+                {
+                    chosen = Some(unsafe { wide_to_string(a.FriendlyName.0) });
+                    return;
+                }
+                cur = unsafe { (*cur).Next };
+            }
+        });
+    }
+
+    Ok(chosen.unwrap_or_else(|| "Ethernet".to_string()))
 }
 
 /// Get network interfaces on Windows
 pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
-    use windows::Win32::NetworkManagement::IpHelper::GET_ADAPTERS_ADDRESSES_FLAGS;
-
-    unsafe {
-        let mut adapter_addresses: *mut IP_ADAPTER_ADDRESSES_LH = std::ptr::null_mut();
-        let mut size = 0;
-
-        // First call to get the buffer size needed
-        let result = GetAdaptersAddresses(
-            0, // AF_UNSPEC
-            GET_ADAPTERS_ADDRESSES_FLAGS(0),
-            None,
-            None,
-            &mut size,
-        );
-
-        if result != 111 {
-            // ERROR_BUFFER_OVERFLOW
-            return Ok(vec![]);
-        }
-
-        // Allocate buffer using Vec
-        let mut buffer = vec![0u8; size as usize];
-        adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
-
-        // Second call to get the actual data
-        let result = GetAdaptersAddresses(
-            0,
-            GET_ADAPTERS_ADDRESSES_FLAGS(0),
-            None,
-            Some(adapter_addresses),
-            &mut size,
-        );
-
-        if result != 0 {
-            // NO_ERROR is 0
-            return Ok(vec![]);
-        }
-
-        let mut interfaces = Vec::new();
-        let mut current = adapter_addresses;
-
-        while !current.is_null() {
-            let adapter = &*current;
-
-            // Get adapter name from FriendlyName
-            let name = if !adapter.FriendlyName.is_null() {
-                // PWSTR is a wide string pointer
-                let mut len = 0;
-                let mut ptr = adapter.FriendlyName.0;
-                while *ptr != 0 {
-                    len += 1;
-                    ptr = ptr.offset(1);
-                }
-                let slice = std::slice::from_raw_parts(adapter.FriendlyName.0, len);
-                String::from_utf16_lossy(slice)
-            } else {
-                "Unknown Adapter".to_string()
-            };
-
-            // Get description - it's a PWSTR (wide string) not a regular string
-            let description = if !adapter.Description.is_null() {
-                let mut len = 0;
-                let mut ptr = adapter.Description.0;
-                while *ptr != 0 {
-                    len += 1;
-                    ptr = ptr.offset(1);
-                }
-                let slice = std::slice::from_raw_parts(adapter.Description.0, len);
-                String::from_utf16_lossy(slice)
+    let mut interfaces = Vec::new();
+    with_adapters(0, |head| {
+        let mut cur = head;
+        while !cur.is_null() {
+            let a = unsafe { &*cur };
+            let name = unsafe { wide_to_string(a.FriendlyName.0) };
+            let description = if !a.Description.is_null() {
+                unsafe { wide_to_string(a.Description.0) }
             } else {
                 name.clone()
             };
 
-            // Collect IPv4 and IPv6 addresses
             let mut ipv4_addrs = Vec::new();
             let mut ipv6_addrs = Vec::new();
-
-            let mut unicast = adapter.FirstUnicastAddress;
+            let mut unicast = a.FirstUnicastAddress;
             while !unicast.is_null() {
-                let addr = &*unicast;
-                let sockaddr = &*addr.Address.lpSockaddr;
-
-                // Check address family using the raw value
-                let family = sockaddr.sa_family.0 as i32;
-
-                if family == AF_INET.0 as i32 {
-                    let inet_sockaddr =
-                        &*(addr.Address.lpSockaddr as *const _ as *const SOCKADDR_IN);
-                    let ip_bytes = inet_sockaddr.sin_addr.S_un.S_addr.to_ne_bytes();
-                    let ip = IpAddr::V4(std::net::Ipv4Addr::new(
-                        ip_bytes[0],
-                        ip_bytes[1],
-                        ip_bytes[2],
-                        ip_bytes[3],
-                    ));
-                    ipv4_addrs.push(ip);
-                } else if family == AF_INET6.0 as i32 {
-                    let inet6_sockaddr =
-                        &*(addr.Address.lpSockaddr as *const _ as *const SOCKADDR_IN6);
-                    // Access IPv6 bytes through the u field which is a union
-                    let ip_bytes = std::slice::from_raw_parts(
-                        &inet6_sockaddr.sin6_addr.u.Byte as *const u8,
-                        16,
-                    );
-                    let ip = IpAddr::V6(std::net::Ipv6Addr::new(
-                        u16::from_be_bytes([ip_bytes[0], ip_bytes[1]]),
-                        u16::from_be_bytes([ip_bytes[2], ip_bytes[3]]),
-                        u16::from_be_bytes([ip_bytes[4], ip_bytes[5]]),
-                        u16::from_be_bytes([ip_bytes[6], ip_bytes[7]]),
-                        u16::from_be_bytes([ip_bytes[8], ip_bytes[9]]),
-                        u16::from_be_bytes([ip_bytes[10], ip_bytes[11]]),
-                        u16::from_be_bytes([ip_bytes[12], ip_bytes[13]]),
-                        u16::from_be_bytes([ip_bytes[14], ip_bytes[15]]),
-                    ));
-                    ipv6_addrs.push(ip);
+                let u = unsafe { &*unicast };
+                if let Some(ip) = unsafe { sockaddr_to_ip(u.Address.lpSockaddr) } {
+                    match ip {
+                        IpAddr::V4(_) => ipv4_addrs.push(ip),
+                        IpAddr::V6(_) => ipv6_addrs.push(ip),
+                    }
                 }
-
-                unicast = addr.Next;
+                unicast = u.Next;
             }
 
-            // Check if interface is up
-            let is_up = adapter.OperStatus.0 == 1; // IfOperStatusUp
-
-            // Check if loopback
-            let is_loopback = adapter.IfType == 24; // IF_TYPE_SOFTWARE_LOOPBACK
+            let is_up = a.OperStatus.0 == 1; // IfOperStatusUp
+            let is_loopback = a.IfType == 24; // IF_TYPE_SOFTWARE_LOOPBACK
 
             if is_up && !is_loopback && (!ipv4_addrs.is_empty() || !ipv6_addrs.is_empty()) {
                 interfaces.push(NetworkInterfaceInfo {
@@ -289,28 +207,51 @@ pub fn get_network_interfaces() -> anyhow::Result<Vec<NetworkInterfaceInfo>> {
                     ipv6_addresses: ipv6_addrs.clone(),
                     is_up,
                     is_loopback,
-                    gateway: None, // Gateway can be populated separately
+                    gateway: None,
                 });
             }
-
-            current = adapter.Next;
+            cur = unsafe { (*cur).Next };
         }
+    });
+    Ok(interfaces)
+}
 
-        Ok(interfaces)
+/// Map Windows MIB_TCP_STATE values (1=CLOSED … 12=DELETE_TCB) to names.
+fn tcp_state_name(state: u32) -> &'static str {
+    match state {
+        1 => "CLOSED",
+        2 => "LISTEN",
+        3 => "SYN_SENT",
+        4 => "SYN_RECV",
+        5 => "ESTABLISHED",
+        6 => "FIN_WAIT1",
+        7 => "FIN_WAIT2",
+        8 => "CLOSE_WAIT",
+        9 => "CLOSING",
+        10 => "LAST_ACK",
+        11 => "TIME_WAIT",
+        12 => "DELETE_TCB",
+        _ => "UNKNOWN",
     }
 }
 
-/// Get active connections on Windows using GetExtendedTcpTable
+/// TCP/IP ports in MIB tables are stored network byte order in the low 16
+/// bits of the DWORD field.
+fn mib_port(dw: u32) -> u16 {
+    let raw = dw as u16;
+    raw.swap_bytes()
+}
+
+/// Get active connections on Windows using GetExtendedTcpTable /
+/// GetExtendedUdpTable.
 pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
     unsafe {
         let mut connections = Vec::new();
         let mut pids = std::collections::HashSet::new();
 
-        // Get TCP table
-        let mut tcp_table: *mut MIB_TCPTABLE_OWNER_PID = std::ptr::null_mut();
-        let mut size = 0;
-
-        let result = GetExtendedTcpTable(
+        // --- TCP (IPv4) ---
+        let mut size = 0u32;
+        let mut rc = GetExtendedTcpTable(
             None,
             &mut size,
             false,
@@ -318,72 +259,45 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
             TCP_TABLE_OWNER_PID_ALL,
             0,
         );
-
-        if result == 122 {
-            // ERROR_INSUFFICIENT_BUFFER
-            let mut buffer = vec![0u8; size as usize];
-            tcp_table = buffer.as_mut_ptr() as *mut MIB_TCPTABLE_OWNER_PID;
-
-            let result = GetExtendedTcpTable(
-                Some(tcp_table as *mut _),
+        if rc == 122 {
+            let mut buf: Vec<u64> = vec![0; (size as usize + 7) / 8];
+            let table = buf.as_mut_ptr() as *mut MIB_TCPTABLE_OWNER_PID;
+            rc = GetExtendedTcpTable(
+                Some(table as *mut _),
                 &mut size,
                 false,
                 AF_INET.0 as u32,
                 TCP_TABLE_OWNER_PID_ALL,
                 0,
             );
-
-            if result == 0 && !tcp_table.is_null() {
-                let table = &*tcp_table;
-                let num_entries = table.dwNumEntries as usize;
-
-                for i in 0..num_entries {
-                    let row_ptr = table.table.as_ptr().add(i);
-                    let row = &*row_ptr;
-                    // Windows stores IP addresses as DWORD in network byte order
-                    // Ipv4Addr::from(u32) expects network byte order, but on little-endian systems
-                    // we need to convert because DWORD is stored in host byte order
-                    let local_ip = IpAddr::V4(std::net::Ipv4Addr::from(row.dwLocalAddr.to_be()));
-                    let local_port =
-                        (row.dwLocalPort as u16 >> 8) | ((row.dwLocalPort as u16 & 0xFF) << 8);
-                    let remote_ip = IpAddr::V4(std::net::Ipv4Addr::from(row.dwRemoteAddr.to_be()));
-                    let remote_port =
-                        (row.dwRemotePort as u16 >> 8) | ((row.dwRemotePort as u16 & 0xFF) << 8);
-                    let state = match row.dwState {
-                        1 => "ESTABLISHED",
-                        2 => "SYN_SENT",
-                        3 => "SYN_RECV",
-                        4 => "FIN_WAIT1",
-                        5 => "FIN_WAIT2",
-                        6 => "TIME_WAIT",
-                        7 => "CLOSE",
-                        8 => "CLOSE_WAIT",
-                        9 => "LAST_ACK",
-                        10 => "LISTEN",
-                        11 => "CLOSING",
-                        _ => "UNKNOWN",
-                    };
-
+            if rc == 0 {
+                let t = &*table;
+                for i in 0..t.dwNumEntries as usize {
+                    let row = &*t.table.as_ptr().add(i);
+                    let lb = row.dwLocalAddr.to_le_bytes();
+                    let rb = row.dwRemoteAddr.to_le_bytes();
                     pids.insert(row.dwOwningPid);
                     connections.push(ConnectionRawInfo {
                         protocol: "TCP".to_string(),
-                        local_addr: local_ip,
-                        local_port,
-                        remote_addr: remote_ip,
-                        remote_port,
-                        state: state.to_string(),
+                        local_addr: IpAddr::V4(std::net::Ipv4Addr::new(
+                            lb[0], lb[1], lb[2], lb[3],
+                        )),
+                        local_port: mib_port(row.dwLocalPort),
+                        remote_addr: IpAddr::V4(std::net::Ipv4Addr::new(
+                            rb[0], rb[1], rb[2], rb[3],
+                        )),
+                        remote_port: mib_port(row.dwRemotePort),
+                        state: tcp_state_name(row.dwState).to_string(),
                         pid: Some(row.dwOwningPid),
-                        process_name: None, // Will be filled later
+                        process_name: None,
                     });
                 }
             }
         }
 
-        // Get UDP table
-        let mut udp_table: *mut MIB_UDPTABLE_OWNER_PID = std::ptr::null_mut();
-        let mut size = 0;
-
-        let result = GetExtendedUdpTable(
+        // --- UDP (IPv4) ---
+        let mut size = 0u32;
+        let mut rc = GetExtendedUdpTable(
             None,
             &mut size,
             false,
@@ -391,51 +305,40 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
             UDP_TABLE_OWNER_PID,
             0,
         );
-
-        if result == 122 {
-            // ERROR_INSUFFICIENT_BUFFER
-            let mut buffer = vec![0u8; size as usize];
-            udp_table = buffer.as_mut_ptr() as *mut MIB_UDPTABLE_OWNER_PID;
-
-            let result = GetExtendedUdpTable(
-                Some(udp_table as *mut _),
+        if rc == 122 {
+            let mut buf: Vec<u64> = vec![0; (size as usize + 7) / 8];
+            let table = buf.as_mut_ptr() as *mut MIB_UDPTABLE_OWNER_PID;
+            rc = GetExtendedUdpTable(
+                Some(table as *mut _),
                 &mut size,
                 false,
                 AF_INET.0 as u32,
                 UDP_TABLE_OWNER_PID,
                 0,
             );
-
-            if result == 0 && !udp_table.is_null() {
-                let table = &*udp_table;
-                let num_entries = table.dwNumEntries as usize;
-
-                for i in 0..num_entries {
-                    let row_ptr = table.table.as_ptr().add(i);
-                    let row = &*row_ptr;
-                    let local_ip = IpAddr::V4(std::net::Ipv4Addr::from(row.dwLocalAddr.to_be()));
-                    let local_port =
-                        (row.dwLocalPort as u16 >> 8) | ((row.dwLocalPort as u16 & 0xFF) << 8);
-
+            if rc == 0 {
+                let t = &*table;
+                for i in 0..t.dwNumEntries as usize {
+                    let row = &*t.table.as_ptr().add(i);
+                    let lb = row.dwLocalAddr.to_le_bytes();
                     pids.insert(row.dwOwningPid);
                     connections.push(ConnectionRawInfo {
                         protocol: "UDP".to_string(),
-                        local_addr: local_ip,
-                        local_port,
+                        local_addr: IpAddr::V4(std::net::Ipv4Addr::new(
+                            lb[0], lb[1], lb[2], lb[3],
+                        )),
+                        local_port: mib_port(row.dwLocalPort),
                         remote_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                         remote_port: 0,
                         state: "ACTIVE".to_string(),
                         pid: Some(row.dwOwningPid),
-                        process_name: None, // Will be filled later
+                        process_name: None,
                     });
                 }
             }
         }
 
-        // Batch fetch process names for all unique PIDs
         let process_names = get_process_names_batch(&pids);
-
-        // Fill in process names
         for conn in &mut connections {
             if let Some(pid) = conn.pid {
                 conn.process_name = process_names.get(&pid).cloned();
@@ -453,21 +356,15 @@ pub fn get_process_names_batch(
     use std::collections::HashMap;
 
     let mut result = HashMap::new();
-
     if pids.is_empty() {
         return result;
     }
 
-    tracing::debug!("Getting process names for {} PIDs: {:?}", pids.len(), pids);
-
     unsafe {
-        // First, create a snapshot of all processes
-        let snapshot_result = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        let snapshot = match snapshot_result {
+        let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!("Failed to create process snapshot: {}", e);
-                // Fall back to basic PID insertion
                 for &pid in pids {
                     result.insert(pid, "-".to_string());
                 }
@@ -475,62 +372,34 @@ pub fn get_process_names_batch(
             }
         };
 
-        // Create a map from PID to exe name using the snapshot
+        // Wide-char snapshot so Unicode process names survive regardless of
+        // the ANSI code page.
         let mut pid_to_exe: HashMap<u32, String> = HashMap::new();
-        let mut entry = PROCESSENTRY32 {
-            dwSize: std::mem::size_of::<PROCESSENTRY32>() as u32,
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
-
-        // Iterate through all processes in the snapshot
-        if Process32First(snapshot, &mut entry).is_ok() {
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
             loop {
-                // Convert ANSI char array to string properly
-                // szExeFile is CHAR array in PROCESSENTRY32, need to convert from Windows ANSI code page
-                let exe_name: String = {
-                    // Find null terminator
-                    let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
-
-                    // Use Windows code page conversion for ANSI strings
-                    // First, try to decode as Latin1 (common for Western systems)
-                    // If that fails, use lossy conversion
-                    let bytes: Vec<u8> = entry.szExeFile[..len].iter().map(|&c| c as u8).collect();
-                    String::from_utf8_lossy(&bytes)
-                        .trim_end_matches('\0')
-                        .to_string()
-                };
-                pid_to_exe.insert(entry.th32ProcessID, exe_name);
-
-                if Process32Next(snapshot, &mut entry).is_err() {
+                let name = wide_to_string(entry.szExeFile.as_ptr());
+                pid_to_exe.insert(entry.th32ProcessID, name);
+                if Process32NextW(snapshot, &mut entry).is_err() {
                     break;
                 }
             }
         }
-
-        tracing::debug!("Found {} processes in snapshot", pid_to_exe.len());
-
         let _ = CloseHandle(snapshot);
 
-        // Now for each requested PID, try to get the full image name
         for &pid in pids {
-            // Try to get full process image name (more detailed)
             if let Some(name) = try_get_process_image_name(pid) {
-                tracing::debug!("PID {} -> {} (from image name)", pid, name);
                 result.insert(pid, name);
             } else if let Some(exe_name) = pid_to_exe.get(&pid) {
-                // Fall back to the exe name from snapshot
-                tracing::debug!("PID {} -> {} (from snapshot)", pid, exe_name);
                 result.insert(pid, exe_name.clone());
             } else {
-                tracing::warn!(
-                    "PID {} -> not found in snapshot or image lookup failed",
-                    pid
-                );
                 result.insert(pid, "-".to_string());
             }
         }
     }
-
     result
 }
 
@@ -541,74 +410,34 @@ fn try_get_process_image_name(pid: u32) -> Option<String> {
     use windows::core::PWSTR;
 
     unsafe {
-        // Try with PROCESS_QUERY_LIMITED_INFORMATION first (Vista+)
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-        let process_handle = match handle {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::trace!("Failed to open process PID {}: {}", pid, e);
-                // Try with PROCESS_QUERY_INFORMATION as fallback
-                match OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        tracing::trace!(
-                            "Failed to open process PID {} with QUERY_INFO: {}",
-                            pid,
-                            e
-                        );
-                        return None;
-                    }
-                }
-            }
-        };
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .or_else(|_| OpenProcess(PROCESS_QUERY_INFORMATION, false, pid))
+            .ok()?;
 
-        // Get the full image path
         let mut buffer = [0u16; 520]; // MAX_PATH * 2
         let mut size = buffer.len() as u32;
-
-        let success = QueryFullProcessImageNameW(
-            process_handle,
-            windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0),
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
             PWSTR(buffer.as_mut_ptr()),
             &mut size,
         );
+        let _ = CloseHandle(handle);
 
-        let _ = CloseHandle(process_handle);
-
-        match success {
-            Ok(_) if size > 0 => {
-                let full_path = OsString::from_wide(&buffer[..size as usize])
-                    .to_string_lossy()
-                    .into_owned();
-
-                // Extract just the filename from the path
-                if let Some(filename) = full_path.split('\\').last() {
-                    if !filename.is_empty() {
-                        tracing::trace!(
-                            "PID {} -> {} (from QueryFullProcessImageNameW)",
-                            pid,
-                            filename
-                        );
-                        return Some(filename.to_string());
-                    }
-                }
-
-                tracing::trace!(
-                    "PID {} -> {} (full path from QueryFullProcessImageNameW)",
-                    pid,
-                    full_path
-                );
-                Some(full_path)
-            }
-            Ok(_) => {
-                tracing::trace!("PID {} -> QueryFullProcessImageNameW returned size 0", pid);
-                None
-            }
-            Err(e) => {
-                tracing::trace!("PID {} -> QueryFullProcessImageNameW failed: {}", pid, e);
-                None
-            }
+        if ok.is_ok() && size > 0 {
+            let full_path = OsString::from_wide(&buffer[..size as usize])
+                .to_string_lossy()
+                .into_owned();
+            return Some(
+                full_path
+                    .split('\\')
+                    .last()
+                    .filter(|f| !f.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or(full_path),
+            );
         }
+        None
     }
 }
 
@@ -662,184 +491,195 @@ pub fn reset_network_stack() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Get DNS servers on Windows from registry
+/// Get DNS servers on Windows.
+///
+/// Reads the DNS configuration from the registry for the active interface's
+/// GUID (static `NameServer` or DHCP-provided `DhcpNameServer`). Returns an
+/// empty list (never fake data) when nothing can be determined.
 pub fn get_dns_servers() -> anyhow::Result<Vec<String>> {
-    unsafe {
-        let mut hkey = windows::Win32::System::Registry::HKEY::default();
-
-        // Open registry key for network adapters
-        let result = RegOpenKeyExA(
-            HKEY_LOCAL_MACHINE,
-            PCSTR("SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\0".as_ptr()),
-            0,
-            KEY_READ,
-            &mut hkey,
-        );
-
-        if result.is_err() {
-            // Return default DNS servers
-            return Ok(vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]);
+    // Discover active adapters and read their registry DNS values.
+    let mut servers: Vec<String> = Vec::new();
+    let mut guids: Vec<String> = Vec::new();
+    with_adapters(0, |head| {
+        let mut cur = head;
+        while !cur.is_null() {
+            let a = unsafe { &*cur };
+            if a.OperStatus.0 == 1 && !a.AdapterName.is_null() {
+                guids.push(unsafe { ansi_to_string(a.AdapterName.0) });
+            }
+            cur = unsafe { (*cur).Next };
         }
+    });
 
-        // Use ipconfig as fallback to get DNS servers
-        let output = std::process::Command::new("ipconfig")
-            .args(&["/all"])
-            .output();
-
-        if let Ok(output) = output {
-            let content = String::from_utf8_lossy(&output.stdout);
-            let mut dns_servers = Vec::new();
-
-            for line in content.lines() {
-                if line.trim().starts_with("DNS Servers") {
-                    if let Some(start) = line.find(':') {
-                        let dns = line[start + 1..].trim();
-                        if !dns.is_empty() {
-                            dns_servers.push(dns.to_string());
+    let base = "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\";
+    for guid in &guids {
+        if guid.is_empty() {
+            continue;
+        }
+        let path = format!("{}{}\\0", base, guid);
+        unsafe {
+            let mut hkey = HKEY::default();
+            if RegOpenKeyExA(
+                HKEY_LOCAL_MACHINE,
+                PCSTR(path.as_ptr()),
+                0,
+                KEY_READ,
+                &mut hkey,
+            )
+            .0
+                == 0
+            {
+                for value_name in ["NameServer\0", "DhcpNameServer\0"] {
+                    let mut buf = [0u8; 2048];
+                    let mut size = buf.len() as u32;
+                    let mut ty = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
+                    let rc = RegQueryValueExA(
+                        hkey,
+                        PCSTR(value_name.as_ptr()),
+                        None,
+                        Some(&mut ty),
+                        Some(buf.as_mut_ptr()),
+                        Some(&mut size),
+                    );
+                    if rc.0 == 0 && size > 0 {
+                        let s = String::from_utf8_lossy(&buf[..size as usize])
+                            .trim_matches('\0')
+                            .trim()
+                            .to_string();
+                        for part in s.split([',', ' ']) {
+                            let part = part.trim();
+                            if !part.is_empty()
+                                && part.parse::<IpAddr>().is_ok()
+                                && !servers.contains(&part.to_string())
+                            {
+                                servers.push(part.to_string());
+                            }
                         }
                     }
                 }
-            }
-
-            if !dns_servers.is_empty() {
                 let _ = RegCloseKey(hkey);
-                return Ok(dns_servers);
             }
         }
-
-        let _ = RegCloseKey(hkey);
-
-        Ok(vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()])
     }
+
+    Ok(servers)
 }
 
 /// Validate interface name to prevent command injection
 fn validate_interface_name(name: &str) -> Result<(), anyhow::Error> {
-    // Interface names should be alphanumeric with limited special characters
-    // Windows interface names are typically Ethernet, Wi-Fi, or similar
-    // Allow: alphanumeric, spaces, hyphens, underscores, and common non-ASCII characters
     if name.is_empty() || name.len() > 100 {
         return Err(anyhow::anyhow!("Invalid interface name length"));
     }
-
-    // Reject dangerous characters that could enable command injection
     let dangerous_chars = [
-        '&', '|', ';', '$', '`', '(', ')', '<', '>', '\0', '\n', '\r', '\t',
+        '&', '|', ';', '$', '`', '(', ')', '<', '>', '\0', '\n', '\r', '\t', '"', '\'',
     ];
     if name.chars().any(|c| dangerous_chars.contains(&c)) {
         return Err(anyhow::anyhow!(
             "Interface name contains dangerous characters"
         ));
     }
+    Ok(())
+}
 
-    // Only allow safe characters: alphanumeric, spaces, hyphens, underscores, dots, and common Unicode
-    if !name.chars().all(|c| {
-        c.is_alphanumeric() || c.is_whitespace() || c == '-' || c == '_' || c == '.' ||
-        // Allow common non-ASCII characters in localized Windows
-        matches!(c as u32, 0x4E00..=0x9FFF | 0x3040..=0x309F | 0x30A0..=0x30FF) // CJK, Hiragana, Katakana
-    }) {
+/// Set DNS servers on Windows using netsh with proper input validation.
+///
+/// The active interface is found by parsing `netsh interface show interface`
+/// correctly: columns are `Admin | State | Type | Interface Name`, and the
+/// name is everything after the first three columns (may contain spaces).
+pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result<()> {
+    if primary.parse::<IpAddr>().is_err() {
+        return Err(anyhow::anyhow!("Invalid primary DNS server address"));
+    }
+    if let Some(sec) = secondary {
+        if sec.parse::<IpAddr>().is_err() {
+            return Err(anyhow::anyhow!("Invalid secondary DNS server address"));
+        }
+    }
+
+    // Get connected interface name from netsh.
+    let output = std::process::Command::new("netsh")
+        .args(&["interface", "show", "interface"])
+        .output()?;
+    let content = String::from_utf8_lossy(&output.stdout);
+
+    let mut interface_name: Option<String> = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("Admin State")
+            || trimmed.starts_with('-')
+        {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() >= 4
+            && parts.get(1).map(|s| s.eq_ignore_ascii_case("Connected")).unwrap_or(false)
+        {
+            interface_name = Some(parts[3..].join(" "));
+            break;
+        }
+    }
+
+    let interface_name = interface_name
+        .ok_or_else(|| anyhow::anyhow!("no connected network interface found"))?;
+    validate_interface_name(&interface_name)?;
+
+    let name_arg = format!("name={}", interface_name);
+
+    let set = std::process::Command::new("netsh")
+        .args(&[
+            "interface",
+            "ip",
+            "set",
+            "dns",
+            &name_arg,
+            "static",
+            primary,
+        ])
+        .status()?;
+    if !set.success() {
         return Err(anyhow::anyhow!(
-            "Interface name contains invalid characters"
+            "failed to set primary DNS (admin rights required?)"
         ));
+    }
+
+    if let Some(secondary) = secondary {
+        let add = std::process::Command::new("netsh")
+            .args(&[
+                "interface",
+                "ip",
+                "add",
+                "dns",
+                &name_arg,
+                secondary,
+                "index=2",
+            ])
+            .status()?;
+        if !add.success() {
+            return Err(anyhow::anyhow!(
+                "failed to set secondary DNS (admin rights required?)"
+            ));
+        }
     }
 
     Ok(())
 }
 
-/// Set DNS servers on Windows using netsh with proper input validation
-pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result<()> {
-    // Validate DNS server addresses first
-    if primary.is_empty() || primary.len() > 253 {
-        return Err(anyhow::anyhow!("Invalid primary DNS server address"));
-    }
-    if let Some(sec) = secondary {
-        if sec.is_empty() || sec.len() > 253 {
-            return Err(anyhow::anyhow!("Invalid secondary DNS server address"));
-        }
-    }
-
-    // Get the active interface name
-    let output = std::process::Command::new("netsh")
-        .args(&["interface", "show", "interface"])
-        .output()?;
-
-    let content = String::from_utf8_lossy(&output.stdout);
-
-    // Find the connected interface
-    for line in content.lines() {
-        if line.contains("connected")
-            || line.contains("专有")
-            || line.contains("Ethernet")
-            || line.contains("Wi-Fi")
-        {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if !parts.is_empty() {
-                let interface_name = parts[0];
-
-                // Validate interface name before using it in command
-                validate_interface_name(interface_name)?;
-
-                // Use properly quoted arguments to prevent injection
-                let name_arg = format!("name=\"{}\"", interface_name);
-
-                // Set primary DNS
-                let status = std::process::Command::new("netsh")
-                    .args(&[
-                        "interface",
-                        "ip",
-                        "set",
-                        "dns",
-                        &name_arg,
-                        "static",
-                        primary,
-                    ])
-                    .status()?;
-
-                if !status.success() {
-                    return Err(anyhow::anyhow!("Failed to set primary DNS server"));
-                }
-
-                // Set secondary DNS if provided
-                if let Some(secondary) = secondary {
-                    let status = std::process::Command::new("netsh")
-                        .args(&[
-                            "interface",
-                            "ip",
-                            "add",
-                            "dns",
-                            &name_arg,
-                            secondary,
-                            "index=2",
-                        ])
-                        .status()?;
-
-                    if !status.success() {
-                        return Err(anyhow::anyhow!("Failed to set secondary DNS server"));
-                    }
-                }
-
-                return Ok(());
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!("Failed to find active network interface"))
-}
-
-/// Kill connection on Windows by terminating the process
+/// Kill a TCP connection on Windows by resetting it with SetTcpEntry
+/// (MIB_TCP_STATE_DELETE_TCB), falling back to terminating the owning process.
 pub fn kill_connection(
-    _local_addr: IpAddr,
+    local_addr: IpAddr,
     local_port: u16,
-    _remote_addr: IpAddr,
+    remote_addr: IpAddr,
     remote_port: u16,
 ) -> anyhow::Result<bool> {
-    use windows::Win32::NetworkManagement::IpHelper::*;
+    let (IpAddr::V4(local_v4), IpAddr::V4(remote_v4)) = (local_addr, remote_addr) else {
+        return Ok(false);
+    };
 
     unsafe {
-        let mut tcp_table: *mut MIB_TCPTABLE_OWNER_PID = std::ptr::null_mut();
-        let mut size = 0;
-
-        let result = GetExtendedTcpTable(
+        let mut size = 0u32;
+        let mut rc = GetExtendedTcpTable(
             None,
             &mut size,
             false,
@@ -847,58 +687,66 @@ pub fn kill_connection(
             TCP_TABLE_OWNER_PID_ALL,
             0,
         );
-
-        if result == 122 {
-            let mut buffer = vec![0u8; size as usize];
-            tcp_table = buffer.as_mut_ptr() as *mut MIB_TCPTABLE_OWNER_PID;
-
-            let result = GetExtendedTcpTable(
-                Some(tcp_table as *mut _),
+        if rc == 122 {
+            let mut buf: Vec<u64> = vec![0; (size as usize + 7) / 8];
+            let table = buf.as_mut_ptr() as *mut MIB_TCPTABLE_OWNER_PID;
+            rc = GetExtendedTcpTable(
+                Some(table as *mut _),
                 &mut size,
                 false,
                 AF_INET.0 as u32,
                 TCP_TABLE_OWNER_PID_ALL,
                 0,
             );
-
-            if result == 0 && !tcp_table.is_null() {
-                let table = &*tcp_table;
-                let num_entries = table.dwNumEntries as usize;
-
-                for i in 0..num_entries {
-                    let row_ptr = table.table.as_ptr().add(i);
-                    let row = &*row_ptr;
-                    let row_local_port =
-                        (row.dwLocalPort as u16 >> 8) | ((row.dwLocalPort as u16 & 0xFF) << 8);
-                    let row_remote_port =
-                        (row.dwRemotePort as u16 >> 8) | ((row.dwRemotePort as u16 & 0xFF) << 8);
-
-                    if local_port == row_local_port && remote_port == row_remote_port {
-                        // Kill the process owning this connection
+            if rc == 0 {
+                let t = &*table;
+                for i in 0..t.dwNumEntries as usize {
+                    let row = &*t.table.as_ptr().add(i);
+                    let lb = row.dwLocalAddr.to_le_bytes();
+                    let rb = row.dwRemoteAddr.to_le_bytes();
+                    if IpAddr::V4(std::net::Ipv4Addr::new(lb[0], lb[1], lb[2], lb[3]))
+                        == IpAddr::V4(local_v4)
+                        && IpAddr::V4(std::net::Ipv4Addr::new(rb[0], rb[1], rb[2], rb[3]))
+                            == IpAddr::V4(remote_v4)
+                        && mib_port(row.dwLocalPort) == local_port
+                        && mib_port(row.dwRemotePort) == remote_port
+                    {
+                        // Prefer resetting just this connection.
+                        let mut tcp_row = MIB_TCPROW_LH {
+                            Anonymous: MIB_TCPROW_LH_0 {
+                                dwState: MIB_TCP_STATE_DELETE_TCB.0 as u32,
+                            },
+                            dwLocalAddr: row.dwLocalAddr,
+                            dwLocalPort: row.dwLocalPort,
+                            dwRemoteAddr: row.dwRemoteAddr,
+                            dwRemotePort: row.dwRemotePort,
+                        };
+                        if SetTcpEntry(&mut tcp_row) == 0 {
+                            return Ok(true);
+                        }
+                        // Fallback: kill the owning process.
                         let pid = row.dwOwningPid;
-                        std::process::Command::new("taskkill")
-                            .args(&["/PID", &pid.to_string(), "/F"])
+                        let out = std::process::Command::new("taskkill")
+                            .args(["/PID", &pid.to_string(), "/F"])
                             .output()?;
-                        return Ok(true);
+                        return Ok(out.status.success());
                     }
                 }
             }
         }
     }
-
     Ok(false)
 }
 
 /// Read cumulative (rx_bytes, tx_bytes) across all operational interfaces via
-/// `GetIfTable2`. Adapted from the logic previously inlined in
-/// `TrafficMonitor::get_interface_stats`.
+/// `GetIfTable2`. Excludes loopback; VPN/tunnel interfaces are excluded by
+/// the caller (traffic.rs) so totals match user-visible traffic.
 pub fn get_interface_total_bytes() -> (u64, u64) {
     unsafe {
-        // GetIfTable2 allocates memory and returns a pointer
         let mut if_table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
         let result = GetIfTable2(&mut if_table);
 
-        if result.is_ok() && !if_table.is_null() {
+        if result.0 == 0 && !if_table.is_null() {
             let table = &*if_table;
             let mut total_rx = 0u64;
             let mut total_tx = 0u64;
@@ -908,12 +756,7 @@ pub fn get_interface_total_bytes() -> (u64, u64) {
 
             for i in 0..num_entries {
                 let row = &*table_ptr.add(i);
-                // Sum only operational interfaces (OperStatus == 1 = Up).
-                if row.OperStatus.0 == 1 {
-                    // Skip loopback so totals reflect real traffic.
-                    if row.Type == IF_TYPE_SOFTWARE_LOOPBACK {
-                        continue;
-                    }
+                if row.OperStatus.0 == 1 && row.Type != IF_TYPE_SOFTWARE_LOOPBACK {
                     total_rx += row.InOctets;
                     total_tx += row.OutOctets;
                 }
