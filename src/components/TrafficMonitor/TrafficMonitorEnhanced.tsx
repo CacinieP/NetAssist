@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import * as echarts from "echarts";
-import { Activity, TrendingUp, AlertTriangle, Download, Upload, BarChart3, PieChart, FileText, Plus, Trash2, Edit, X, Save } from "lucide-react";
+import { Activity, AlertTriangle, Download, Upload, BarChart3, PieChart, FileText, Plus, Trash2, Edit, X, Save } from "lucide-react";
 import { useRealtimeTraffic, useRecordTrafficPoint } from "../../hooks/useTrafficData";
 import { formatSpeed, formatBytes } from "../../utils/formatUtils";
 import { notify } from "../../utils/notify";
@@ -19,12 +19,6 @@ interface AppTraffic {
   upload_bytes: number;
   current_download_bps: number;
   current_upload_bps: number;
-}
-
-interface AppTrafficHistory {
-  timestamp: number;
-  download_bps: number;
-  upload_bps: number;
 }
 
 interface CumulativeTraffic {
@@ -54,9 +48,58 @@ interface AlertStatus {
   percentage: number;
 }
 
-type SortField = "name" | "download" | "upload" | "total";
+type SortField = "name" | "download" | "upload" | "total" | "percent";
 type SortOrder = "asc" | "desc";
 type Period = "day" | "week" | "month";
+
+const GB_BYTES = 1024 * 1024 * 1024;
+
+/// Threshold editor: keeps the raw text the user types (so "0.", ".5" and
+/// other in-progress inputs are not mangled by float↔byte round-tripping)
+/// and only converts to integer bytes when the value is committed. The
+/// backend stores threshold_bytes as u64, so fractional results must be
+/// rounded before being sent.
+function ThresholdInput({
+  valueBytes,
+  onChange,
+  className,
+}: {
+  valueBytes: number;
+  onChange: (bytes: number) => void;
+  className?: string;
+}) {
+  const [text, setText] = useState<string>(() => (valueBytes / GB_BYTES).toFixed(2).replace(/\.?0+$/, ""));
+
+  // Keep text in sync when a different alert is loaded into the editor.
+  const lastValueRef = useRef(valueBytes);
+  if (lastValueRef.current !== valueBytes) {
+    lastValueRef.current = valueBytes;
+    setText((valueBytes / GB_BYTES).toString());
+  }
+
+  const commit = (raw: string) => {
+    const num = parseFloat(raw);
+    if (isNaN(num) || num <= 0) {
+      onChange(0);
+      return;
+    }
+    onChange(Math.round(num * GB_BYTES));
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={text}
+      onChange={e => {
+        setText(e.target.value);
+        commit(e.target.value);
+      }}
+      onBlur={() => commit(text)}
+      className={className || "w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"}
+    />
+  );
+}
 
 // ==================== Sub-Components ====================
 
@@ -192,7 +235,7 @@ const AppTableHeader = ({ field, order, onSort }: { field: SortField | null, ord
     { key: "download", label: "下载", width: "100px" },
     { key: "upload", label: "上传", width: "100px" },
     { key: "total", label: "总计", width: "100px" },
-    { key: "total", label: "占比", width: "70px" },
+    { key: "percent", label: "占比", width: "70px" },
   ];
 
   return (
@@ -221,6 +264,8 @@ const AppTableHeader = ({ field, order, onSort }: { field: SortField | null, ord
 const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstance = useRef<echarts.ECharts | null>(null);
+  const { settings } = useSettingsStore();
+  const isDark = settings.dark_mode;
 
   const topApps = useMemo(() => {
     return apps
@@ -233,11 +278,31 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
       .slice(0, 10);
   }, [apps]);
 
+  // Initialize / re-init the chart whenever the theme or the container
+  // changes. The container div is ALWAYS rendered (the empty state is an
+  // overlay), so echarts.init never binds to a node that later unmounts.
   useEffect(() => {
-    if (!chartRef.current || topApps.length === 0) return;
+    if (!chartRef.current) return;
+    if (chartInstance.current) {
+      chartInstance.current.dispose();
+      chartInstance.current = null;
+    }
+    chartInstance.current = echarts.init(chartRef.current, isDark ? "dark" : undefined);
 
-    if (!chartInstance.current) {
-      chartInstance.current = echarts.init(chartRef.current);
+    const handleResize = () => chartInstance.current?.resize();
+    window.addEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      chartInstance.current?.dispose();
+      chartInstance.current = null;
+    };
+  }, [isDark]);
+
+  useEffect(() => {
+    if (!chartInstance.current) return;
+    if (topApps.length === 0) {
+      chartInstance.current.clear();
+      return;
     }
 
     const option: echarts.EChartsOption = {
@@ -249,7 +314,7 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
         orient: "vertical",
         right: 10,
         top: "center",
-        textStyle: { fontSize: 11 },
+        textStyle: { fontSize: 11, color: isDark ? "#9ca3af" : "#6b7280" },
       },
       series: [
         {
@@ -260,7 +325,7 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
           avoidLabelOverlap: false,
           itemStyle: {
             borderRadius: 6,
-            borderColor: "#fff",
+            borderColor: isDark ? "#1f2937" : "#fff",
             borderWidth: 2,
           },
           label: {
@@ -272,33 +337,7 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
     };
 
     chartInstance.current.setOption(option);
-
-    const handleResize = () => chartInstance.current?.resize();
-    window.addEventListener("resize", handleResize);
-    return () => {
-      window.removeEventListener("resize", handleResize);
-    };
-  }, [topApps]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      chartInstance.current?.dispose();
-      chartInstance.current = null;
-    };
-  }, []);
-
-  if (topApps.length === 0) {
-    return (
-      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3 flex items-center gap-2">
-          <PieChart size={16} />
-          应用流量占比 (Top 10)
-        </h3>
-        <div className="text-center text-gray-500 dark:text-gray-400 py-8 text-sm">暂无流量数据</div>
-      </div>
-    );
-  }
+  }, [topApps, isDark]);
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
@@ -306,12 +345,24 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
         <PieChart size={16} />
         应用流量占比 (Top 10)
       </h3>
-      <div ref={chartRef} style={{ width: "100%", height: "250px" }} />
+      <div className="relative" style={{ width: "100%", height: "250px" }}>
+        <div ref={chartRef} style={{ width: "100%", height: "100%" }} />
+        {topApps.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center text-gray-500 dark:text-gray-400 text-sm">
+            暂无流量数据
+          </div>
+        )}
+      </div>
     </div>
   );
 };
 
 // ==================== Main Component ====================
+
+// Module-scope alert dedupe: persists across page mounts so switching away
+// from the Traffic page and back does NOT re-fire the same "traffic limit
+// reached" notifications (a component-level ref reset on every mount).
+let notifiedAlertIds: Set<string> = new Set();
 
 export default function TrafficMonitorEnhanced() {
   // State
@@ -320,9 +371,6 @@ export default function TrafficMonitorEnhanced() {
   const [alerts, setAlerts] = useState<TrafficAlert[]>([]);
   const [alertStatuses, setAlertStatuses] = useState<AlertStatus[]>([]);
   const { settings } = useSettingsStore();
-  // Track previously-triggered alert ids so we notify only on the not-triggered
-  // → triggered transition (avoids re-notifying every 5s poll).
-  const triggeredAlertsRef = useRef<Set<string>>(new Set());
 
   const [searchTerm, setSearchTerm] = useState("");
   const [historyHours, setHistoryHours] = useState<number>(1);
@@ -348,17 +396,20 @@ export default function TrafficMonitorEnhanced() {
 
   // Toast notification state (replaces window.alert)
   const [toast, setToast] = useState<{ message: string; type: "error" | "success" | "warning" } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+  }, []);
 
   const showToast = useCallback((message: string, type: "error" | "success" | "warning" = "error") => {
     setToast({ message, type });
-    setTimeout(() => setToast(null), 4000);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 4000);
   }, []);
 
   // Details modal state
   const [selectedApp, setSelectedApp] = useState<AppTraffic | null>(null);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
-  const [appHistory, setAppHistory] = useState<AppTrafficHistory[]>([]);
-  const detailChartRef = useRef<echarts.ECharts | null>(null);
 
   // Use shared traffic hook — single global 1s poll
   const { stats } = useRealtimeTraffic(1000);
@@ -407,38 +458,39 @@ export default function TrafficMonitorEnhanced() {
   const fetchAlerts = useCallback(async () => {
     try {
       setLoading(prev => ({ ...prev, alerts: true }));
-      const [alertsData, statuses] = await Promise.all([
-        invoke<TrafficAlert[]>("get_traffic_alerts"),
-        invoke<AlertStatus[]>("check_traffic_alerts", { period }),
-      ]);
+      const alertsData = await invoke<TrafficAlert[]>("get_traffic_alerts");
       setAlerts(alertsData);
+
+      // check_traffic_alerts evaluates every alert against its OWN period
+      // (day/week/month per alert). The UI-period arg is only for display.
+      const statuses = await invoke<AlertStatus[]>("check_traffic_alerts", {});
       setAlertStatuses(statuses);
 
       // Fire a native notification on the not-triggered → triggered
       // transition for any alert, gated by the notify_traffic_limit setting.
+      //
+      // Deduplication lives at module scope so leaving and re-entering the
+      // page does NOT re-fire the same notifications (and is not coupled to
+      // the UI period selector).
       if (settings.notify_traffic_limit) {
         const newlyTriggered = statuses.filter(
-          s => s.triggered && !triggeredAlertsRef.current.has(s.alert_id)
+          s => s.triggered && !notifiedAlertIds.has(s.alert_id)
         );
-        // Update the set with current triggered state.
-        triggeredAlertsRef.current = new Set(
+        // Remember everything currently triggered, and drop ids that have
+        // cleared so a later re-trigger can notify again.
+        notifiedAlertIds = new Set(
           statuses.filter(s => s.triggered).map(s => s.alert_id)
         );
         if (newlyTriggered.length > 0) {
           void notify("流量告警", `有 ${newlyTriggered.length} 项流量阈值已触发，请查看流量监控`);
         }
-      } else {
-        // Keep the ref fresh even when notifications are off.
-        triggeredAlertsRef.current = new Set(
-          statuses.filter(s => s.triggered).map(s => s.alert_id)
-        );
       }
     } catch (error) {
       console.error("Failed to fetch alerts:", error);
     } finally {
       setLoading(prev => ({ ...prev, alerts: false }));
     }
-  }, [period, settings.notify_traffic_limit]);
+  }, [settings.notify_traffic_limit]);
 
   // Effects
   useEffect(() => {
@@ -456,14 +508,6 @@ export default function TrafficMonitorEnhanced() {
       clearInterval(alertsInterval);
     };
   }, [fetchApps, fetchCumulative, fetchAlerts]);
-
-  // Cleanup detail chart on modal close
-  useEffect(() => {
-    if (!showDetailsModal && detailChartRef.current) {
-      detailChartRef.current.dispose();
-      detailChartRef.current = null;
-    }
-  }, [showDetailsModal]);
 
   // Filter and sort apps
   const filteredAndSortedApps = useMemo(() => {
@@ -490,6 +534,13 @@ export default function TrafficMonitorEnhanced() {
           compareA = a.current_download_bps + a.current_upload_bps;
           compareB = b.current_download_bps + b.current_upload_bps;
           break;
+        case "percent":
+          // Share is proportional to the current rate total (same baseline
+          // across rows), so sorting by the rate total is equivalent — but it
+          // keeps the 占比 and 总计 headers as two distinct sortable keys.
+          compareA = a.current_download_bps + a.current_upload_bps;
+          compareB = b.current_download_bps + b.current_upload_bps;
+          break;
       }
       return sortOrder === "asc" ? compareA - compareB : compareB - compareA;
     });
@@ -513,13 +564,6 @@ export default function TrafficMonitorEnhanced() {
       cumulativeUpload: 0,
     });
   }, [filteredAndSortedApps]);
-
-  // Handle show details
-  const handleShowDetails = (app: AppTraffic) => {
-    setSelectedApp(app);
-    setShowDetailsModal(true);
-    setAppHistory([]);
-  };
 
   // Get app percentage of total
   const getAppPercentage = useCallback((app: AppTraffic) => {
@@ -706,95 +750,10 @@ export default function TrafficMonitorEnhanced() {
     setEditingAlert(null);
   };
 
-  const parseThresholdInput = (value: string, unit: string): number => {
-    const num = parseFloat(value);
-    if (isNaN(num) || num <= 0) return 0;
-    switch (unit) {
-      case "GB": return num * 1024 * 1024 * 1024;
-      case "MB": return num * 1024 * 1024;
-      case "KB": return num * 1024;
-      default: return num;
-    }
+  const handleShowDetails = (app: AppTraffic) => {
+    setSelectedApp(app);
+    setShowDetailsModal(true);
   };
-
-  // Initialize detail chart (proper lifecycle, not callback ref)
-  useEffect(() => {
-    if (!showDetailsModal || !selectedApp || appHistory.length === 0) return;
-
-    // Wait for DOM
-    const timer = setTimeout(() => {
-      const el = document.getElementById("detail-chart");
-      if (!el) return;
-
-      // Dispose previous instance
-      if (detailChartRef.current) {
-        detailChartRef.current.dispose();
-      }
-
-      const chart = echarts.init(el);
-      detailChartRef.current = chart;
-
-      const option: echarts.EChartsOption = {
-        grid: { top: 10, right: 10, bottom: 20, left: 50 },
-        xAxis: {
-          type: "category",
-          data: appHistory.map((_, i) => {
-            const minsAgo = appHistory.length - i;
-            return minsAgo >= 60 ? `${Math.floor(minsAgo / 60)}h前` : `${minsAgo}m前`;
-          }),
-          axisLabel: { fontSize: 10 },
-        },
-        yAxis: {
-          type: "value",
-          axisLabel: {
-            fontSize: 10,
-            formatter: (v: number) => v >= 1024 * 1024 ? `${(v / 1024 / 1024).toFixed(1)}M` : `${(v / 1024).toFixed(1)}K`,
-          },
-        },
-        series: [
-          {
-            name: "下载",
-            type: "line",
-            data: appHistory.map(h => h.download_bps),
-            smooth: true,
-            itemStyle: { color: "#22c55e" },
-            areaStyle: { color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: "rgba(34, 197, 94, 0.3)" }, { offset: 1, color: "rgba(34, 197, 94, 0)" }] } },
-          },
-          {
-            name: "上传",
-            type: "line",
-            data: appHistory.map(h => h.upload_bps),
-            smooth: true,
-            itemStyle: { color: "#3b82f6" },
-            areaStyle: { color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: "rgba(59, 130, 246, 0.3)" }, { offset: 1, color: "rgba(59, 130, 246, 0)" }] } },
-          },
-        ],
-        tooltip: {
-          trigger: "axis",
-          formatter: (params: any) => {
-            let tip = `${params[0].axisValue}<br/>`;
-            params.forEach((p: any) => {
-              tip += `${p.marker} ${p.seriesName}: ${formatSpeed(p.value)}<br/>`;
-            });
-            return tip;
-          },
-        },
-      };
-      chart.setOption(option);
-
-      const handleResize = () => chart.resize();
-      window.addEventListener("resize", handleResize);
-
-      // Store cleanup function
-      return () => {
-        window.removeEventListener("resize", handleResize);
-      };
-    }, 50);
-
-    return () => {
-      clearTimeout(timer);
-    };
-  }, [showDetailsModal, selectedApp, appHistory]);
 
   return (
     <div className="p-6 space-y-6">
@@ -1046,17 +1005,6 @@ export default function TrafficMonitorEnhanced() {
                   <span>累计总计: {formatBytes(selectedApp.download_bytes + selectedApp.upload_bytes)}</span>
                 </div>
               </div>
-
-              {/* Traffic Trend Chart — using proper useEffect lifecycle */}
-              {appHistory.length > 0 && (
-                <div>
-                  <h5 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3 flex items-center gap-2">
-                    <TrendingUp size={16} />
-                    流量趋势 (近60分钟)
-                  </h5>
-                  <div id="detail-chart" style={{ width: "100%", height: "200px" }} />
-                </div>
-              )}
             </div>
 
             <div className="p-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700/50 sticky bottom-0">
@@ -1094,26 +1042,26 @@ export default function TrafficMonitorEnhanced() {
 
             {/* Add Alert Form */}
             {showAddAlertForm ? (
-              <div className="p-4 border-b border-gray-200 bg-blue-50">
-                <h4 className="text-sm font-medium text-gray-700 mb-3">添加新告警</h4>
+              <div className="p-4 border-b border-gray-200 bg-blue-50 dark:bg-blue-950/30">
+                <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3">添加新告警</h4>
                 <div className="space-y-3">
                   <div>
-                    <label className="block text-xs text-gray-600 mb-1">告警名称</label>
+                    <label className="block text-xs text-gray-600 dark:text-gray-300 mb-1">告警名称</label>
                     <input
                       type="text"
                       value={newAlert.name || ""}
                       onChange={(e) => setNewAlert({ ...newAlert, name: e.target.value })}
                       placeholder="例如: 周末流量告警"
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-xs text-gray-600 mb-1">告警类型</label>
+                      <label className="block text-xs text-gray-600 dark:text-gray-300 mb-1">告警类型</label>
                       <select
                         value={newAlert.alert_type}
                         onChange={(e) => setNewAlert({ ...newAlert, alert_type: e.target.value })}
-                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                       >
                         <option value="download">下载流量</option>
                         <option value="upload">上传流量</option>
@@ -1121,11 +1069,11 @@ export default function TrafficMonitorEnhanced() {
                       </select>
                     </div>
                     <div>
-                      <label className="block text-xs text-gray-600 mb-1">统计周期</label>
+                      <label className="block text-xs text-gray-600 dark:text-gray-300 mb-1">统计周期</label>
                       <select
                         value={newAlert.period}
                         onChange={(e) => setNewAlert({ ...newAlert, period: e.target.value })}
-                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                       >
                         <option value="day">每日</option>
                         <option value="week">每周</option>
@@ -1134,20 +1082,17 @@ export default function TrafficMonitorEnhanced() {
                     </div>
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-600 mb-1">阈值 (GB)</label>
-                    <input
-                      type="number"
-                      min="0.1"
-                      step="0.1"
-                      value={(newAlert.threshold_bytes || 0) / (1024 * 1024 * 1024)}
-                      onChange={(e) => setNewAlert({ ...newAlert, threshold_bytes: parseThresholdInput(e.target.value, "GB") })}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    <label className="block text-xs text-gray-600 dark:text-gray-300 mb-1">阈值 (GB)</label>
+                    <ThresholdInput
+                      valueBytes={newAlert.threshold_bytes || 0}
+                      onChange={(bytes) => setNewAlert({ ...newAlert, threshold_bytes: bytes })}
                     />
                   </div>
                   <div className="flex gap-2">
                     <button
                       onClick={handleAddAlert}
-                      className="flex-1 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center justify-center gap-1"
+                      disabled={!newAlert.name?.trim() || !newAlert.threshold_bytes}
+                      className="flex-1 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm flex items-center justify-center gap-1 disabled:opacity-50"
                     >
                       <Plus size={16} />
                       添加告警
@@ -1162,7 +1107,7 @@ export default function TrafficMonitorEnhanced() {
                 </div>
               </div>
             ) : (
-              <div className="p-4 border-b border-gray-200">
+              <div className="p-4 border-b border-gray-200 dark:border-gray-700">
                 <button
                   onClick={() => setShowAddAlertForm(true)}
                   className="w-full py-2 border-2 border-dashed border-gray-300 rounded-lg hover:border-blue-500 hover:bg-blue-50 transition-colors text-gray-600 hover:text-blue-600 flex items-center justify-center gap-2"
@@ -1188,26 +1133,26 @@ export default function TrafficMonitorEnhanced() {
                   const isEditing = editingAlert?.id === alert.id;
 
                   return (
-                    <div key={alert.id} className={`p-4 border rounded-lg ${isEditing ? "border-blue-500 bg-blue-50" : "border-gray-200"}`}>
+                    <div key={alert.id} className={`p-4 border rounded-lg ${isEditing ? "border-blue-500 bg-blue-50 dark:bg-blue-950/30" : "border-gray-200 dark:border-gray-700"}`}>
                       {isEditing ? (
                         // Edit Mode
                         <div className="space-y-3">
                           <div>
-                            <label className="block text-xs text-gray-600 mb-1">告警名称</label>
+                            <label className="block text-xs text-gray-600 dark:text-gray-300 mb-1">告警名称</label>
                             <input
                               type="text"
                               value={editingAlert.name}
                               onChange={(e) => setEditingAlert({ ...editingAlert, name: e.target.value })}
-                              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
                           </div>
                           <div className="grid grid-cols-2 gap-3">
                             <div>
-                              <label className="block text-xs text-gray-600 mb-1">告警类型</label>
+                              <label className="block text-xs text-gray-600 dark:text-gray-300 mb-1">告警类型</label>
                               <select
                                 value={editingAlert.alert_type}
                                 onChange={(e) => setEditingAlert({ ...editingAlert, alert_type: e.target.value })}
-                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                               >
                                 <option value="download">下载流量</option>
                                 <option value="upload">上传流量</option>
@@ -1215,11 +1160,11 @@ export default function TrafficMonitorEnhanced() {
                               </select>
                             </div>
                             <div>
-                              <label className="block text-xs text-gray-600 mb-1">统计周期</label>
+                              <label className="block text-xs text-gray-600 dark:text-gray-300 mb-1">统计周期</label>
                               <select
                                 value={editingAlert.period}
                                 onChange={(e) => setEditingAlert({ ...editingAlert, period: e.target.value })}
-                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                               >
                                 <option value="day">每日</option>
                                 <option value="week">每周</option>
@@ -1228,14 +1173,11 @@ export default function TrafficMonitorEnhanced() {
                             </div>
                           </div>
                           <div>
-                            <label className="block text-xs text-gray-600 mb-1">阈值 (GB)</label>
-                            <input
-                              type="number"
-                              min="0.1"
-                              step="0.1"
-                              value={editingAlert.threshold_bytes / (1024 * 1024 * 1024)}
-                              onChange={(e) => setEditingAlert({ ...editingAlert, threshold_bytes: parseThresholdInput(e.target.value, "GB") })}
-                              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            <label className="block text-xs text-gray-600 dark:text-gray-300 mb-1">阈值 (GB)</label>
+                            <ThresholdInput
+                              key={editingAlert.id}
+                              valueBytes={editingAlert.threshold_bytes || 0}
+                              onChange={(bytes) => setEditingAlert({ ...editingAlert, threshold_bytes: bytes })}
                             />
                           </div>
                           <div className="flex items-center gap-2">
@@ -1245,7 +1187,7 @@ export default function TrafficMonitorEnhanced() {
                               onChange={(e) => setEditingAlert({ ...editingAlert, enabled: e.target.checked })}
                               className="w-4 h-4 text-blue-600 rounded"
                             />
-                            <span className="text-sm text-gray-600">启用此告警</span>
+                            <span className="text-sm text-gray-600 dark:text-gray-300">启用此告警</span>
                           </div>
                           <div className="flex gap-2">
                             <button
@@ -1269,7 +1211,7 @@ export default function TrafficMonitorEnhanced() {
                           <div className="flex justify-between items-start mb-2">
                             <div className="flex-1">
                               <div className="flex items-center gap-2">
-                                <span className="font-medium text-gray-800">{alert.name}</span>
+                                <span className="font-medium text-gray-800 dark:text-gray-100">{alert.name}</span>
                                 {!alert.enabled && (
                                   <span className="px-2 py-0.5 text-xs bg-gray-200 text-gray-600 rounded">已禁用</span>
                                 )}
@@ -1311,14 +1253,14 @@ export default function TrafficMonitorEnhanced() {
                                   }}
                                   className="w-4 h-4 text-blue-600 rounded"
                                 />
-                                <span className="text-xs text-gray-600">启用</span>
+                                <span className="text-xs text-gray-600 dark:text-gray-300">启用</span>
                               </label>
                             </div>
                           </div>
 
                           {/* Progress Bar */}
                           <div className="mb-2">
-                            <div className="flex justify-between text-xs text-gray-500 mb-1">
+                            <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
                               <span>当前: {formatBytes(status?.current_value || 0)}</span>
                               <span>阈值: {formatBytes(alert.threshold_bytes)}</span>
                             </div>

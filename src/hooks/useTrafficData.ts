@@ -14,8 +14,12 @@ let globalTrafficListeners: Set<(data: TrafficStats) => void> = new Set();
 let globalTrafficInterval: ReturnType<typeof setInterval> | null = null;
 
 function startGlobalTrafficPolling(intervalMs: number = 1000) {
+  // Multiple consumers (dashboard cards etc.) mount at the same time. Only
+  // the FIRST starts the timer; later mounts must NOT restart the interval
+  // or fire an immediate poll — otherwise the backend rate (byte delta since
+  // last read) is computed over millisecond gaps and produces spikes.
   if (globalTrafficInterval) {
-    clearInterval(globalTrafficInterval);
+    return;
   }
 
   const poll = async () => {
