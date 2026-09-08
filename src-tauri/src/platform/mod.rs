@@ -65,7 +65,7 @@ pub fn get_default_interface() -> anyhow::Result<String> {
         } else if #[cfg(target_os = "macos")] {
             macos::get_default_interface()
         } else {
-            Ok("eth0".to_string())
+            Err(anyhow::anyhow!("network interface lookup is not supported on this platform"))
         }
     }
 }

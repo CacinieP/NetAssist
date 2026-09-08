@@ -465,29 +465,48 @@ pub fn flush_dns_cache() -> anyhow::Result<()> {
     }
 }
 
-/// Release and renew IP on Windows
+/// Release and renew IP on Windows.
+///
+/// Both steps require elevation; a non-zero exit now surfaces as an error
+/// instead of a fake Ok.
 pub fn release_renew_ip() -> anyhow::Result<()> {
-    std::process::Command::new("ipconfig")
-        .args(&["/release"])
-        .output()?;
-
-    std::process::Command::new("ipconfig")
-        .args(&["/renew"])
-        .output()?;
-
+    for (args, label) in [
+        (vec!["/release"], "ipconfig /release"),
+        (vec!["/renew"], "ipconfig /renew"),
+    ] {
+        let output = std::process::Command::new("ipconfig")
+            .args(&args)
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "{} failed (needs administrator): {}",
+                label,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
     Ok(())
 }
 
-/// Reset network stack on Windows
+/// Reset network stack on Windows (winsock + TCP/IP reset).
+///
+/// Requires elevation and a reboot; failures are reported, never swallowed.
 pub fn reset_network_stack() -> anyhow::Result<()> {
-    std::process::Command::new("netsh")
-        .args(&["winsock", "reset"])
-        .output()?;
-
-    std::process::Command::new("netsh")
-        .args(&["int", "ip", "reset"])
-        .output()?;
-
+    for (args, label) in [
+        (vec!["winsock", "reset"], "netsh winsock reset"),
+        (vec!["int", "ip", "reset"], "netsh int ip reset"),
+    ] {
+        let output = std::process::Command::new("netsh")
+            .args(&args)
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "{} failed (needs administrator): {}",
+                label,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
     Ok(())
 }
 

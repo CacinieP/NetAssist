@@ -3,7 +3,7 @@
 use crate::models::{
     AlertStatus, CumulativeTraffic, TrafficAlert, TrafficHistory, TrafficHistoryPoint,
 };
-use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -728,7 +728,7 @@ pub async fn check_traffic_alerts(_period: String) -> Result<Vec<AlertStatus>, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Datelike;
+    use chrono::{Datelike, Timelike};
 
     /// Build a `TrafficHistoryStorage` rooted at a fresh temp dir so tests
     /// never touch the real `~/Library/Application Support/NetAssist` data.

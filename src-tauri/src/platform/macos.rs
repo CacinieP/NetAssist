@@ -411,24 +411,71 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
     Ok(connections)
 }
 
-/// Flush DNS cache on macOS
-pub fn flush_dns_cache() -> anyhow::Result<()> {
-    // Use: dscacheutil -flushcache
-    std::process::Command::new("dscacheutil")
-        .args(["-flushcache"])
-        .status()?;
+/// Run a privileged shell command via the native macOS authorization prompt
+/// (`osascript` + `with administrator privileges`). Prompts the user for an
+/// admin password if the process is not running as root.
+fn run_privileged_shell(command: &str) -> anyhow::Result<()> {
+    // The command is interpolated into an AppleScript string that executes a
+    // root shell. It must not contain double quotes or backslashes.
+    if command.contains('"') || command.contains('\\') {
+        return Err(anyhow::anyhow!("refusing to run unsafe shell command"));
+    }
+    let script = format!(
+        "do shell script \"{}\" with administrator privileges",
+        command
+    );
 
-    // Also kill mDNSResponder for macOS 10.10+
-    let _ = std::process::Command::new("killall")
-        .arg("mDNSResponder")
-        .status();
+    let output = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()?;
 
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = stderr.trim();
+        if msg.contains("-128") || msg.to_lowercase().contains("cancel") {
+            return Err(anyhow::anyhow!("用户取消了管理员授权"));
+        }
+        return Err(anyhow::anyhow!(
+            "特权命令执行失败（需要管理员权限）: {}",
+            msg
+        ));
+    }
     Ok(())
 }
 
+/// Flush DNS cache on macOS
+///
+/// `dscacheutil -flushcache` works unprivileged; the `killall mDNSResponder`
+/// step requires root, so it is attempted directly and, when it fails (EPERM),
+/// re-run through the osascript admin prompt. Exit codes are never swallowed:
+/// a genuinely failing command surfaces as an error instead of "success".
+pub fn flush_dns_cache() -> anyhow::Result<()> {
+    // Use: dscacheutil -flushcache (works as a normal user)
+    let status = std::process::Command::new("dscacheutil")
+        .args(["-flushcache"])
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("dscacheutil -flushcache failed"));
+    }
+
+    // kill mDNSResponder for macOS 10.10+ — needs root.
+    let direct = std::process::Command::new("killall")
+        .args(["-HUP", "mDNSResponder"])
+        .status();
+    if let Ok(status) = direct {
+        if status.success() {
+            return Ok(());
+        }
+    }
+    // Non-root: escalate via the admin prompt.
+    run_privileged_shell("killall -HUP mDNSResponder")
+}
+
 /// Release and renew IP on macOS
+///
+/// `ipconfig set <iface> DHCP` requires root; escalate via the admin prompt
+/// when running unprivileged, and report failures honestly.
 pub fn release_renew_ip() -> anyhow::Result<()> {
-    // Use: ipconfig set (interface) DHCP
     // Get primary interface
     let output = super::common::exec_command("route", &["-n", "get", "default"])?;
     let mut interface = "en0";
@@ -440,23 +487,41 @@ pub fn release_renew_ip() -> anyhow::Result<()> {
             }
         }
     }
+    if interface.is_empty()
+        || !interface
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(anyhow::anyhow!("非法接口名 {:?}", interface));
+    }
 
-    // Release
-    let _ = std::process::Command::new("ipconfig")
+    // Try direct; escalate through the auth prompt when it fails.
+    let direct = std::process::Command::new("ipconfig")
         .args(["set", interface, "DHCP"])
-        .status();
-
-    Ok(())
+        .output();
+    if let Ok(out) = direct {
+        if out.status.success() {
+            return Ok(());
+        }
+    }
+    let cmd = format!("ipconfig set {} DHCP", interface);
+    run_privileged_shell(&cmd)
 }
 
-/// Reset network stack on macOS
+/// Reset the network stack on macOS
+///
+/// Restarts the mDNS resolver (needs root). Never swallows exit codes.
 pub fn reset_network_stack() -> anyhow::Result<()> {
-    // Restart network service
-    std::process::Command::new("killall")
-        .arg("mDNSResponder")
-        .status()?;
-
-    Ok(())
+    let direct = std::process::Command::new("killall")
+        .args(["-HUP", "mDNSResponder"])
+        .status();
+    if let Ok(status) = direct {
+        if status.success() {
+            return Ok(());
+        }
+    }
+    // Killall fails with EPERM when we are not root → escalate via prompt.
+    run_privileged_shell("killall -HUP mDNSResponder")
 }
 
 /// Get DNS servers on macOS

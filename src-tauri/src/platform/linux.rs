@@ -156,44 +156,89 @@ fn parse_proc_net_connections() -> Vec<ConnectionRawInfo> {
     connections
 }
 
-/// Flush DNS cache on Linux
+/// Flush DNS cache on Linux.
+///
+/// Tries `resolvectl`/`systemd-resolve` directly (may need root) and reports
+/// real failures instead of returning Ok on a non-zero exit.
 pub fn flush_dns_cache() -> anyhow::Result<()> {
-    // resolvectl (modern) or systemd-resolve (legacy)
     for cmd in ["resolvectl", "systemd-resolve"] {
-        let status = std::process::Command::new(cmd)
+        let out = std::process::Command::new(cmd)
             .arg("--flush-caches")
-            .status();
-        if let Ok(status) = status {
-            if status.success() {
+            .output();
+        if let Ok(out) = out {
+            if out.status.success() {
                 return Ok(());
             }
+            tracing::warn!(
+                "{} --flush-caches failed: {}",
+                cmd,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
     }
-    Ok(())
+    Err(anyhow::anyhow!(
+        "无法刷新 DNS 缓存（需要 systemd-resolved，或需要 root 权限）"
+    ))
 }
 
-/// Release and renew IP on Linux
+/// Release and renew IP on Linux.
+///
+/// Uses `nmcli device reapply` (NetworkManager) when available — the old
+/// `dhclient -r` released ALL leases and conflicts with NetworkManager.
 pub fn release_renew_ip() -> anyhow::Result<()> {
-    // Use dhclient or dhcpcd
-    if let Ok(status) = std::process::Command::new("dhclient").arg("-r").status() {
-        if status.success() {
-            std::process::Command::new("dhclient")
-                .arg("-1")
-                .status()?;
+    if super::common::exec_command("nmcli", &["--version"]).is_ok() {
+        let iface = get_default_interface()?;
+        let out = std::process::Command::new("nmcli")
+            .args(["device", "reapply", &iface])
+            .output()?;
+        if out.status.success() {
+            return Ok(());
         }
+        return Err(anyhow::anyhow!(
+            "nmcli device reapply failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
 
-    Ok(())
+    // Fallback for non-NetworkManager systems: dhclient (add -1 so it never
+    // blocks for 60s). This is inherently risky on NM systems, hence only a
+    // fallback.
+    if std::process::Command::new("dhclient")
+        .arg("-r")
+        .arg("-1")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        if std::process::Command::new("dhclient")
+            .arg("-1")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+    }
+    Err(anyhow::anyhow!("无法续租 IP 地址（需要 NetworkManager 或 dhclient）"))
 }
 
-/// Reset network stack on Linux
+/// Reset network stack on Linux.
+///
+/// Restarts the network management daemon (needs root — surface the failure
+/// instead of returning Ok on a permission error).
 pub fn reset_network_stack() -> anyhow::Result<()> {
-    // Reload network configuration
-    std::process::Command::new("systemctl")
+    let out = std::process::Command::new("systemctl")
         .args(["restart", "NetworkManager"])
-        .status()?;
-
-    Ok(())
+        .output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    // Non-root is the common GUI case; give a useful message instead of Ok.
+    Err(anyhow::anyhow!(
+        "重启 NetworkManager 失败（需要 root）: {}",
+        stderr
+    ))
 }
 
 /// Get DNS servers on Linux
