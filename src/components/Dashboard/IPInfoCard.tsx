@@ -20,6 +20,8 @@ interface IPInfo {
   };
   local_ipv4?: string;
   local_ipv6?: string;
+  dual_stack_enabled?: boolean;
+  ipv6_priority?: boolean;
 }
 
 export default function IPInfoCard() {
@@ -75,7 +77,10 @@ export default function IPInfoCard() {
       const parts = [geoip.country, geoip.city].filter(Boolean);
       return parts.join(" ");
     }
-    return type === "Public" ? "公网" : type === "Private" ? "内网" : type || "未知";
+    // Rust IPType is serialized lowercase: "public" | "private" | "linklocal" | ...
+    if (type === "public") return "公网";
+    if (type === "private") return "内网";
+    return type || "未知";
   };
 
   return (

@@ -215,23 +215,29 @@ async fn check_network_connectivity() -> DiagnosticItem {
 async fn check_ip_configuration() -> DiagnosticItem {
     let start = std::time::Instant::now();
 
-    // Add timeout to IP info check (20 seconds - needs to fetch public IP)
+    // Local-only probe: never performs external HTTP requests (public IP
+    // fetch or GeoIP), so it is fast and offline-safe.
     let ip_info_result = timeout(
-        Duration::from_secs(20),
-        crate::commands::ip_info::get_ip_info(None),
+        Duration::from_secs(5),
+        crate::commands::ip_info::get_local_ip_info_only(),
     )
     .await;
 
     match ip_info_result {
         Ok(Ok(info)) => {
-            let has_valid_ip = info.ipv4.is_some() || info.ipv6.is_some();
-            if has_valid_ip {
+            // A valid IP configuration means we have a usable LOCAL address
+            // (the public `ipv4`/`ipv6` fields are None when there is no
+            // internet, even though the LAN works — using them caused
+            // false "未配置有效的IP地址" failures).
+            let has_local_ipv4 = info.local_ipv4.is_some();
+            let has_local_ipv6 = info.local_ipv6.is_some();
+            if has_local_ipv4 || has_local_ipv6 {
                 DiagnosticItem {
                     status: DiagnosticStatus::Pass,
                     message: "IP地址配置正常".to_string(),
                     details: serde_json::json!({
-                        "ipv4": info.ipv4,
-                        "ipv6": info.ipv6,
+                        "local_ipv4": info.local_ipv4,
+                        "local_ipv6": info.local_ipv6,
                         "dual_stack": info.dual_stack_enabled
                     }),
                     duration_ms: start.elapsed().as_millis() as u64,
@@ -239,7 +245,7 @@ async fn check_ip_configuration() -> DiagnosticItem {
             } else {
                 DiagnosticItem {
                     status: DiagnosticStatus::Fail,
-                    message: "未配置有效的IP地址".to_string(),
+                    message: "未检测到有效的本地IP地址".to_string(),
                     details: serde_json::json!({}),
                     duration_ms: start.elapsed().as_millis() as u64,
                 }
@@ -255,7 +261,7 @@ async fn check_ip_configuration() -> DiagnosticItem {
             }
         }
         Err(_) => {
-            tracing::warn!("IP info check timed out after 20 seconds");
+            tracing::warn!("IP info check timed out after 10 seconds");
             DiagnosticItem {
                 status: DiagnosticStatus::Warning,
                 message: "IP信息检测超时".to_string(),

@@ -4,24 +4,36 @@ use std::net::IpAddr;
 /// Get current IP information with optional GeoIP
 #[tauri::command]
 pub async fn get_ip_info(include_geoip: Option<bool>) -> Result<IPInfo, String> {
-    let do_geoip = include_geoip.unwrap_or(true);
+    build_ip_info(include_geoip.unwrap_or(true), false).await
+}
 
-    // Get public IP (external, visible from internet)
-    let public_ipv4 = get_public_ip().await;
+/// Local-only IP probe used by diagnostics: never performs external HTTP
+/// requests (public IP fetch or GeoIP), so it is fast and offline-safe.
+pub(crate) async fn get_local_ip_info_only() -> Result<IPInfo, String> {
+    build_ip_info(false, true).await
+}
 
-    // Get local IP addresses (internal/LAN)
-    let local_ipv4_addrs = get_local_ipv4_addrs();
-    let local_ipv6_addrs = get_local_ipv6_addrs();
+async fn build_ip_info(do_geoip: bool, skip_public_probe: bool) -> Result<IPInfo, String> {
+    // Get local IP addresses (internal/LAN) from the real interface list.
+    let (local_ipv4_addrs, local_ipv6_addrs) = get_local_addresses();
 
     // Use first local IPv4, or None if not available
     let local_ipv4 = local_ipv4_addrs.first().cloned();
     // Use first local IPv6, or None if not available
     let local_ipv6 = local_ipv6_addrs.first().cloned();
 
-    // Use public IP for ipv4/ipv6 fields (external addresses)
-    let display_ipv4 = public_ipv4.clone();
-    // For IPv6, try to get public IPv6 or use local IPv6
-    let display_ipv6 = local_ipv6_addrs.first().cloned();
+    // Public IPv4 (external); skipped for the local-only diagnostic probe.
+    let public_ipv4 = if skip_public_probe {
+        None
+    } else {
+        get_public_ip().await
+    };
+
+    // Use public IP for ipv4 field (external address)
+    let display_ipv4 = public_ipv4;
+    // For IPv6, display the local (global/ULA) address — a public IPv6 probe
+    // would only add latency for the same information.
+    let display_ipv6 = local_ipv6.clone();
 
     // Classify IP types based on what we're displaying
     let ipv4_type =
@@ -63,9 +75,11 @@ pub async fn get_ip_info(include_geoip: Option<bool>) -> Result<IPInfo, String> 
         (None, None)
     };
 
-    // Check if we have both IPv4 and IPv6 connectivity
-    let has_ipv4 = display_ipv4.is_some();
-    let has_ipv6 = display_ipv6.is_some();
+    // Check whether the host has both IPv4 and IPv6 connectivity, based on
+    // the LOCAL (interface-scoped) addresses — not on the public probes, which
+    // can be temporarily absent even when the interface stack is configured.
+    let has_ipv4 = local_ipv4.is_some();
+    let has_ipv6 = local_ipv6.is_some();
 
     Ok(IPInfo {
         ipv4: display_ipv4,
@@ -150,55 +164,94 @@ async fn check_internet_connectivity() -> bool {
     false
 }
 
-/// Get local IPv4 addresses
-fn get_local_ipv4_addrs() -> Vec<String> {
-    let mut addrs = Vec::new();
+/// Collect local (LAN) addresses for both families in one pass.
+///
+/// Enumerates the platform network interfaces (which now work on macOS,
+/// Linux and Windows) and keeps only real unicast addresses — never
+/// `0.0.0.0`/`::`/unspecified, loopback or link-local. Falls back to the UDP
+/// connect trick only when the interface enumeration is unavailable.
+fn get_local_addresses() -> (Vec<String>, Vec<String>) {
+    let mut ipv4_addrs = Vec::new();
+    let mut ipv6_addrs = Vec::new();
 
-    // Try binding to socket to get local IP
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if let Ok(addr) = socket.local_addr() {
-            if let IpAddr::V4(ipv4) = addr.ip() {
-                if !ipv4.is_loopback() && !ipv4.is_link_local() {
-                    addrs.push(ipv4.to_string());
+    if let Ok(interfaces) = crate::platform::get_network_interfaces() {
+        for intf in interfaces {
+            if intf.is_loopback || !intf.is_up {
+                continue;
+            }
+            for ip in intf.ipv4_addresses {
+                match ip {
+                    IpAddr::V4(v4) => {
+                        if v4.is_unspecified() || v4.is_loopback() || v4.is_link_local() {
+                            continue;
+                        }
+                        let s = ip.to_string();
+                        if !ipv4_addrs.contains(&s) {
+                            ipv4_addrs.push(s);
+                        }
+                    }
+                    IpAddr::V6(_) => {}
+                }
+            }
+            for ip in intf.ipv6_addresses {
+                match ip {
+                    IpAddr::V6(v6) => {
+                        if v6.is_unspecified()
+                            || v6.is_loopback()
+                            || v6.is_unicast_link_local()
+                        {
+                            continue;
+                        }
+                        let s = ip.to_string();
+                        if !ipv6_addrs.contains(&s) {
+                            ipv6_addrs.push(s);
+                        }
+                    }
+                    IpAddr::V4(_) => {}
                 }
             }
         }
     }
 
-    // Try connecting to an external address to find local IP
-    if addrs.is_empty() {
+    // Fallbacks: connect() a UDP socket to derive the source address (no
+    // packets are actually sent for UDP connect).
+    if ipv4_addrs.is_empty() {
         if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-            // Try to connect to a public DNS server
-            let _ = socket.connect("8.8.8.8:80");
-            if let Ok(addr) = socket.local_addr() {
-                if let IpAddr::V4(ipv4) = addr.ip() {
-                    if !ipv4.is_loopback() && !ipv4.is_link_local() {
-                        addrs.push(ipv4.to_string());
+            if socket.connect("8.8.8.8:53").is_ok() {
+                if let Ok(addr) = socket.local_addr() {
+                    if let IpAddr::V4(ipv4) = addr.ip() {
+                        if !ipv4.is_unspecified() && !ipv4.is_loopback() && !ipv4.is_link_local()
+                        {
+                            ipv4_addrs.push(ipv4.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if ipv6_addrs.is_empty() {
+        if let Ok(socket) = std::net::UdpSocket::bind("[::]:0") {
+            if socket.connect("[2001:4860:4860::8888]:53").is_ok() {
+                if let Ok(addr) = socket.local_addr() {
+                    if let IpAddr::V6(ipv6) = addr.ip() {
+                        if !ipv6.is_unspecified()
+                            && !ipv6.is_loopback()
+                            && !ipv6.is_unicast_link_local()
+                        {
+                            ipv6_addrs.push(ipv6.to_string());
+                        }
                     }
                 }
             }
         }
     }
 
-    addrs
+    (ipv4_addrs, ipv6_addrs)
 }
 
-/// Get local IPv6 addresses
-fn get_local_ipv6_addrs() -> Vec<String> {
-    let mut addrs = Vec::new();
-
-    // Try binding to get IPv6
-    if let Ok(socket) = std::net::UdpSocket::bind("[::]:0") {
-        if let Ok(addr) = socket.local_addr() {
-            if let IpAddr::V6(ipv6) = addr.ip() {
-                if !ipv6.is_loopback() && !ipv6.is_unicast_link_local() {
-                    addrs.push(ipv6.to_string());
-                }
-            }
-        }
-    }
-
-    addrs
+/// Get the local IPv4 addresses (kept for network-status checks).
+fn get_local_ipv4_addrs() -> Vec<String> {
+    get_local_addresses().0
 }
 
 /// Get public IPv4 address (using external API) with overall timeout

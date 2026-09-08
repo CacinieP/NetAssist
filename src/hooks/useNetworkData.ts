@@ -17,9 +17,8 @@ export interface IPInfo {
   ipv6_geoip?: any;
   local_ipv4?: string;
   local_ipv6?: string;
-  has_ipv4?: boolean;
-  has_ipv6?: boolean;
-  dual_stack?: boolean;
+  dual_stack_enabled?: boolean;
+  ipv6_priority?: boolean;
 }
 
 let globalNetworkListeners: Set<(status: NetworkStatus, ipInfo: IPInfo) => void> = new Set();
