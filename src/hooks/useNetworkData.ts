@@ -38,7 +38,7 @@ function startGlobalNetworkPolling(intervalSecs: number, includeGeoip: boolean) 
     try {
       const [status, ip] = await Promise.all([
         invoke<NetworkStatus>('get_network_status'),
-        invoke<IPInfo>('get_ip_info', { include_geoip: includeGeoip }),
+        invoke<IPInfo>('get_ip_info', { includeGeoip }),
       ]);
       globalNetworkData = { status, ipInfo: ip };
       for (const listener of globalNetworkListeners) {

@@ -33,7 +33,7 @@ export default function IPInfoCard() {
     setRefreshing(true);
     try {
       const info = await invoke<any>("get_ip_info", {
-        include_geoip: settings.show_geoip,
+        includeGeoip: settings.show_geoip,
       });
       setIpInfo({
         ipv4: info.ipv4 || undefined,

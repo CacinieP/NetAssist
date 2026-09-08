@@ -88,8 +88,8 @@ export function useRecordTrafficPoint(intervalMs: number = 5000) {
       if (current) {
         try {
           await invoke('record_traffic_point', {
-            download_bps: current.download_bps,
-            upload_bps: current.upload_bps,
+            downloadBps: current.download_bps,
+            uploadBps: current.upload_bps,
           });
         } catch {
           // Silently ignore
