@@ -28,7 +28,11 @@ impl Default for Settings {
             auto_start: false,
             minimize_to_tray: true,
             refresh_interval_secs: 1,
-            show_geoip: true,
+            // Off by default: GeoIP resolution goes through third-party
+            // online APIs (core/network/geoip.rs), which would send the
+            // machine's public IPs to external services without explicit
+            // opt-in. Users can enable it in Settings.
+            show_geoip: false,
             primary_dns: "8.8.8.8".to_string(),
             secondary_dns: "1.1.1.1".to_string(),
             notify_network_abnormal: true,

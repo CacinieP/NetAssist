@@ -19,7 +19,9 @@ const defaultSettings: Settings = {
   auto_start: false,
   minimize_to_tray: true,
   refresh_interval_secs: 1,
-  show_geoip: true,
+  // Off by default: GeoIP lookups go through third-party online APIs and
+  // would expose the machine's public IPs without explicit opt-in.
+  show_geoip: false,
   primary_dns: "8.8.8.8",
   secondary_dns: "1.1.1.1",
   notify_network_abnormal: true,
