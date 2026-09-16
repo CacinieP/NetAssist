@@ -253,6 +253,58 @@ pub async fn update_settings(settings: Settings) -> Result<bool, String> {
     .map_err(|e| format!("Settings task join error: {}", e))?
 }
 
+/// Inject `KeepAlive = { SuccessfulExit = false }` into the LaunchAgent
+/// plist after the autostart plugin (re)writes it. The plugin (auto-launch
+/// crate) only emits `RunAtLoad`, so without this a crash or kill -9 leaves
+/// the monitor dead until next login. `SuccessfulExit: false` relaunches on
+/// abnormal exits only — a clean Quit (exit 0) still stays quit. Re-applied
+/// on every enable because the plugin overwrites the whole file each time.
+#[cfg(target_os = "macos")]
+fn inject_launchagent_keepalive() {
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    // The plugin names the plist after the LaunchAgent label (the product
+    // name), not the bundle identifier.
+    let plist = std::path::Path::new(&home).join("Library/LaunchAgents/NetAssist.plist");
+    if !plist.exists() {
+        return;
+    }
+    match inject_keepalive(&plist) {
+        Ok(()) => tracing::info!("LaunchAgent KeepAlive injected ({})", plist.display()),
+        Err(e) => tracing::warn!("LaunchAgent KeepAlive injection failed: {}", e),
+    }
+}
+
+/// plutil-based injection, split out for testability. Remove-then-insert
+/// keeps it idempotent (`-insert` fails when the key already exists).
+#[cfg(target_os = "macos")]
+fn inject_keepalive(plist: &std::path::Path) -> Result<(), String> {
+    let run = |args: &[&str]| -> Result<(), String> {
+        let out = std::process::Command::new("plutil")
+            .args(args)
+            .arg(plist)
+            .output()
+            .map_err(|e| format!("plutil {:?}: {}", args, e))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "plutil {:?}: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        }
+    };
+    let _ = run(&["-remove", "KeepAlive"]);
+    run(&[
+        "-insert",
+        "KeepAlive",
+        "-json",
+        r#"{"SuccessfulExit":false}"#,
+    ])
+}
+
 /// Enable or disable launch-at-login. Mirrors the settings.auto_start boolean
 /// into the OS (LaunchAgent on macOS). The frontend toggles auto_start and
 /// then calls this so the change takes effect immediately, not just on save.
@@ -267,6 +319,11 @@ pub async fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool,
     };
     match result {
         Ok(_) => {
+            // plutil spawns a process — keep it off the runtime's core threads.
+            #[cfg(target_os = "macos")]
+            if enabled {
+                let _ = tokio::task::spawn_blocking(inject_launchagent_keepalive).await;
+            }
             tracing::info!("autostart {}", if enabled { "enabled" } else { "disabled" });
             Ok(true)
         }
@@ -343,4 +400,58 @@ pub async fn get_macos_diagnostics() -> Result<crate::platform::macos::MacOSDiag
 pub async fn get_interface_changes() -> Result<crate::platform::macos::InterfaceChangeEvent, String>
 {
     crate::platform::detect_interface_changes().map_err(|e| e.to_string())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod keepalive_tests {
+    use super::*;
+
+    /// Injecting into the plugin-shaped plist (RunAtLoad, no KeepAlive) must
+    /// add KeepAlive.SuccessfulExit = false, preserve RunAtLoad, and be
+    /// idempotent across repeated enables.
+    #[test]
+    fn test_keepalive_injected_and_idempotent() {
+        let dir = std::env::temp_dir().join(format!("netassist-ka-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plist = dir.join("NetAssist.plist");
+
+        // The exact shape the plugin writes.
+        std::fs::write(
+            &plist,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+  <key>Label</key>
+  <string>NetAssist</string>
+  <key>ProgramArguments</key>
+  <array><string>/Applications/NetAssist.app/Contents/MacOS/netassist</string></array>
+  <key>RunAtLoad</key>
+  <true/>
+  </dict>
+</plist>
+"#,
+        )
+        .unwrap();
+
+        inject_keepalive(&plist).expect("first injection must succeed");
+        inject_keepalive(&plist).expect("second injection must succeed (idempotent)");
+
+        let json = std::process::Command::new("plutil")
+            .args(["-convert", "json", "-o", "-"])
+            .arg(&plist)
+            .output()
+            .unwrap();
+        assert!(json.status.success());
+        let stdout = String::from_utf8_lossy(&json.stdout);
+        assert!(
+            stdout.contains(r#""SuccessfulExit" : false"#)
+                || stdout.contains(r#""SuccessfulExit":false"#),
+            "KeepAlive.SuccessfulExit must be false, got: {}",
+            stdout
+        );
+        assert!(stdout.contains(r#""RunAtLoad" : true"#) || stdout.contains(r#""RunAtLoad":true"#));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
