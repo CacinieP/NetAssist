@@ -1,7 +1,14 @@
 use crate::models::{AppTraffic, TrafficStats};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use sysinfo::System;
-use tokio::sync::Mutex;
+
+/// Minimum spacing between OS-counter samples when running on battery.
+///
+/// The frontend polls every second regardless; when unplugged, polls inside
+/// this window are answered from `TrafficState::last_stats` without spawning
+/// any subprocess, cutting counter sampling (and wakeups) 5×. Plugged in,
+/// every poll samples as before.
+const BATTERY_MIN_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Traffic monitoring state.
 ///
@@ -13,6 +20,9 @@ struct TrafficState {
     last_rx_bytes: Option<u64>,
     last_tx_bytes: Option<u64>,
     last_update: Option<std::time::Instant>,
+    /// Last computed stats, kept so battery-throttled polls can be answered
+    /// without touching the OS counters.
+    last_stats: Option<TrafficStats>,
 }
 
 pub struct TrafficMonitor {
@@ -26,46 +36,65 @@ impl TrafficMonitor {
                 last_rx_bytes: None,
                 last_tx_bytes: None,
                 last_update: None,
+                last_stats: None,
             })),
         }
     }
 
     /// Get current traffic statistics
     pub async fn get_stats(&self) -> Result<TrafficStats, String> {
-        // Read the OS counters OUTSIDE the lock (get_interface_total_bytes()
-        // may spawn external commands on macOS; holding the async mutex while
-        // doing blocking work would stall other commands).
-        let (current_rx, current_tx) =
-            tokio::task::spawn_blocking(crate::platform::get_interface_total_bytes)
-                .await
-                .unwrap_or((0, 0));
-
-        let now = std::time::Instant::now();
-        let mut state = self.state.lock().await;
-
-        // Compute rate from the previous reading; no previous reading yet → 0.
-        let mut download_bps = 0.0f64;
-        let mut upload_bps = 0.0f64;
-        if let (Some(last_rx), Some(last_tx), Some(last_update)) =
-            (state.last_rx_bytes, state.last_tx_bytes, state.last_update)
-        {
-            let elapsed = now.duration_since(last_update).as_secs_f64();
-            if elapsed > 0.001 {
-                download_bps = (current_rx.saturating_sub(last_rx)) as f64 / elapsed;
-                upload_bps = (current_tx.saturating_sub(last_tx)) as f64 / elapsed;
+        // Power detection, counter reads and the rate math are all blocking
+        // work — do everything on one blocking thread. A std::Mutex (not
+        // tokio's) is correct here: it is only ever held across cheap memory
+        // ops, never across the subprocess call.
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_blocking(move || {
+            // Battery throttle: answer from cache when unplugged and the last
+            // sample is fresher than BATTERY_MIN_SAMPLE_INTERVAL.
+            if crate::core::power::is_on_battery_cached() {
+                let snapshot = state.lock().map_err(|e| format!("Lock error: {}", e))?;
+                let fresh = snapshot
+                    .last_update
+                    .is_some_and(|t| t.elapsed() < BATTERY_MIN_SAMPLE_INTERVAL);
+                if fresh {
+                    if let Some(stats) = snapshot.last_stats.clone() {
+                        return Ok(stats);
+                    }
+                }
             }
-        }
 
-        // Update state
-        state.last_rx_bytes = Some(current_rx);
-        state.last_tx_bytes = Some(current_tx);
-        state.last_update = Some(now);
+            let (current_rx, current_tx) = crate::platform::get_interface_total_bytes();
+            let now = std::time::Instant::now();
+            let mut state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
 
-        Ok(TrafficStats {
-            download_bps,
-            upload_bps,
-            timestamp: chrono::Utc::now().timestamp_millis(),
+            // Compute rate from the previous reading; no previous reading yet → 0.
+            let mut download_bps = 0.0f64;
+            let mut upload_bps = 0.0f64;
+            if let (Some(last_rx), Some(last_tx), Some(last_update)) =
+                (state.last_rx_bytes, state.last_tx_bytes, state.last_update)
+            {
+                let elapsed = now.duration_since(last_update).as_secs_f64();
+                if elapsed > 0.001 {
+                    download_bps = (current_rx.saturating_sub(last_rx)) as f64 / elapsed;
+                    upload_bps = (current_tx.saturating_sub(last_tx)) as f64 / elapsed;
+                }
+            }
+
+            // Update state
+            state.last_rx_bytes = Some(current_rx);
+            state.last_tx_bytes = Some(current_tx);
+            state.last_update = Some(now);
+
+            let stats = TrafficStats {
+                download_bps,
+                upload_bps,
+                timestamp: chrono::Utc::now().timestamp_millis(),
+            };
+            state.last_stats = Some(stats.clone());
+            Ok(stats)
         })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
     }
 }
 
