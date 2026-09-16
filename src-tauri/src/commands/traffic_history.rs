@@ -1032,12 +1032,10 @@ mod tests {
         let (mut storage, _dir) = storage_in_tempdir();
         let today = Local::now().date_naive();
         let day = |offset: i64| {
-            storage
-                .data_dir
-                .join(format!(
-                    "{}.json",
-                    (today - chrono::Duration::days(offset)).format("%Y-%m-%d")
-                ))
+            storage.data_dir.join(format!(
+                "{}.json",
+                (today - chrono::Duration::days(offset)).format("%Y-%m-%d")
+            ))
         };
 
         let expired = day(HISTORY_RETENTION_DAYS + 1);
@@ -1053,7 +1051,9 @@ mod tests {
         let expired_key = (today - chrono::Duration::days(HISTORY_RETENTION_DAYS + 1))
             .format("%Y-%m-%d")
             .to_string();
-        storage.history_cache.insert(expired_key.clone(), Vec::new());
+        storage
+            .history_cache
+            .insert(expired_key.clone(), Vec::new());
 
         storage.prune_old_history();
         assert!(
