@@ -16,10 +16,21 @@ fn local_from_epoch(secs: i64) -> Option<DateTime<Local>> {
         .map(|u| u.with_timezone(&Local))
 }
 
+/// How many days of per-day history files to keep on disk.
+///
+/// Charts read at most 14 days back (`get_traffic_history` clamps to that),
+/// and the per-point cumulative fallback spans at most the current calendar
+/// month (31 days). 45 days covers both with margin, so pruning never
+/// affects a value the UI can still display.
+const HISTORY_RETENTION_DAYS: i64 = 45;
+
 /// Traffic history storage state
 struct TrafficHistoryStorage {
     data_dir: PathBuf,
     history_cache: HashMap<String, Vec<TrafficHistoryPoint>>,
+    /// Local date (`YYYY-MM-DD`) of the last retention sweep, so the sweep
+    /// runs at most once per day no matter how often points are recorded.
+    last_prune_date: Option<String>,
 }
 
 impl TrafficHistoryStorage {
@@ -31,10 +42,70 @@ impl TrafficHistoryStorage {
         fs::create_dir_all(&data_dir)
             .map_err(|e| format!("Failed to create data directory: {}", e))?;
 
-        Ok(Self {
+        let mut storage = Self {
             data_dir,
             history_cache: HashMap::new(),
-        })
+            last_prune_date: None,
+        };
+        // Sweep on startup so an install that runs for months still prunes
+        // even if the day never rolls over while the app is open.
+        storage.prune_old_history();
+        Ok(storage)
+    }
+
+    /// Delete per-day history files older than [`HISTORY_RETENTION_DAYS`].
+    ///
+    /// Only files named `YYYY-MM-DD.json` (plus stale `.json.tmp` siblings
+    /// left by an interrupted atomic write) are considered; anything else —
+    /// notably `anchors.json` — is left untouched. Runs at most once per
+    /// local date.
+    fn prune_old_history(&mut self) {
+        let today = Local::now().date_naive();
+        let today_str = today.format("%Y-%m-%d").to_string();
+        if self.last_prune_date.as_deref() == Some(today_str.as_str()) {
+            return;
+        }
+        self.last_prune_date = Some(today_str);
+
+        let cutoff = today - chrono::Duration::days(HISTORY_RETENTION_DAYS);
+        let entries = match fs::read_dir(&self.data_dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!("Retention sweep could not read {:?}: {}", self.data_dir, e);
+                return;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // Accept both "YYYY-MM-DD.json" and stale "YYYY-MM-DD.json.tmp".
+            let date_part = match name
+                .strip_suffix(".json")
+                .or_else(|| name.strip_suffix(".json.tmp"))
+            {
+                Some(part) => part,
+                None => continue,
+            };
+            // Guards against anything not shaped like a day file (anchors.json,
+            // random files the user dropped in the directory, ...).
+            if Self::validate_date_format(date_part).is_err() {
+                continue;
+            }
+            let Ok(date) = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d") else {
+                continue;
+            };
+            if date >= cutoff {
+                continue;
+            }
+            self.history_cache.remove(date_part);
+            match fs::remove_file(&path) {
+                Ok(()) => tracing::info!("Retention sweep removed {}", name),
+                Err(e) => tracing::warn!("Retention sweep failed to remove {}: {}", name, e),
+            }
+        }
     }
 
     /// Validate date string format (YYYY-MM-DD) to prevent path traversal
@@ -109,6 +180,10 @@ impl TrafficHistoryStorage {
 
     /// Add a new traffic data point (stored under the LOCAL calendar date).
     fn add_data_point(&mut self, download_bps: f64, upload_bps: f64) -> Result<(), String> {
+        // Once-per-day retention sweep, piggybacked on the record path so a
+        // long-running instance prunes on day rollover without a timer.
+        self.prune_old_history();
+
         let now = Local::now();
         let date_str = now.format("%Y-%m-%d").to_string();
         let timestamp = now.timestamp_millis();
@@ -613,6 +688,7 @@ fn history_storage() -> &'static std::sync::Mutex<TrafficHistoryStorage> {
             TrafficHistoryStorage {
                 data_dir: PathBuf::from("."),
                 history_cache: HashMap::new(),
+                last_prune_date: None,
             }
         }))
     })
@@ -730,6 +806,7 @@ mod tests {
         let storage = TrafficHistoryStorage {
             data_dir,
             history_cache: HashMap::new(),
+            last_prune_date: None,
         };
         (storage, dir)
     }
@@ -945,5 +1022,71 @@ mod tests {
         // load that falls back to defaults on any parse failure.
         let anchors = storage.load_anchors();
         assert_eq!(anchors.day.start_ts, 0, "mismatched schema -> defaults");
+    }
+
+    /// The retention sweep must delete day files (and stale .json.tmp) older
+    /// than the retention window while keeping recent day files and never
+    /// touching non-day files like anchors.json.
+    #[test]
+    fn test_prune_removes_only_files_past_retention() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let today = Local::now().date_naive();
+        let day = |offset: i64| {
+            storage.data_dir.join(format!(
+                "{}.json",
+                (today - chrono::Duration::days(offset)).format("%Y-%m-%d")
+            ))
+        };
+
+        let expired = day(HISTORY_RETENTION_DAYS + 1);
+        let boundary_keep = day(HISTORY_RETENTION_DAYS - 1);
+        let recent = day(3);
+        let stale_tmp = expired.with_extension("json.tmp");
+        let anchors = storage.anchors_file_path();
+
+        for path in [&expired, &boundary_keep, &recent, &stale_tmp, &anchors] {
+            fs::write(path, "[]").unwrap();
+        }
+        // Seed the cache with the expired date; pruning must evict it.
+        let expired_key = (today - chrono::Duration::days(HISTORY_RETENTION_DAYS + 1))
+            .format("%Y-%m-%d")
+            .to_string();
+        storage
+            .history_cache
+            .insert(expired_key.clone(), Vec::new());
+
+        storage.prune_old_history();
+        assert!(
+            !storage.history_cache.contains_key(&expired_key),
+            "pruned date must be evicted from history_cache"
+        );
+
+        assert!(!expired.exists(), "expired day file must be removed");
+        assert!(!stale_tmp.exists(), "expired .json.tmp must be removed");
+        assert!(boundary_keep.exists(), "file inside window must be kept");
+        assert!(recent.exists(), "recent file must be kept");
+        assert!(anchors.exists(), "anchors.json must never be pruned");
+    }
+
+    /// The sweep is guarded to run at most once per local date; a second call
+    /// the same day must be a no-op even if new expired files appear.
+    #[test]
+    fn test_prune_runs_at_most_once_per_day() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        storage.prune_old_history();
+        assert!(storage.last_prune_date.is_some());
+
+        let today = Local::now().date_naive();
+        let expired = storage.data_dir.join(format!(
+            "{}.json",
+            (today - chrono::Duration::days(HISTORY_RETENTION_DAYS + 5)).format("%Y-%m-%d")
+        ));
+        fs::write(&expired, "[]").unwrap();
+
+        storage.prune_old_history();
+        assert!(
+            expired.exists(),
+            "second same-day sweep must be skipped by the guard"
+        );
     }
 }
