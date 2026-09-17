@@ -109,6 +109,7 @@ fn main() {
             commands::ip_info::get_network_status,
             commands::traffic::get_realtime_traffic,
             commands::traffic::get_app_traffic_ranking,
+            commands::traffic::get_interface_counters,
             commands::traffic_history::get_cumulative_traffic,
             commands::traffic_history::get_traffic_history,
             commands::traffic_history::record_traffic_point,

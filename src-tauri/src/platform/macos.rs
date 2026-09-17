@@ -876,10 +876,21 @@ pub fn get_process_traffic_stats(
     let content = match output {
         Ok(result) => String::from_utf8_lossy(&result.stdout).into_owned(),
         Err(e) => {
-            tracing::warn!("Failed to run nettop: {}", e);
+            tracing::warn!(
+                "Failed to run nettop: {}; per-process traffic stats will be empty",
+                e
+            );
             return Ok(stats);
         }
     };
+
+    // Debug: log nettop output size for troubleshooting
+    if content.is_empty() {
+        tracing::warn!(
+            "nettop produced empty output; check Full Disk Access or nettop permissions"
+        );
+        return Ok(stats);
+    }
 
     // Collect only the SECOND sample block (the 1s delta). Each sample begins
     // with a header line that starts with "time".
@@ -901,9 +912,15 @@ pub fn get_process_traffic_stats(
         blocks.push(current);
     }
 
+    if blocks.is_empty() {
+        tracing::warn!("nettop output contained no data blocks; check macOS version compatibility with nettop flags");
+        return Ok(stats);
+    }
+
     // Prefer the delta (second) block; fall back to the first block.
     let sample = blocks.last().cloned().unwrap_or_default();
 
+    let mut parsed_count = 0usize;
     for line in sample {
         // Split by comma. Verified column layout (0-indexed) for
         // `nettop -P -d -j bytes_in,bytes_out -x`:
@@ -933,6 +950,7 @@ pub fn get_process_traffic_stats(
         let bytes_in = cols[4].trim().parse::<u64>().unwrap_or(0);
         let bytes_out = cols[5].trim().parse::<u64>().unwrap_or(0);
 
+        parsed_count += 1;
         stats.insert(
             pid,
             ProcessTrafficStats {
@@ -944,6 +962,14 @@ pub fn get_process_traffic_stats(
                 bytes_out,
             },
         );
+    }
+
+    if parsed_count == 0 {
+        tracing::warn!("nettop parsed 0 process traffic entries; column layout may have changed on this macOS version");
+    } else {
+        // Success path runs on every ranking poll (~3s); keep it below the
+        // release INFO threshold so it never floods the log.
+        tracing::debug!("nettop parsed {} process traffic entries", parsed_count);
     }
 
     Ok(stats)
