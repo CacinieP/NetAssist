@@ -282,17 +282,65 @@ impl TrafficHistoryStorage {
         let now = Local::now();
         let start_time = now - chrono::Duration::hours(hours);
 
+        let data = self.collect_points_between(start_time, now)?;
+
+        Ok(TrafficHistory {
+            data,
+            start_timestamp: start_time.timestamp_millis(),
+            end_timestamp: now.timestamp_millis(),
+        })
+    }
+
+    /// Get exportable history for a named period: `day` / `week` / `month`
+    /// (local calendar bounds, same semantics as the cumulative stats) or
+    /// `all` (the whole retention window).
+    ///
+    /// Unlike `get_traffic_history` — which is chart-facing and clamped to
+    /// 14 days — this serves exports and honors the full retention window,
+    /// so 本月 / 全部 exports aren't silently truncated.
+    fn get_export_history(&self, period: &str) -> Result<TrafficHistory, String> {
+        let now = Local::now();
+        let start_time = match period {
+            "all" => now - chrono::Duration::days(HISTORY_RETENTION_DAYS),
+            "day" | "week" | "month" => {
+                use chrono::TimeZone;
+                let (start, _, _) = Self::period_bounds(period, now)?;
+                Local
+                    .timestamp_opt(start, 0)
+                    .single()
+                    .ok_or_else(|| "Invalid period start".to_string())?
+            }
+            other => return Err(format!("Unsupported export period: {}", other)),
+        };
+
+        let data = self.collect_points_between(start_time, now)?;
+
+        Ok(TrafficHistory {
+            data,
+            start_timestamp: start_time.timestamp_millis(),
+            end_timestamp: now.timestamp_millis(),
+        })
+    }
+
+    /// Collect every recorded point with
+    /// `start.timestamp_millis() <= timestamp <= end.timestamp_millis()`,
+    /// walking the per-day files across the range and sorting by timestamp.
+    fn collect_points_between(
+        &self,
+        start: DateTime<Local>,
+        end: DateTime<Local>,
+    ) -> Result<Vec<TrafficHistoryPoint>, String> {
         let mut all_data = Vec::new();
 
-        let start_date = local_from_epoch(start_time.timestamp()).unwrap_or_else(Local::now);
+        let start_date = local_from_epoch(start.timestamp()).unwrap_or_else(Local::now);
         let mut current_date = start_date;
 
-        while current_date <= now {
+        while current_date <= end {
             let date_str = current_date.format("%Y-%m-%d").to_string();
             if let Ok(day_data) = self.load_day_history(&date_str) {
                 for point in day_data {
-                    if point.timestamp >= start_time.timestamp_millis()
-                        && point.timestamp <= now.timestamp_millis()
+                    if point.timestamp >= start.timestamp_millis()
+                        && point.timestamp <= end.timestamp_millis()
                     {
                         all_data.push(point);
                     }
@@ -302,12 +350,7 @@ impl TrafficHistoryStorage {
         }
 
         all_data.sort_by_key(|p| p.timestamp);
-
-        Ok(TrafficHistory {
-            data: all_data,
-            start_timestamp: start_time.timestamp_millis(),
-            end_timestamp: now.timestamp_millis(),
-        })
+        Ok(all_data)
     }
 
     /// Compute the (start, end, label) bounds for a period relative to `now`
@@ -733,6 +776,21 @@ pub async fn get_traffic_history(hours: i64) -> Result<TrafficHistory, String> {
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
         storage.get_traffic_history(hours)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Get exportable history for a named period (`day` / `week` / `month` /
+/// `all`). Serves the export flow; honors the full retention window instead
+/// of the chart-facing 14-day clamp.
+#[tauri::command]
+pub async fn get_export_traffic_history(period: String) -> Result<TrafficHistory, String> {
+    tokio::task::spawn_blocking(move || {
+        let storage = history_storage()
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        storage.get_export_history(&period)
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?

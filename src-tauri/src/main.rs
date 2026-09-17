@@ -113,6 +113,7 @@ fn main() {
             commands::traffic::get_interface_counters,
             commands::traffic_history::get_cumulative_traffic,
             commands::traffic_history::get_traffic_history,
+            commands::traffic_history::get_export_traffic_history,
             commands::traffic_history::record_traffic_point,
             commands::traffic_history::get_traffic_alerts,
             commands::traffic_history::update_traffic_alert,
