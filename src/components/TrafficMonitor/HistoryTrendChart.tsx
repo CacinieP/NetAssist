@@ -3,13 +3,13 @@ import * as echarts from "echarts";
 import { invoke } from "@tauri-apps/api/core";
 import { useSettingsStore } from "../../store/settingsStore";
 
-interface TrafficHistoryPoint {
+export interface TrafficHistoryPoint {
   timestamp: number;
   download_bps: number;
   upload_bps: number;
 }
 
-interface TrafficHistory {
+export interface TrafficHistory {
   data: TrafficHistoryPoint[];
   start_timestamp: number;
   end_timestamp: number;

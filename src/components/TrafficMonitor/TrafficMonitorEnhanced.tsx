@@ -8,7 +8,23 @@ import { useRealtimeTraffic, useRecordTrafficPoint } from "../../hooks/useTraffi
 import { formatSpeed, formatBytes } from "../../utils/formatUtils";
 import { notify } from "../../utils/notify";
 import { useSettingsStore } from "../../store/settingsStore";
-import HistoryTrendChart from "./HistoryTrendChart";
+import HistoryTrendChart, { type TrafficHistory } from "./HistoryTrendChart";
+
+/** Local-time "YYYY-MM-DD HH:mm:ss" for export rows (no locale commas). */
+function formatLocalTimestamp(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+type ExportPeriod = "day" | "week" | "month" | "all";
+
+const EXPORT_PERIOD_LABELS: Record<ExportPeriod, string> = {
+  day: "今日",
+  week: "本周",
+  month: "本月",
+  all: "全部历史",
+};
 
 // ==================== Type Definitions ====================
 
@@ -375,6 +391,7 @@ export default function TrafficMonitorEnhanced() {
   const [searchTerm, setSearchTerm] = useState("");
   const [historyHours, setHistoryHours] = useState<number>(1);
   const [period, setPeriod] = useState<Period>("day");
+  const [exportPeriod, setExportPeriod] = useState<ExportPeriod>("day");
   const [sortField, setSortField] = useState<SortField>("total");
   const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
   const [showManageAlerts, setShowManageAlerts] = useState(false);
@@ -617,11 +634,34 @@ export default function TrafficMonitorEnhanced() {
     const osTotalDownload = rxBytes;
     const osTotalUpload = txBytes;
 
+    // History samples for the user-selected export range. Optional: the
+    // export still succeeds (snapshot-only) if the backend history is
+    // unavailable.
+    let history: TrafficHistory | null = null;
+    try {
+      history = await invoke<TrafficHistory>("get_export_traffic_history", {
+        period: exportPeriod,
+      });
+    } catch (err) {
+      console.warn("History samples unavailable for export:", err);
+    }
+    const rangeLabel = EXPORT_PERIOD_LABELS[exportPeriod];
+
     try {
       if (format === "json") {
         const exportPayload = {
           timestamp,
           period,
+          exported_range: {
+            period: exportPeriod,
+            label: rangeLabel,
+            start_timestamp: history?.start_timestamp ?? null,
+            end_timestamp: history?.end_timestamp ?? null,
+            point_count: history?.data.length ?? 0,
+          },
+          // Sampled series behind the selected range; every point carries
+          // its own timestamp.
+          history: history?.data ?? [],
           summary: {
             total_apps: filteredAndSortedApps.length,
             total_download_bps: Math.round(totals.download),
@@ -681,7 +721,13 @@ export default function TrafficMonitorEnhanced() {
           `总累计流量,${formatBytes(totals.cumulativeDownload + totals.cumulativeUpload)}\n` +
           `OS接口下载字节,${osTotalDownload}\n` +
           `OS接口上传字节,${osTotalUpload}\n` +
-          `OS接口总字节,${osTotalDownload + osTotalUpload}\n`;
+          `OS接口总字节,${osTotalDownload + osTotalUpload}\n` +
+          `\n# 历史采样（${rangeLabel}，共 ${history?.data.length ?? 0} 点）\n` +
+          "时间,下载(B/s),上传(B/s)\n" +
+          (history?.data ?? [])
+            .map(p => `${formatLocalTimestamp(p.timestamp)},${Math.round(p.download_bps)},${Math.round(p.upload_bps)}`)
+            .join("\n") +
+          (history && history.data.length > 0 ? "\n" : "");
 
         const fileName = `traffic_export_${timestamp.replace(/[:.]/g, '-')}.csv`;
         const filePath = await save({
@@ -792,6 +838,18 @@ export default function TrafficMonitorEnhanced() {
           <p className="text-gray-500 dark:text-gray-400">实时流量统计与应用排行</p>
         </div>
         <div className="flex gap-2">
+          <select
+            value={exportPeriod}
+            onChange={(e) => setExportPeriod(e.target.value as ExportPeriod)}
+            title="导出的历史采样时间范围"
+            className="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 rounded-lg transition-colors"
+          >
+            {(Object.keys(EXPORT_PERIOD_LABELS) as ExportPeriod[]).map((p) => (
+              <option key={p} value={p}>
+                范围：{EXPORT_PERIOD_LABELS[p]}
+              </option>
+            ))}
+          </select>
           <button
             onClick={() => exportData("csv")}
             className="flex items-center gap-1 px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
