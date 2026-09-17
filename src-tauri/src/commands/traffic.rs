@@ -242,6 +242,17 @@ pub async fn get_realtime_traffic() -> Result<TrafficStats, String> {
     traffic_monitor().get_stats().await
 }
 
+/// Get OS interface total bytes (rx/tx counters).
+///
+/// Exposed as a Tauri command so the frontend can include OS-level
+/// cumulative traffic in exports as a fallback when per-process
+/// data (nettop) is unavailable.
+#[tauri::command]
+pub async fn get_interface_counters() -> Result<(u64, u64), String> {
+    let (rx, tx) = crate::platform::get_interface_total_bytes();
+    Ok((rx, tx))
+}
+
 /// Get application traffic ranking
 ///
 /// NOTE: `get_app_ranking` performs blocking syscalls (nettop, ps, sysinfo

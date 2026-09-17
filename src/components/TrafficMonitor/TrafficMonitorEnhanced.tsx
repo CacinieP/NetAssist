@@ -600,6 +600,23 @@ export default function TrafficMonitorEnhanced() {
       percentage: parseFloat(getAppPercentage(app).toFixed(2)),
     }));
 
+    // Fetch OS-level interface counters as a fallback/complement.
+    // Even when per-process data (nettop) is empty, these counters
+    // always reflect real traffic on the active interface.
+    let rxBytes = 0;
+    let txBytes = 0;
+    try {
+      const counters = await invoke<[number, number]>("get_interface_counters");
+      rxBytes = counters[0];
+      txBytes = counters[1];
+    } catch {
+      // Interface counters unavailable; fall back to app-level totals.
+    }
+
+    // Derive OS-level totals from interface counters.
+    const osTotalDownload = rxBytes;
+    const osTotalUpload = txBytes;
+
     try {
       if (format === "json") {
         const exportPayload = {
@@ -613,6 +630,12 @@ export default function TrafficMonitorEnhanced() {
             total_download_bytes: totals.cumulativeDownload,
             total_upload_bytes: totals.cumulativeUpload,
             total_bytes: totals.cumulativeDownload + totals.cumulativeUpload,
+            // OS-level interface counters — always populated when the
+            // active interface is readable, even if nettop returns no
+            // per-process data.
+            os_download_bytes: osTotalDownload,
+            os_upload_bytes: osTotalUpload,
+            os_total_bytes: osTotalDownload + osTotalUpload,
           },
           apps: data,
         };
@@ -655,7 +678,10 @@ export default function TrafficMonitorEnhanced() {
           `总实时速度,${formatSpeed(totals.total)}\n` +
           `总累计下载,${formatBytes(totals.cumulativeDownload)}\n` +
           `总累计上传,${formatBytes(totals.cumulativeUpload)}\n` +
-          `总累计流量,${formatBytes(totals.cumulativeDownload + totals.cumulativeUpload)}\n`;
+          `总累计流量,${formatBytes(totals.cumulativeDownload + totals.cumulativeUpload)}\n` +
+          `OS接口下载字节,${osTotalDownload}\n` +
+          `OS接口上传字节,${osTotalUpload}\n` +
+          `OS接口总字节,${osTotalDownload + osTotalUpload}\n`;
 
         const fileName = `traffic_export_${timestamp.replace(/[:.]/g, '-')}.csv`;
         const filePath = await save({
