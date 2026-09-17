@@ -9,6 +9,7 @@
 
 mod commands;
 mod core;
+mod logging;
 mod models;
 mod platform;
 
@@ -21,16 +22,16 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 fn main() {
-    // Initialize tracing: debug level in debug builds (for process name
-    // resolution), info level in release — release builds were running with
-    // DEBUG logs (and per-connection debug lines), which slowed it down.
-    tracing_subscriber::fmt()
-        .with_max_level(if cfg!(debug_assertions) {
-            tracing::Level::DEBUG
-        } else {
-            tracing::Level::INFO
-        })
-        .init();
+    // Initialize logging: daily rolling files under the app config dir, plus
+    // stdout in debug builds for `tauri dev`. Level follows the existing
+    // convention — debug level in debug builds (for process name resolution),
+    // info level in release: release previously ran DEBUG logs on hot paths
+    // and it slowed things down. Packaged .app stdout is discarded by macOS,
+    // so the file sink is the only one that survives into production.
+    let _log_guard = logging::init();
+    // `_log_guard` (not `_`): dropping the non-blocking writer's guard early
+    // would silently truncate file output.
+    logging::spawn_retention_sweeper();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

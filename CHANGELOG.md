@@ -2,6 +2,16 @@
 
 本文件记录 NetAssist 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.7] — 2026-09-17
+
+### ✨ 新增
+
+- **运行日志持久化**：日志按天滚动写入配置目录 `logs/` 子目录（如 `~/Library/Application Support/NetAssist/logs/netassist.log.2026-09-17`），非阻塞写入不影响界面流畅度；自动保留最近 7 天，过期文件在启动时与每日翻篇时清理。此前打包版日志仅输出到 stdout（被系统丢弃），排障信息无从获取；现在反馈问题可直接附上对应日期的日志文件。debug 构建同时保留终端输出，日志级别约定不变（debug 构建 DEBUG / release 构建 INFO）。
+
+### 🔧 变更
+
+- 新增 `tracing-appender` 依赖；日志初始化迁移至 `src-tauri/src/logging.rs` 模块（含保留清理的单元测试与后台清理线程）。
+
 ## [0.3.6] — 2026-09-17
 
 ### ✨ 新增
@@ -49,6 +59,7 @@
 
 - 修复流量监控页「只有实时流量有数字」：累计流量改用 OS 接口字节计数器 + 磁盘锚点（`traffic/anchors.json`），打开页面立即显示今日/本周/本月真实流量，并自动处理周期翻篇与接口重置（Wi-Fi 切换/重启）；流量告警与历史趋势图随之恢复。
 
+[0.3.7]: https://github.com/CacinieP/NetAssist/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/CacinieP/NetAssist/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/CacinieP/NetAssist/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/CacinieP/NetAssist/compare/v0.3.3...v0.3.4
