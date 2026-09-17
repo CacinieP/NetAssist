@@ -11,6 +11,18 @@ NetAssist 是基于 **Tauri 2 + Rust + React + TypeScript** 构建的网络监�
 
 [下载安装](https://github.com/CacinieP/NetAssist/releases/latest) · [功能概览](#功能概览) · [从源码运行](#从源码运行) · [反馈问题](https://github.com/CacinieP/NetAssist/issues)
 
+## 界面预览
+
+截图均为脱敏后的实际运行画面（深色模式，macOS）。
+
+| 仪表盘 | 流量监控 |
+|---|---|
+| ![仪表盘](docs/screenshots/dashboard.png) | ![流量监控](docs/screenshots/traffic.png) |
+
+| 连接管理 | 断网急救 |
+|---|---|
+| ![连接管理](docs/screenshots/connections.png) | ![断网急救](docs/screenshots/rescue.png) |
+
 ## 适合什么时候用
 
 - **网页突然打不开**：检查网络状态，运行诊断，查看 DNS 与 HTTP 连通性结果，再选择修复操作。
