@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { useSettingsStore } from "./store/settingsStore";
 import { useRealtimeTraffic } from "./hooks/useTrafficData";
 import { useNetworkData } from "./hooks/useNetworkData";
+import { useTrafficAlertMonitor } from "./hooks/useTrafficAlertMonitor";
 import { notify } from "./utils/notify";
 import StatusBar from "./components/StatusBar/StatusBar";
 import Navigation from "./components/Navigation/Navigation";
@@ -37,6 +38,12 @@ function App() {
   // cannot hammer the network.
   const intervalSecs = Math.max(1, Math.min(settings.refresh_interval_secs || 5, 300));
   const { networkStatus, ipInfo } = useNetworkData(intervalSecs, settings.show_geoip, { owner: true });
+
+  // Traffic-threshold watchdog: app-level (not page-level) so the detection
+  // and its notifications keep running on Dashboard/Settings/Emergency too —
+  // it used to live in the Traffic page's useEffect and stopped the moment
+  // the user navigated away.
+  useTrafficAlertMonitor();
 
   // Load persisted settings
   useEffect(() => {

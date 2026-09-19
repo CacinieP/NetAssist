@@ -6,7 +6,6 @@ import * as echarts from "echarts";
 import { Activity, AlertTriangle, Download, Upload, BarChart3, PieChart, FileText, Plus, Trash2, Edit, X, Save } from "lucide-react";
 import { useRealtimeTraffic, useRecordTrafficPoint } from "../../hooks/useTrafficData";
 import { formatSpeed, formatBytes } from "../../utils/formatUtils";
-import { notify } from "../../utils/notify";
 import { useSettingsStore } from "../../store/settingsStore";
 import HistoryTrendChart, { type TrafficHistory } from "./HistoryTrendChart";
 
@@ -375,18 +374,12 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
 
 // ==================== Main Component ====================
 
-// Module-scope alert dedupe: persists across page mounts so switching away
-// from the Traffic page and back does NOT re-fire the same "traffic limit
-// reached" notifications (a component-level ref reset on every mount).
-let notifiedAlertIds: Set<string> = new Set();
-
 export default function TrafficMonitorEnhanced() {
   // State
   const [apps, setApps] = useState<AppTraffic[]>([]);
   const [cumulative, setCumulative] = useState<CumulativeTraffic | null>(null);
   const [alerts, setAlerts] = useState<TrafficAlert[]>([]);
   const [alertStatuses, setAlertStatuses] = useState<AlertStatus[]>([]);
-  const { settings } = useSettingsStore();
 
   const [searchTerm, setSearchTerm] = useState("");
   const [historyHours, setHistoryHours] = useState<number>(1);
@@ -480,34 +473,18 @@ export default function TrafficMonitorEnhanced() {
 
       // check_traffic_alerts evaluates every alert against its OWN period
       // (day/week/month per alert). The UI-period arg is only for display.
+      //
+      // Notifications for triggered thresholds are NOT decided here: the
+      // app-level useTrafficAlertMonitor watchdog owns them so they keep
+      // firing while the user is on another page.
       const statuses = await invoke<AlertStatus[]>("check_traffic_alerts", {});
       setAlertStatuses(statuses);
-
-      // Fire a native notification on the not-triggered → triggered
-      // transition for any alert, gated by the notify_traffic_limit setting.
-      //
-      // Deduplication lives at module scope so leaving and re-entering the
-      // page does NOT re-fire the same notifications (and is not coupled to
-      // the UI period selector).
-      if (settings.notify_traffic_limit) {
-        const newlyTriggered = statuses.filter(
-          s => s.triggered && !notifiedAlertIds.has(s.alert_id)
-        );
-        // Remember everything currently triggered, and drop ids that have
-        // cleared so a later re-trigger can notify again.
-        notifiedAlertIds = new Set(
-          statuses.filter(s => s.triggered).map(s => s.alert_id)
-        );
-        if (newlyTriggered.length > 0) {
-          void notify("流量告警", `有 ${newlyTriggered.length} 项流量阈值已触发，请查看流量监控`);
-        }
-      }
     } catch (error) {
       console.error("Failed to fetch alerts:", error);
     } finally {
       setLoading(prev => ({ ...prev, alerts: false }));
     }
-  }, [settings.notify_traffic_limit]);
+  }, []);
 
   // Effects
   useEffect(() => {

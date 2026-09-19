@@ -1,0 +1,43 @@
+# cargo-audit configuration for NetAssist.
+#
+# Run it from this directory (src-tauri/):
+#
+#   cargo audit
+#
+# Only the two advisories listed below are excepted, and each one is justified
+# in a comment. Any NEW advisory (vulnerability, unmaintained crate, unsound
+# API, …) still fails the audit — this list must never be widened to silence a
+# future finding; close the finding instead.
+#
+# ---------------------------------------------------------------------------
+# RUSTSEC-2026-0195 — quick-xml 0.37.5, unbounded namespace-declaration
+#                     allocation in `NsReader` (DoS, 7.5 high)
+# RUSTSEC-2026-0194 — quick-xml 0.37.5, quadratic runtime when checking a
+#                     start tag for duplicate attribute names (DoS, 7.5 high)
+#
+# Both need quick-xml's *parsing* API (`NsReader` / attribute iteration).
+# This app only reaches quick-xml through
+#
+#   tauri-plugin-notification → notify-rust → tauri-winrt-notification 0.7.2
+#
+# and 0.7.2 calls `quick_xml::escape::escape()` before handing the generated
+# XML to Windows' `XmlDocument::LoadXml()`. No `NsReader`, no attribute
+# iterator, so neither vulnerable function is on our path; the escaped strings
+# are built from fixed, built-in notification titles/bodies (no remote response
+# and no user input is ever formatted into them).
+#
+# The lockfile hit is real, but the vulnerable code is not reachable from this
+# application — an accurate risk assessment, not a blanket exemption.
+#
+# Removal plan (tracked in issue #34): tauri-winrt-notification 0.8.1 no longer
+# depends on quick-xml, so quick-xml 0.37.5 disappears as soon as notify-rust
+# moves off 0.7.x. Once that lands, delete both entries and re-run `cargo
+# audit`. Neither `cargo update -p quick-xml` nor adding a newer quick-xml is
+# enough today, because notify-rust pins tauri-winrt-notification `^0.7`,
+# which pins quick-xml `^0.37`.
+# ---------------------------------------------------------------------------
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
