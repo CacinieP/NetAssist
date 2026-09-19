@@ -582,7 +582,7 @@ npm run tauri build
 | `add_traffic_alert` | `alert: TrafficAlert` | `bool` |
 | `update_traffic_alert` | `alert: TrafficAlert` | `bool` |
 | `delete_traffic_alert` | `alertId: string` | `bool` |
-| `check_traffic_alerts` | `period: string` | `Vec<AlertStatus>` |
+| `check_traffic_alerts` | `period?: string`（兼容保留，后端忽略；每个告警按自身周期评估） | `Vec<AlertStatus>` |
 
 #### DNS 检测
 | 命令 | 参数 | 返回值 |

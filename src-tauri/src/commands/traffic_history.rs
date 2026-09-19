@@ -838,8 +838,12 @@ pub async fn delete_traffic_alert(alert_id: String) -> Result<(), String> {
 /// The `period` argument is accepted for backward compatibility with the old
 /// UI, but is intentionally ignored: every alert is evaluated against its own
 /// `period` (see `TrafficAlertManager::check_alerts`).
+///
+/// It MUST stay optional: Tauri rejects a call that omits a required key
+/// ("missing required key period"), so a plain `invoke("check_traffic_alerts", {})`
+/// fails hard against a `String` parameter.
 #[tauri::command]
-pub async fn check_traffic_alerts(_period: String) -> Result<Vec<AlertStatus>, String> {
+pub async fn check_traffic_alerts(_period: Option<String>) -> Result<Vec<AlertStatus>, String> {
     tokio::task::spawn_blocking(move || {
         let mut storage = history_storage()
             .lock()

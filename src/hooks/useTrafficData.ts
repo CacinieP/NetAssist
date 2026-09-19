@@ -12,6 +12,10 @@ export interface TrafficStats {
 let globalTrafficData: TrafficStats | null = null;
 let globalTrafficListeners: Set<(data: TrafficStats) => void> = new Set();
 let globalTrafficInterval: ReturnType<typeof setInterval> | null = null;
+// Single-flight guard: a `get_realtime_traffic` call that has not returned
+// yet must not be joined by the next tick (overlapping reads make the
+// backend compute the byte-delta over millisecond gaps → rate spikes).
+let trafficPollInFlight = false;
 
 function startGlobalTrafficPolling(intervalMs: number = 1000) {
   // Multiple consumers (dashboard cards etc.) mount at the same time. Only
@@ -23,6 +27,8 @@ function startGlobalTrafficPolling(intervalMs: number = 1000) {
   }
 
   const poll = async () => {
+    if (trafficPollInFlight) return;
+    trafficPollInFlight = true;
     try {
       const data = await invoke<TrafficStats>('get_realtime_traffic');
       globalTrafficData = data;
@@ -31,6 +37,8 @@ function startGlobalTrafficPolling(intervalMs: number = 1000) {
       }
     } catch {
       // Silently ignore — will retry next interval
+    } finally {
+      trafficPollInFlight = false;
     }
   };
 
@@ -87,17 +95,22 @@ export function useRecordTrafficPoint(intervalMs: number = 5000) {
   statsRef.current = stats;
 
   useEffect(() => {
+    // Single-flight: never stack up `record_traffic_point` writes.
+    let inFlight = false;
+
     const id = setInterval(async () => {
       const current = statsRef.current;
-      if (current) {
-        try {
-          await invoke('record_traffic_point', {
-            downloadBps: current.download_bps,
-            uploadBps: current.upload_bps,
-          });
-        } catch {
-          // Silently ignore
-        }
+      if (!current || inFlight) return;
+      inFlight = true;
+      try {
+        await invoke('record_traffic_point', {
+          downloadBps: current.download_bps,
+          uploadBps: current.upload_bps,
+        });
+      } catch {
+        // Silently ignore
+      } finally {
+        inFlight = false;
       }
     }, intervalMs);
 

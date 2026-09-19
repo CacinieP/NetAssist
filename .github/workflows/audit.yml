@@ -1,0 +1,52 @@
+name: Dependency audit
+
+# Lightweight dependency gate: `cargo audit` against the RustSec advisory DB.
+#
+# Separate from ci.yml so it only runs when the dependency graph changes (or
+# weekly, to pick up advisories published for CRATES WE ALREADY USE) — most
+# PRs that only touch src/ never pay for it. Informational findings
+# (unmaintained / unsound crates) are reported but do not fail the run; new
+# VULNERABILITIES do, except the two documented exceptions in
+# src-tauri/.cargo/audit.toml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/.cargo/audit.toml"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/.cargo/audit.toml"
+      - ".github/workflows/audit.yml"
+  schedule:
+    # Mondays 06:17 UTC — new advisories for existing deps.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Runs from src-tauri so cargo-audit picks up src-tauri/Cargo.lock and
+      # src-tauri/.cargo/audit.toml (exception list lives next to the lock).
+      - name: Audit dependencies against the RustSec DB
+        working-directory: src-tauri
+        run: cargo audit
