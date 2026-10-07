@@ -739,7 +739,7 @@ pub fn check_permissions() -> anyhow::Result<PermissionStatus> {
     // hardcoded en0). Requires the output to actually contain a parseable row.
     let default_iface = get_default_interface().unwrap_or_else(|_| "en0".to_string());
     match std::process::Command::new("netstat")
-        .args(["-b", "-I", &default_iface])
+        .args(["-n", "-b", "-I", &default_iface])
         .output()
     {
         Ok(output) if output.status.success() => {
@@ -792,7 +792,7 @@ pub fn get_interface_total_bytes() -> Result<super::CounterSnapshot, String> {
                 .and_then(|output| super::counters::macos_route_interface(&output))
         })
         .ok_or("Cannot determine an IPv4 or IPv6 routed interface")?;
-    let output = super::common::exec_command("netstat", &["-b", "-I", &interface])
+    let output = super::common::exec_command("netstat", &["-n", "-b", "-I", &interface])
         .map_err(|error| format!("Cannot read interface counters: {error}"))?;
     let (rx, tx) = super::counters::macos_interface_bytes(&output, &interface)?;
     Ok(super::CounterSnapshot {
@@ -820,6 +820,7 @@ pub fn get_interface_total_bytes() -> Result<super::CounterSnapshot, String> {
 /// are `bytes_in` / `bytes_out` deltas.
 pub fn get_process_traffic_stats(
 ) -> anyhow::Result<std::collections::HashMap<u32, ProcessTrafficStats>> {
+    // -n   : numeric addresses only; passive sampling must not resolve names
     // -P   : per-process summaries only
     // -d   : delta mode — report bytes since the previous sample
     // -j   : append only the listed columns (case-sensitive: -j, not -J)
@@ -828,6 +829,7 @@ pub fn get_process_traffic_stats(
     // -s 1 : request a 1s interval; the timestamps give the measured interval
     let output = std::process::Command::new("nettop")
         .args([
+            "-n",
             "-P",
             "-d",
             "-j",

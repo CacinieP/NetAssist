@@ -22,18 +22,52 @@ const PUBLIC_IP_SERVICES: [&str; 3] = [
 const PUBLIC_IP_SUCCESS_TTL: Duration = Duration::from_secs(15);
 const PUBLIC_IP_FAILURE_TTL: Duration = Duration::from_secs(15);
 
+#[derive(Clone, Copy)]
+enum IpProbeMode {
+    LocalOnly,
+    External { include_geoip: bool },
+}
+
 #[tauri::command]
 pub async fn get_ip_info(include_geoip: Option<bool>) -> Result<IPInfo, String> {
-    build_ip_info(include_geoip.unwrap_or(true), false).await
+    build_ip_info(IpProbeMode::External {
+        include_geoip: include_geoip.unwrap_or(true),
+    })
+    .await
 }
 
 /// Local-only diagnostics never wait on external HTTP requests.
-pub(crate) async fn get_local_ip_info_only() -> Result<IPInfo, String> {
-    build_ip_info(false, true).await
+#[tauri::command]
+pub async fn get_local_ip_info_only() -> Result<IPInfo, String> {
+    build_ip_info(IpProbeMode::LocalOnly).await
 }
 
-async fn build_ip_info(do_geoip: bool, skip_public_probe: bool) -> Result<IPInfo, String> {
-    let local_addresses = get_local_addresses();
+async fn build_ip_info(mode: IpProbeMode) -> Result<IPInfo, String> {
+    build_ip_info_with_probes(
+        mode,
+        get_local_addresses(),
+        get_public_ip_cached,
+        |ip| async move { crate::core::network::geoip::lookup_geoip(&ip).await },
+    )
+    .await
+}
+
+async fn build_ip_info_with_probes<P, PFut, G, GFut>(
+    mode: IpProbeMode,
+    local_addresses: Vec<LocalAddress>,
+    public_lookup: P,
+    mut geoip_lookup: G,
+) -> Result<IPInfo, String>
+where
+    P: FnOnce() -> PFut,
+    PFut: Future<Output = PublicIpObservation>,
+    G: FnMut(String) -> GFut,
+    GFut: Future<Output = Option<crate::models::GeoIPInfo>>,
+{
+    let (do_geoip, skip_public_probe) = match mode {
+        IpProbeMode::LocalOnly => (false, true),
+        IpProbeMode::External { include_geoip } => (include_geoip, false),
+    };
     let selected_ipv4 = local_addresses
         .iter()
         .find(|address| address.family == "ipv4");
@@ -50,7 +84,7 @@ async fn build_ip_info(do_geoip: bool, skip_public_probe: bool) -> Result<IPInfo
             probe: PublicIpProbe::default(),
         }
     } else {
-        get_public_ip_cached().await
+        public_lookup().await
     };
     let display_ipv4 = public.ip;
     // Compatibility field: this is local configuration, not a public IPv6 probe
@@ -65,12 +99,12 @@ async fn build_ip_info(do_geoip: bool, skip_public_probe: bool) -> Result<IPInfo
     let ipv6_type = classify(&display_ipv6);
     let (ipv4_geoip, ipv6_geoip) = if do_geoip {
         let v4 = if let Some(ref ip) = display_ipv4 {
-            crate::core::network::geoip::lookup_geoip(ip).await
+            geoip_lookup(ip.clone()).await
         } else {
             None
         };
         let v6 = if let Some(ref ip) = display_ipv6 {
-            crate::core::network::geoip::lookup_geoip(ip).await
+            geoip_lookup(ip.clone()).await
         } else {
             None
         };
@@ -583,6 +617,68 @@ mod tests {
                 assert_eq!(result.unwrap().1.as_deref(), Some("ipv4"));
             }
             server.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn local_only_mode_never_enters_external_probe_paths() {
+        let addresses = addresses_from_interfaces(vec![interface(
+            "en0",
+            &["192.168.1.2", "2001:db8::1"],
+            true,
+        )]);
+        let result = build_ip_info_with_probes(
+            IpProbeMode::LocalOnly,
+            addresses,
+            || async { panic!("local sampling must not request public IP") },
+            |_| async { panic!("local sampling must not request GeoIP") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.local_ipv4.as_deref(), Some("192.168.1.2"));
+        assert_eq!(result.local_ipv6.as_deref(), Some("2001:db8::1"));
+        assert_eq!(result.ipv6_interface.as_deref(), Some("en0"));
+        assert!(result.dual_stack_enabled);
+        assert!(result.ipv4.is_none());
+        assert_eq!(result.public_ipv4_probe.status, "skipped");
+        assert!(result.public_ipv4_probe.checked_at.is_none());
+        assert!(result.ipv4_geoip.is_none() && result.ipv6_geoip.is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_external_mode_preserves_public_ip_and_geoip_opt_in_behavior() {
+        for include_geoip in [false, true] {
+            let addresses = addresses_from_interfaces(vec![interface(
+                "en0",
+                &["192.168.1.2", "2001:db8::1"],
+                true,
+            )]);
+            let trace = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let public_trace = Arc::clone(&trace);
+            let geo_trace = Arc::clone(&trace);
+            let result = build_ip_info_with_probes(
+                IpProbeMode::External { include_geoip },
+                addresses,
+                move || async move {
+                    public_trace.lock().unwrap().push("public-ip".to_string());
+                    observation(true)
+                },
+                move |ip| {
+                    geo_trace.lock().unwrap().push(format!("geoip:{ip}"));
+                    std::future::ready(None)
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.ipv4.as_deref(), Some("203.0.113.1"));
+            let calls = trace.lock().unwrap();
+            if include_geoip {
+                assert_eq!(
+                    *calls,
+                    vec!["public-ip", "geoip:203.0.113.1", "geoip:2001:db8::1"]
+                );
+            } else {
+                assert_eq!(*calls, vec!["public-ip"]);
+            }
         }
     }
 }

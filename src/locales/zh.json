@@ -192,7 +192,10 @@
     "interval_30m": "30分钟",
     "interval_1h": "1小时",
     "lang_zh": "简体中文",
-    "lang_en": "English"
+    "lang_en": "English",
+    "auto_probe_enabled": "自动主动检测（默认关闭）",
+    "auto_probe_help": "保存后生效。开启后按刷新间隔向外发送 HTTP、DNS、公网 IP 请求；开启地区显示时还会请求 GeoIP 服务。关闭后只在点击“开始检测”时查询，本地地址、连接和流量监控仍继续。",
+    "geoip_probe_help": "地区显示仅决定检测时是否查询 GeoIP，单独开启此项不会发起请求。"
   },
   "notify": {
     "network_abnormal_title": "HTTP 探测未成功",

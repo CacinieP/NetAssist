@@ -26,8 +26,8 @@ export default function ConnectionManager() {
   // IP info comes from the app-level shared poll (owned by App.tsx). This
   // page previously called get_ip_info (with GeoIP) on its own 3s timer,
   // i.e. a public-IP + GeoIP HTTP request every 3 seconds.
-  const { ipInfo, loading: ipLoading, ipError } = useNetworkData();
-  const geoOptions = { enabled: settings.show_geoip, loading: ipLoading, error: ipError };
+  const { ipInfo, loading: ipLoading, ipError, geoipQueried, lastCheckedAt, stale, hasRun } = useNetworkData();
+  const geoOptions = { enabled: settings.show_geoip, loading: ipLoading, error: ipError, hasQueried: geoipQueried };
 
   // Guard against out-of-order responses: only apply the result of the most
   // recent request.
@@ -93,11 +93,12 @@ export default function ConnectionManager() {
           <div className="space-y-1">
             <div className="flex items-start gap-3">
               <span className="text-blue-600 font-mono text-sm">探测 IPv4:</span>
-              <span className="font-mono text-sm text-gray-800 dark:text-gray-200">{ipInfo?.ipv4 || (ipLoading ? "获取中…" : "未获取到")}</span>
+              <span className="font-mono text-sm text-gray-800 dark:text-gray-200">{ipInfo?.ipv4 || (ipLoading ? "获取中…" : hasRun ? "未获取到" : "未检测")}</span>
             </div>
             <div className="flex items-start gap-3 pl-16">
               <span className="text-gray-500 dark:text-gray-400 text-sm">📍</span>
               <GeoIPLocation geoip={ipInfo?.ipv4_geoip} {...geoOptions} />
+              <p className="text-xs text-gray-500">{lastCheckedAt ? `上次主动检测：${new Date(lastCheckedAt).toLocaleString()}` : "未进行主动检测"}{stale ? " · 设置已变更，请重新检测" : ""}</p>
             </div>
           </div>
 

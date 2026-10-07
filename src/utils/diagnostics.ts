@@ -28,11 +28,12 @@ export interface DNSStats {
 }
 
 export function geoIPDisplay(geoip: GeoIPInfo | null | undefined, options: {
-  enabled: boolean; loading?: boolean; error?: string | null;
+  enabled: boolean; loading?: boolean; error?: string | null; hasQueried?: boolean;
 }) {
   if (!options.enabled) return { text: "已关闭", detail: "GeoIP 查询已关闭" };
   if (options.loading && !geoip) return { text: "正在获取位置…", detail: "GeoIP 查询中" };
   if (options.error) return { text: "查询失败", detail: options.error };
+  if (!geoip && options.hasQueried === false) return { text: "未检测", detail: "开始检测后查询地区；开启地区显示不会自动发起查询" };
   if (!geoip) {
     return { text: "无地区数据", detail: "当前地址没有地区查询结果" };
   }

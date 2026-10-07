@@ -192,7 +192,10 @@
     "interval_30m": "30m",
     "interval_1h": "1h",
     "lang_zh": "简体中文",
-    "lang_en": "English"
+    "lang_en": "English",
+    "auto_probe_enabled": "Automatic active probes (off by default)",
+    "auto_probe_help": "Takes effect after saving. Sends HTTP, DNS and public-IP requests at the refresh interval, plus GeoIP when enabled. When off, use Start detection. Local address, connection and traffic monitoring continues.",
+    "geoip_probe_help": "This option includes GeoIP in the next detection round. Enabling it alone does not send a request."
   },
   "notify": {
     "network_abnormal_title": "HTTP probes unsuccessful",

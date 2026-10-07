@@ -304,7 +304,8 @@ interface ConnectionInfo {
 | auto_start | bool | false | 开机自启动 |
 | minimize_to_tray | bool | true | 最小化到托盘 |
 | refresh_interval_secs | u32 | 1 | 刷新间隔 (1-3600秒) |
-| show_geoip | bool | true | 显示 IP 地区信息 |
+| auto_probe_enabled | bool | false | 自动主动探测；旧配置缺字段时关闭 |
+| show_geoip | bool | false | 检测时可选查询 IP 地区信息 |
 | primary_dns | string | "8.8.8.8" | 主 DNS |
 | secondary_dns | string | "1.1.1.1" | 备用 DNS |
 | notify_network_abnormal | bool | true | 网络异常通知 |
@@ -468,11 +469,11 @@ const stats = await invoke<TrafficStats>("get_realtime_traffic");
 | 数据类型 | 刷新频率 | 优先级 |
 |----------|----------|--------|
 | 实时流量 | 1 秒 | 高 |
-| 网络状态 | 2 秒 | 高 |
+| HTTP / DNS / 公网 IP / GeoIP | 默认手动一轮；明确开启后按设置自动探测 | 按需 |
 | 连接列表 | 3 秒 | 中 |
 | 累计流量 | 5 秒 | 中 |
 | 流量告警状态 | 5 秒 | 低 |
-| IP 信息 | 5-60 秒 | 低 |
+| 本地 IP 信息 | 独立本地采样，不触发外部查询 | 低 |
 
 ---
 
@@ -633,6 +634,7 @@ pub struct Settings {
     pub auto_start: bool,
     pub minimize_to_tray: bool,
     pub refresh_interval_secs: u32,
+    pub auto_probe_enabled: bool,
     pub show_geoip: bool,
     pub primary_dns: String,
     pub secondary_dns: String,

@@ -5,11 +5,15 @@ import { useTranslation } from "react-i18next";
 import { formatSpeed } from "../../utils/formatUtils";
 
 interface StatusBarProps {
-  networkStatus: "normal" | "abnormal" | "loading";
+  networkStatus: "normal" | "abnormal" | "loading" | "idle";
   networkMessage?: string;
   locationDetail?: string;
   ipv6Detail?: string;
   probeDetail?: string;
+  probeSummary?: string;
+  automatic?: boolean;
+  onProbe?: () => void;
+  probeDisabled?: boolean;
   ipv4?: string;
   ipv6?: string;
   location?: string;
@@ -23,6 +27,10 @@ export default function StatusBar({
   locationDetail,
   ipv6Detail,
   probeDetail,
+  probeSummary,
+  automatic,
+  onProbe,
+  probeDisabled,
   ipv4 = "-",
   ipv6 = "-",
   location = "-",
@@ -38,23 +46,29 @@ export default function StatusBar({
     getVersion().then(setAppVersion).catch(() => setAppVersion(null));
   }, []);
 
-  const statusText = networkMessage || (networkStatus === "loading" ? "检测中…" : networkStatus === "normal" ? "探测目标可达" : t("status.abnormal"));
-  const statusIcon = networkStatus === "loading" ? "…" : networkStatus === "normal" ? "✓" : "✗";
+  const statusText = networkMessage || (networkStatus === "idle" ? "未检测" : networkStatus === "loading" ? "检测中…" : networkStatus === "normal" ? "探测目标可达" : t("status.abnormal"));
+  const statusIcon = networkStatus === "idle" ? "—" : networkStatus === "loading" ? "…" : networkStatus === "normal" ? "✓" : "✗";
 
   return (
     <div className="min-h-12 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between px-4 shrink-0">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 text-sm">
         {/* Network Status */}
-        <div className="flex items-center gap-2" title={probeDetail}>
+        <div className="flex items-center gap-2" title={[probeSummary, probeDetail].filter(Boolean).join("\n")}>
           <span className="text-lg">{statusIcon}</span>
           <span className="text-gray-600 dark:text-gray-400">目标连通性:</span>
           <span
             className={`font-medium ${
-              networkStatus === "loading" ? "text-gray-500" : networkStatus === "normal" ? "text-green-600" : "text-red-600"
+              (networkStatus === "loading" || networkStatus === "idle") ? "text-gray-500" : networkStatus === "normal" ? "text-green-600" : "text-red-600"
             }`}
           >
             {statusText}
           </span>
+        </div>
+
+        <div className="flex items-center gap-2 text-xs text-gray-500">
+          <span>{automatic ? "自动检测" : "手动检测"}</span>
+          <span>{probeSummary}</span>
+          <button onClick={onProbe} disabled={probeDisabled} className="text-blue-600 disabled:opacity-50" title="发起一轮 HTTP、DNS、公网 IP 及已启用的 GeoIP 查询">开始检测</button>
         </div>
 
         {/* IP Address */}
