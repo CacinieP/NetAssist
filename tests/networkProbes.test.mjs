@@ -155,17 +155,15 @@ test('old result and pending notifications become invalid when settings change; 
 
 // Evaluate the production hook and store with injected React lifecycle and Tauri IO.
 // The hook itself performs ownership, subscription and saved-settings gating.
-function settingsStore(invoke) {
-  const source = fs.readFileSync(new URL('../src/store/settingsStore.ts', import.meta.url), 'utf8')
-    .replace(/^import .*;\n/gm, '').replace('export const useSettingsStore', 'const useSettingsStore');
-  return new Function('create', 'invoke', `${stripTypeScriptTypes(source)}; return useSettingsStore;`)(create, invoke);
+function settingsStore(invoke, source = fs.readFileSync(new URL('../src/store/settingsStore.ts', import.meta.url), 'utf8')) {
+  const executable = source.replace(/^import .*;\r?\n/gm, '').replace('export const useSettingsStore', 'const useSettingsStore');
+  return new Function('create', 'invoke', `${stripTypeScriptTypes(executable)}; return useSettingsStore;`)(create, invoke);
 }
-function hookHarness(store, h) {
+function hookHarness(store, h, source = fs.readFileSync(new URL('../src/hooks/useNetworkData.ts', import.meta.url), 'utf8')) {
   let effects = [];
-  const source = fs.readFileSync(new URL('../src/hooks/useNetworkData.ts', import.meta.url), 'utf8')
-    .replace(/^import .*;\n/gm, '').replace(/^export type .*;\n/gm, '').replaceAll('export const ', 'const ').replaceAll('export function ', 'function ');
+  const executable = source.replace(/^import .*;\r?\n/gm, '').replace(/^export type .*;\r?\n/gm, '').replaceAll('export const ', 'const ').replaceAll('export function ', 'function ');
   const hook = new Function('useState', 'useEffect', 'invoke', 'useSettingsStore', 'createNetworkProbeCoordinator', 'probePreferences',
-    `${stripTypeScriptTypes(source)}; return useNetworkData;`)(
+    `${stripTypeScriptTypes(executable)}; return useNetworkData;`)(
       initial => [typeof initial === 'function' ? initial() : initial, () => {}], callback => effects.push(callback),
       h.invoke, store, deps => createNetworkProbeCoordinator({ ...deps, schedule: h.schedule, now: () => 1000 }), probePreferences);
   return { mount(options) {
@@ -268,3 +266,29 @@ test('disabled automatic mode stays passive through subsequent interval, GeoIP a
   assert.equal(h.coordinator.getSnapshot().stale, true);
   h.coordinator.stop();
 });
+
+for (const [name, ending] of [['LF', '\n'], ['CRLF', '\r\n']]) {
+  test(`production store and hook loaders execute ${name} sources with identical probe behavior`, async () => {
+    const readSource = path => fs.readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r?\n/g, ending);
+    const settingsSource = readSource('../src/store/settingsStore.ts');
+    const hookSource = readSource('../src/hooks/useNetworkData.ts');
+    const store = settingsStore(async command => command === 'update_settings' ? true : { ...store.getState().settings }, settingsSource);
+    const h = harness();
+    const hooks = hookHarness(store, h, hookSource);
+    const owner = hooks.mount({ owner: true });
+    try {
+      await store.getState().loadSettings();
+      await h.tick();
+      assert.equal(store.getState().hydrated, true);
+      assert.deepEqual(h.active(), []);
+      await owner.result.refresh();
+      assert.deepEqual(h.active().map(call => call.command), activeCommands);
+      await store.getState().saveSettings({ ...store.getState().settings, auto_probe_enabled: true });
+      await flush();
+      assert.equal(store.getState().settings.auto_probe_enabled, true);
+      assert.deepEqual(h.active().map(call => call.command), [...activeCommands, ...activeCommands]);
+    } finally {
+      owner.unmount();
+    }
+  });
+}
