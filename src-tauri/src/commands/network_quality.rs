@@ -33,137 +33,190 @@ pub struct PingResult {
     pub packets_received: u32,
 }
 
-/// HTTP connectivity test result (more reliable than ICMP)
-#[derive(serde::Serialize)]
-pub struct HttpConnectivityResult {
-    pub url: String,
-    pub success: bool,
-    pub latency_ms: f64,
-    pub status_code: Option<u16>,
-    pub error: Option<String>,
+/// Shared HTTP evidence returned by both the dashboard and overall status.
+pub type HttpConnectivityResult = crate::models::network::HttpProbeResult;
+
+/// All diagnostic HTTP requests bypass HTTP/system proxies. VPN/TUN routing
+/// remains controlled by the OS. Redirects are not followed so a response is
+/// evidence about the requested target, and cannot redirect into a private LAN.
+pub(crate) fn direct_http_client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
 }
 
-/// Test HTTP connectivity to a reliable endpoint
+pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
+pub(crate) fn failed_http_probe(url: &str, kind: &str, error: String) -> HttpConnectivityResult {
+    HttpConnectivityResult {
+        url: url.to_string(),
+        success: false,
+        latency_ms: 0.0,
+        status_code: None,
+        error: Some(error),
+        error_kind: Some(kind.to_string()),
+        proxy_policy: "no_proxy".to_string(),
+        checked_at: chrono::Utc::now().timestamp_millis(),
+        address_family: None,
+    }
+}
+
+pub(crate) async fn probe_http(
+    client: &reqwest::Client,
+    url: &str,
+    method: reqwest::Method,
+) -> HttpConnectivityResult {
+    let start = std::time::Instant::now();
+    let mut result = match client.request(method, url).send().await {
+        Ok(response) => {
+            let status = response.status();
+            let success = status.is_success() || status.is_redirection();
+            HttpConnectivityResult {
+                url: url.to_string(),
+                success,
+                latency_ms: 0.0,
+                status_code: Some(status.as_u16()),
+                error: (!success).then(|| format!("HTTP {}", status.as_u16())),
+                error_kind: (!success).then(|| "http_status".to_string()),
+                proxy_policy: "no_proxy".to_string(),
+                checked_at: chrono::Utc::now().timestamp_millis(),
+                address_family: response
+                    .remote_addr()
+                    .map(|address| if address.is_ipv4() { "ipv4" } else { "ipv6" }.to_string()),
+            }
+        }
+        Err(error) => {
+            let kind = if error.is_timeout() {
+                "timeout"
+            } else if error.is_connect() {
+                "connect"
+            } else {
+                "request"
+            };
+            failed_http_probe(url, kind, error_chain(&error))
+        }
+    };
+    result.latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+    result
+}
+
+/// Test one HTTP target. A successful response does not establish that every
+/// application, address family, or internet destination is working.
 #[tauri::command]
 pub async fn test_http_connectivity(url: Option<String>) -> Result<HttpConnectivityResult, String> {
-    use std::time::Instant;
-
     let url = url.unwrap_or_else(|| "https://www.google.com".to_string());
-
-    // Validate URL
-    if url.is_empty() || url.len() > 500 {
-        return Ok(HttpConnectivityResult {
-            url: url.clone(),
-            success: false,
-            latency_ms: 0.0,
-            status_code: None,
-            error: Some("Invalid URL".to_string()),
-        });
-    }
-
-    // Enforce HTTP/HTTPS scheme only
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Ok(HttpConnectivityResult {
-            url: url.clone(),
-            success: false,
-            latency_ms: 0.0,
-            status_code: None,
-            error: Some("Only http:// and https:// URLs are allowed".to_string()),
-        });
-    }
-
-    // Block requests to private/local/loopback destinations (SSRF guard).
-    // The URL host may be a hostname, so resolve it first; also block literal
-    // IPv6 link-local and unspecified addresses.
-    let blocked = {
-        let parsed = reqwest::Url::parse(&url).ok();
-        parsed
-            .and_then(|u| u.host_str().map(str::to_string))
-            .map(|host| {
-                // Literal IP forms.
-                let literal_blocked = host
-                    .parse::<std::net::IpAddr>()
-                    .ok()
-                    .map(|ip| is_restricted_ip(&ip))
-                    .unwrap_or(false);
-                if literal_blocked {
-                    return true;
-                }
-                // Hostname: resolve and reject any restricted address.
-                host.parse::<std::net::IpAddr>().is_err()
-                    && (std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), 80)))
-                        .map(|mut it| {
-                            it.any(|sa| {
-                                let ip = sa.ip();
-                                is_restricted_ip(&ip) || ip.is_unspecified() || ip.is_multicast()
-                            })
-                        })
-                        .unwrap_or(false)
-            })
+    let start = std::time::Instant::now();
+    let mut result = match timeout(Duration::from_secs(5), test_http_target(&url)).await {
+        Ok(result) => result?,
+        Err(_) => failed_http_probe(
+            &url,
+            "timeout",
+            "HTTP test timed out (including DNS lookup)".to_string(),
+        ),
     };
+    result.latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+    Ok(result)
+}
 
-    if blocked.unwrap_or(false) {
-        return Ok(HttpConnectivityResult {
-            url: url.clone(),
-            success: false,
-            latency_ms: 0.0,
-            status_code: None,
-            error: Some("Cannot test connectivity to private/local/loopback addresses".to_string()),
-        });
-    }
-
-    let start = Instant::now();
-
-    // Use reqwest for HTTP request
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
-    let response = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            let error_msg = e.to_string();
-            let is_timeout = error_msg.contains("timeout") || error_msg.contains("timed out");
-
-            return Ok(HttpConnectivityResult {
-                url: url.clone(),
-                success: false,
-                latency_ms: start.elapsed().as_millis() as f64,
-                status_code: None,
-                error: Some(if is_timeout {
-                    "Request timed out".to_string()
-                } else {
-                    error_msg
-                }),
-            });
+async fn test_http_target(url: &str) -> Result<HttpConnectivityResult, String> {
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(parsed) if url.len() <= 500 && matches!(parsed.scheme(), "http" | "https") => parsed,
+        _ => {
+            return Ok(failed_http_probe(
+                url,
+                "invalid_url",
+                "Only valid http:// and https:// URLs are allowed".to_string(),
+            ))
         }
     };
 
-    let latency = start.elapsed().as_millis() as f64;
-    let status = response.status();
-
-    Ok(HttpConnectivityResult {
-        url: url.clone(),
-        success: status.is_success(),
-        latency_ms: latency,
-        status_code: Some(status.as_u16()),
-        error: if status.is_success() {
-            None
-        } else {
-            Some(format!("HTTP {}", status.as_u16()))
-        },
-    })
+    // Resolve asynchronously, validate every address, and pin that exact set to
+    // the request. This avoids a blocking resolver and a DNS-rebinding window.
+    let Some(host) = parsed.host_str() else {
+        return Ok(failed_http_probe(
+            url,
+            "invalid_url",
+            "URL has no host".to_string(),
+        ));
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addresses: Vec<std::net::SocketAddr> = match timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host, port)),
+    )
+    .await
+    {
+        Ok(Ok(addresses)) => addresses.collect(),
+        Ok(Err(error)) => {
+            return Ok(failed_http_probe(
+                url,
+                "dns",
+                format!("DNS lookup failed: {}", error),
+            ))
+        }
+        Err(_) => {
+            return Ok(failed_http_probe(
+                url,
+                "timeout",
+                "DNS lookup timed out".to_string(),
+            ))
+        }
+    };
+    if addresses.is_empty() {
+        return Ok(failed_http_probe(
+            url,
+            "dns",
+            "DNS returned no addresses".to_string(),
+        ));
+    }
+    if addresses
+        .iter()
+        .any(|address| is_restricted_ip(&address.ip()))
+    {
+        return Ok(failed_http_probe(
+            url,
+            "restricted_address",
+            "Cannot test connectivity to private/local/loopback addresses".to_string(),
+        ));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(host, &addresses)
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    Ok(probe_http(&client, url, reqwest::Method::GET).await)
 }
 
-/// True when an IP must never be contacted by the connectivity test.
+/// True when an IP must never be contacted by a user-supplied HTTP test.
 fn is_restricted_ip(ip: &std::net::IpAddr) -> bool {
+    if ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
     match ip {
         std::net::IpAddr::V4(v4) => {
             v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_broadcast()
         }
         std::net::IpAddr::V6(v6) => {
-            v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local()
+            v6.is_loopback()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| is_restricted_ip(&v4.into()))
         }
     }
 }
@@ -661,6 +714,81 @@ fn is_valid_hostname(hostname: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn http_probe_preserves_status_and_peer_family_without_following_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, success) in [(204, true), (302, true), (403, false), (500, false)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let received = socket.read(&mut request).await.unwrap();
+                assert!(received > 0, "HTTP request must arrive before responding");
+                socket.write_all(format!("HTTP/1.1 {} Test\r\nLocation: http://127.0.0.1:1/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status).as_bytes()).await.unwrap();
+            });
+            let result = probe_http(
+                &direct_http_client(Duration::from_secs(1)).unwrap(),
+                &url,
+                reqwest::Method::HEAD,
+            )
+            .await;
+            assert_eq!(result.success, success);
+            assert_eq!(result.status_code, Some(status));
+            assert_eq!(result.address_family.as_deref(), Some("ipv4"));
+            assert_eq!(result.proxy_policy, "no_proxy");
+            assert_eq!(
+                result.error_kind.as_deref(),
+                if success { None } else { Some("http_status") }
+            );
+            assert!(result.checked_at > 0);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn http_timeout_is_distinct_from_connection_refusal() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let client = direct_http_client(Duration::from_millis(20)).unwrap();
+        let result = probe_http(&client, &url, reqwest::Method::GET).await;
+        assert_eq!(result.error_kind.as_deref(), Some("timeout"));
+        assert_eq!(result.status_code, None);
+        drop(listener);
+        let result = probe_http(&client, &url, reqwest::Method::GET).await;
+        assert_eq!(result.error_kind.as_deref(), Some("connect"));
+        assert_eq!(result.address_family, None);
+    }
+
+    #[tokio::test]
+    async fn http_command_rejects_invalid_and_restricted_destinations() {
+        assert_eq!(
+            test_http_connectivity(Some("file:///etc/hosts".into()))
+                .await
+                .unwrap()
+                .error_kind
+                .as_deref(),
+            Some("invalid_url")
+        );
+        for url in [
+            "http://127.0.0.1",
+            "http://[::1]",
+            "http://[::ffff:127.0.0.1]",
+            "http://0.0.0.0",
+            "http://224.0.0.1",
+        ] {
+            assert_eq!(
+                test_http_connectivity(Some(url.into()))
+                    .await
+                    .unwrap()
+                    .error_kind
+                    .as_deref(),
+                Some("restricted_address"),
+                "{url}"
+            );
+        }
+    }
 
     #[test]
     fn build_ping_result_clamps_received() {
