@@ -6,8 +6,9 @@ import * as echarts from "echarts";
 import { Activity, AlertTriangle, Download, Upload, BarChart3, PieChart, FileText, Plus, Trash2, Edit, X, Save } from "lucide-react";
 import { useRealtimeTraffic } from "../../hooks/useTrafficData";
 import { formatSpeed, formatBytes } from "../../utils/formatUtils";
-import { notify } from "../../utils/notify";
-import { createPollingController } from "../../utils/polling";
+import { createPollingController, settlePair } from "../../utils/polling";
+import { alertStatusPresentation } from "../../utils/trafficAlerts";
+import type { AlertStatus } from "../../utils/trafficAlerts";
 import { formatAppSpeed as appSpeed, formatAppBytes as appBytes, trafficExportMetadata } from "../../utils/trafficPresentation";
 import { useSettingsStore } from "../../store/settingsStore";
 import HistoryTrendChart, { type TrafficHistory } from "./HistoryTrendChart";
@@ -60,13 +61,6 @@ interface TrafficAlert {
   last_triggered: number | null;
 }
 
-interface AlertStatus {
-  alert_id: string;
-  triggered: boolean;
-  current_value: number;
-  threshold_value: number;
-  percentage: number;
-}
 
 type SortField = "name" | "download" | "upload" | "total" | "percent";
 type SortOrder = "asc" | "desc";
@@ -197,10 +191,12 @@ const CumulativeStatsCard = ({
 const TrafficAlertCard = ({
   alerts,
   alertStatuses,
+  error,
   onManageAlerts,
 }: {
   alerts: TrafficAlert[];
   alertStatuses: AlertStatus[];
+  error: string | null;
   onManageAlerts: () => void;
 }) => {
   const getStatus = (alertId: string) => alertStatuses.find(s => s.alert_id === alertId);
@@ -219,10 +215,12 @@ const TrafficAlertCard = ({
           管理告警
         </button>
       </div>
+      {error && <p className="mb-2 text-xs text-red-600">最近检测失败：{error}</p>}
       <div className="space-y-2">
         {alerts.filter(a => a.enabled).slice(0, 3).map(alert => {
           const status = getStatus(alert.id);
-          const percentage = status?.percentage || 0;
+          const statusView = alertStatusPresentation(status);
+          const percentage = statusView.percentage;
           const isWarning = percentage >= 80 && percentage < 100;
           const isCritical = percentage >= 100;
 
@@ -231,7 +229,7 @@ const TrafficAlertCard = ({
               <div className="flex justify-between items-center mb-1">
                 <span className="text-xs font-medium text-gray-700 dark:text-gray-200">{alert.name}</span>
                 <span className={`text-xs ${isCritical ? 'text-red-600' : isWarning ? 'text-amber-600' : 'text-gray-500 dark:text-gray-400'}`}>
-                  {percentage.toFixed(0)}%
+                  {statusView.percentText}
                 </span>
               </div>
               <div className="w-full h-1.5 bg-gray-200 dark:bg-gray-600 rounded-full overflow-hidden">
@@ -241,7 +239,7 @@ const TrafficAlertCard = ({
                 />
               </div>
               <div className="flex justify-between mt-1 text-xs text-gray-400 dark:text-gray-500">
-                <span>{formatBytes(status?.current_value || 0)}</span>
+                <span>{statusView.currentText}</span>
                 <span>/ {formatBytes(alert.threshold_bytes)}</span>
               </div>
             </div>
@@ -383,11 +381,6 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
 
 // ==================== Main Component ====================
 
-// Module-scope alert dedupe: persists across page mounts so switching away
-// from the Traffic page and back does NOT re-fire the same "traffic limit
-// reached" notifications (a component-level ref reset on every mount).
-let notifiedAlertIds: Set<string> = new Set();
-
 export default function TrafficMonitorEnhanced() {
   // State
   const [apps, setApps] = useState<AppTraffic[]>([]);
@@ -396,7 +389,7 @@ export default function TrafficMonitorEnhanced() {
   const [cumulativeError, setCumulativeError] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<TrafficAlert[]>([]);
   const [alertStatuses, setAlertStatuses] = useState<AlertStatus[]>([]);
-  const { settings } = useSettingsStore();
+  const [alertsError, setAlertsError] = useState<string | null>(null);
 
   const [searchTerm, setSearchTerm] = useState("");
   const [historyHours, setHistoryHours] = useState<number>(1);
@@ -469,42 +462,24 @@ export default function TrafficMonitorEnhanced() {
     onLoading: value => setLoading(prev => ({ ...prev, cumulative: value })),
   }));
 
-  const fetchAlerts = useCallback(async () => {
-    try {
-      setLoading(prev => ({ ...prev, alerts: true }));
-      const alertsData = await invoke<TrafficAlert[]>("get_traffic_alerts");
-      setAlerts(alertsData);
-
-      // check_traffic_alerts evaluates every alert against its OWN period
-      // (day/week/month per alert). The UI-period arg is only for display.
-      const statuses = await invoke<AlertStatus[]>("check_traffic_alerts", {});
-      setAlertStatuses(statuses);
-
-      // Fire a native notification on the not-triggered → triggered
-      // transition for any alert, gated by the notify_traffic_limit setting.
-      //
-      // Deduplication lives at module scope so leaving and re-entering the
-      // page does NOT re-fire the same notifications (and is not coupled to
-      // the UI period selector).
-      if (settings.notify_traffic_limit) {
-        const newlyTriggered = statuses.filter(
-          s => s.triggered && !notifiedAlertIds.has(s.alert_id)
-        );
-        // Remember everything currently triggered, and drop ids that have
-        // cleared so a later re-trigger can notify again.
-        notifiedAlertIds = new Set(
-          statuses.filter(s => s.triggered).map(s => s.alert_id)
-        );
-        if (newlyTriggered.length > 0) {
-          void notify("流量告警", `有 ${newlyTriggered.length} 项流量阈值已触发，请查看流量监控`);
-        }
-      }
-    } catch (error) {
-      console.error("Failed to fetch alerts:", error);
-    } finally {
-      setLoading(prev => ({ ...prev, alerts: false }));
-    }
-  }, [settings.notify_traffic_limit]);
+  // Display polling is independent of notification preferences. Only the App
+  // monitor emits notifications; this lane can safely refresh after edits.
+  const [alertsPoller] = useState(() => createPollingController({
+    fetch: () => settlePair(
+      invoke<TrafficAlert[]>("get_traffic_alerts"),
+      invoke<AlertStatus[]>("check_traffic_alerts", {}),
+    ),
+    onValue: ({ first: list, second: statuses }) => {
+      if (list.status === "fulfilled") setAlerts(list.value);
+      setAlertStatuses(statuses.status === "fulfilled" ? statuses.value : []);
+      const failures = [list.status === "rejected" ? `告警列表：${String(list.reason)}` : null,
+        statuses.status === "rejected" ? `阈值检测：${String(statuses.reason)}` : null].filter(Boolean);
+      setAlertsError(failures.length > 0 ? failures.join("；") : null);
+    },
+    onError: error => { setAlertStatuses([]); setAlertsError(String(error)); },
+    onLoading: value => setLoading(prev => ({ ...prev, alerts: value })),
+  }));
+  const fetchAlerts = alertsPoller.refresh;
 
   useEffect(() => {
     appsPoller.configure(undefined, 3000);
@@ -519,10 +494,9 @@ export default function TrafficMonitorEnhanced() {
   }, [cumulativePoller, period]);
 
   useEffect(() => {
-    void fetchAlerts();
-    const alertsInterval = setInterval(fetchAlerts, 5000);
-    return () => clearInterval(alertsInterval);
-  }, [fetchAlerts]);
+    alertsPoller.configure(undefined, 5000);
+    return () => alertsPoller.stop();
+  }, [alertsPoller]);
 
   // Filter and sort apps
   const filteredAndSortedApps = useMemo(() => {
@@ -911,6 +885,7 @@ export default function TrafficMonitorEnhanced() {
         <TrafficAlertCard
           alerts={alerts}
           alertStatuses={alertStatuses}
+          error={alertsError}
           onManageAlerts={handleManageAlerts}
         />
       </div>
@@ -1225,7 +1200,8 @@ export default function TrafficMonitorEnhanced() {
               ) : (
                 alerts.map(alert => {
                   const status = alertStatuses.find(s => s.alert_id === alert.id);
-                  const percentage = status?.percentage || 0;
+                  const statusView = alertStatusPresentation(status);
+                  const percentage = statusView.percentage;
                   const isEditing = editingAlert?.id === alert.id;
 
                   return (
@@ -1357,7 +1333,7 @@ export default function TrafficMonitorEnhanced() {
                           {/* Progress Bar */}
                           <div className="mb-2">
                             <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
-                              <span>当前: {formatBytes(status?.current_value || 0)}</span>
+                              <span>当前: {statusView.currentText}</span>
                               <span>阈值: {formatBytes(alert.threshold_bytes)}</span>
                             </div>
                             <div className="flex items-center gap-2">
@@ -1370,9 +1346,9 @@ export default function TrafficMonitorEnhanced() {
                                 />
                               </div>
                               <span className={`text-sm font-medium min-w-[45px] text-right ${
-                                percentage >= 100 ? "text-red-600" : percentage >= 80 ? "text-amber-600" : "text-green-600"
+                                !statusView.available ? "text-gray-500" : percentage >= 100 ? "text-red-600" : percentage >= 80 ? "text-amber-600" : "text-green-600"
                               }`}>
-                                {percentage.toFixed(0)}%
+                                {statusView.percentText}
                               </span>
                             </div>
                           </div>

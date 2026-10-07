@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { useSettingsStore } from "./store/settingsStore";
 import { useRealtimeTraffic, useRecordTrafficPoint } from "./hooks/useTrafficData";
 import { useNetworkData } from "./hooks/useNetworkData";
+import { useTrafficAlertMonitor } from "./hooks/useTrafficAlertMonitor";
 import { notify } from "./utils/notify";
 import { geoIPDisplay, probeDescription, probeLimitations } from "./utils/diagnostics";
 import StatusBar from "./components/StatusBar/StatusBar";
@@ -22,7 +23,7 @@ const EmergencyKit = lazy(() => import("./components/EmergencyKit/EmergencyKit")
 const Settings = lazy(() => import("./components/Settings/Settings"));
 
 function App() {
-  const { settings, loadSettings, error: settingsError } = useSettingsStore();
+  const { settings, hydrated: settingsHydrated, loading: settingsLoading, loadSettings, error: settingsError } = useSettingsStore();
   const { t } = useTranslation();
 
   // Error state with user feedback
@@ -39,6 +40,12 @@ function App() {
   // cannot hammer the network.
   const intervalSecs = Math.max(1, Math.min(settings.refresh_interval_secs || 5, 300));
   const { networkStatus, ipInfo, loading, ipError, statusError } = useNetworkData(intervalSecs, settings.show_geoip, { owner: true });
+
+  // Traffic-threshold watchdog: app-level (not page-level) so the detection
+  // and its notifications keep running on Dashboard/Settings/Emergency too —
+  // it used to live in the Traffic page's useEffect and stopped the moment
+  // the user navigated away.
+  useTrafficAlertMonitor();
 
   // Load persisted settings
   useEffect(() => {
@@ -63,12 +70,15 @@ function App() {
     if (
       prev === "normal" &&
       current === "abnormal" &&
-      settings.notify_network_abnormal
+      settingsHydrated && !settingsLoading && settings.notify_network_abnormal
     ) {
-      void notify(t("notify.network_abnormal_title"), t("notify.network_abnormal_body"));
+      void notify(t("notify.network_abnormal_title"), t("notify.network_abnormal_body"), () => {
+        const currentSettings = useSettingsStore.getState();
+        return currentSettings.hydrated && !currentSettings.loading && currentSettings.settings.notify_network_abnormal;
+      });
     }
     prevStatusRef.current = current;
-  }, [networkStatus, settings.notify_network_abnormal]);
+  }, [networkStatus, settingsHydrated, settingsLoading, settings.notify_network_abnormal]);
 
   // Surface settings-load failures (loadSettings sets store error).
   useEffect(() => {

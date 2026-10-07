@@ -92,7 +92,7 @@ pub struct TrafficAlert {
     pub alert_type: String,
     /// Threshold value in bytes
     pub threshold_bytes: u64,
-    /// Time period: "hour", "day", "week", "month"
+    /// Time period: "day", "week", "month"
     pub period: String,
     /// Whether alert is enabled
     pub enabled: bool,
@@ -115,4 +115,6 @@ pub struct AlertStatus {
     pub threshold_value: u64,
     /// Percentage of threshold used
     pub percentage: f64,
+    /// Start of this rule's local calendar period (epoch seconds).
+    pub period_start_timestamp: i64,
 }

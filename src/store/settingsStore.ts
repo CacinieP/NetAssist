@@ -33,6 +33,7 @@ const defaultSettings: Settings = {
 
 interface SettingsStore {
   settings: Settings;
+  hydrated: boolean;
   loading: boolean;
   saving: boolean;
   error: string | null;
@@ -44,6 +45,7 @@ interface SettingsStore {
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   settings: defaultSettings,
+  hydrated: false,
   loading: false,
   saving: false,
   error: null,
@@ -52,7 +54,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     try {
       set({ loading: true, error: null });
       const settings = await invoke<Settings>("get_settings");
-      set({ settings });
+      set({ settings, hydrated: true });
     } catch (e: any) {
       set({ error: e?.toString?.() ?? "加载设置失败" });
     } finally {
@@ -77,7 +79,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!ok) {
         throw new Error("保存设置失败: 服务器返回 false");
       }
-      set({ settings: toSave });
+      set({ settings: toSave, hydrated: true });
       return true;
     } catch (e: any) {
       // Real rollback: keep the previously persisted settings.
@@ -92,7 +94,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     try {
       set({ loading: true, error: null });
       const settings = await invoke<Settings>("reset_settings");
-      set({ settings });
+      set({ settings, hydrated: true });
       return settings;
     } catch (e: any) {
       set({ error: e?.toString?.() ?? "恢复默认设置失败" });

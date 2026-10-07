@@ -4,14 +4,16 @@ import { sendNotification, isPermissionGranted, requestPermission } from "@tauri
  * Fire a native OS desktop notification (silently no-ops if the platform
  * denies permission). Used by network-abnormal and traffic-limit alerts.
  */
-export async function notify(title: string, body: string): Promise<void> {
+export async function notify(title: string, body: string, shouldSend: () => boolean = () => true): Promise<void> {
   try {
+    if (!shouldSend()) return;
     let granted = await isPermissionGranted();
+    if (!shouldSend()) return;
     if (!granted) {
       const perm = await requestPermission();
       granted = perm === "granted";
     }
-    if (!granted) return;
+    if (!granted || !shouldSend()) return;
     await sendNotification({ title, body });
   } catch (e) {
     // Non-fatal: notifications are best-effort.
