@@ -578,6 +578,8 @@ struct AnchorStore {
 /// Traffic alert manager
 struct TrafficAlertManager {
     alerts_file: PathBuf,
+    /// Serialize every alerts.json read-modify-write, including background checks.
+    transaction: std::sync::Mutex<()>,
 }
 
 impl TrafficAlertManager {
@@ -591,19 +593,42 @@ impl TrafficAlertManager {
 
         Ok(Self {
             alerts_file: data_dir.join("alerts.json"),
+            transaction: std::sync::Mutex::new(()),
         })
     }
 
-    /// Load alerts from file
+    fn lock_transaction(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+        self.transaction
+            .lock()
+            .map_err(|error| format!("Alert lock error: {}", error))
+    }
+
+    /// Missing files use defaults; unreadable/corrupt files remain intact.
     fn load_alerts(&self) -> Result<Vec<TrafficAlert>, String> {
-        if self.alerts_file.exists() {
-            let content = fs::read_to_string(&self.alerts_file)
-                .map_err(|e| format!("Failed to read alerts file: {}", e))?;
-            serde_json::from_str(&content)
-                .map_err(|e| format!("Failed to parse alerts file: {}", e))
-        } else {
-            Ok(Self::default_alerts())
+        match fs::read_to_string(&self.alerts_file) {
+            Ok(content) => serde_json::from_str(&content)
+                .map_err(|error| format!("Failed to parse alerts file: {}", error)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Self::default_alerts())
+            }
+            Err(error) => Err(format!("Failed to read alerts file: {}", error)),
         }
+    }
+
+    fn validate_alert(alert: &TrafficAlert) -> Result<(), String> {
+        if !matches!(alert.period.as_str(), "day" | "week" | "month") {
+            return Err(format!(
+                "Unsupported period for alert {}: {}",
+                alert.id, alert.period
+            ));
+        }
+        if !matches!(alert.alert_type.as_str(), "download" | "upload" | "total") {
+            return Err(format!(
+                "Unsupported type for alert {}: {}",
+                alert.id, alert.alert_type
+            ));
+        }
+        Ok(())
     }
 
     /// Save alerts to file (atomic write)
@@ -655,22 +680,37 @@ impl TrafficAlertManager {
 
     /// Get all alerts
     fn get_alerts(&self) -> Result<Vec<TrafficAlert>, String> {
+        let _guard = self.lock_transaction()?;
         self.load_alerts()
     }
 
     /// Update an alert
-    fn update_alert(&self, alert: TrafficAlert) -> Result<(), String> {
+    fn update_alert(&self, mut alert: TrafficAlert) -> Result<(), String> {
+        Self::validate_alert(&alert)?;
+        let _guard = self.lock_transaction()?;
         let mut alerts = self.load_alerts()?;
         let pos = alerts
             .iter()
             .position(|a| a.id == alert.id)
             .ok_or_else(|| format!("Alert not found: {}", alert.id))?;
+        // The UI may have fetched this object before a background check. Keep
+        // backend-owned trigger bookkeeping unless the rule itself changed.
+        let previous = &alerts[pos];
+        let same_rule = previous.period == alert.period
+            && previous.alert_type == alert.alert_type
+            && previous.threshold_bytes == alert.threshold_bytes;
+        alert.triggered = same_rule && previous.triggered;
+        alert.last_triggered = previous.last_triggered;
         alerts[pos] = alert;
         self.save_alerts(&alerts)
     }
 
     /// Add a new alert
-    fn add_alert(&self, alert: TrafficAlert) -> Result<(), String> {
+    fn add_alert(&self, mut alert: TrafficAlert) -> Result<(), String> {
+        Self::validate_alert(&alert)?;
+        let _guard = self.lock_transaction()?;
+        alert.triggered = false;
+        alert.last_triggered = None;
         let mut alerts = self.load_alerts()?;
         // Check if ID already exists
         if alerts.iter().any(|a| a.id == alert.id) {
@@ -682,6 +722,7 @@ impl TrafficAlertManager {
 
     /// Delete an alert
     fn delete_alert(&self, alert_id: &str) -> Result<(), String> {
+        let _guard = self.lock_transaction()?;
         let mut alerts = self.load_alerts()?;
         let initial_len = alerts.len();
         alerts.retain(|a| a.id != alert_id);
@@ -691,70 +732,82 @@ impl TrafficAlertManager {
         self.save_alerts(&alerts)
     }
 
-    /// Evaluate every enabled alert against its OWN period using the same
-    /// counter-based cumulative method that the UI displays — so the number
-    /// shown and the number that triggers an alert always agree. Persists the
-    /// `triggered`/`last_triggered` bookkeeping.
+    /// All enabled rules share one physical sample and their own calendar
+    /// period. Failed reads or state persistence are errors, never empty success.
     fn check_alerts(
         &self,
         storage: &mut TrafficHistoryStorage,
     ) -> Result<Vec<AlertStatus>, String> {
-        let alerts = self.load_alerts()?;
+        self.check_alerts_with_sample(
+            storage,
+            Local::now(),
+            crate::platform::get_interface_total_bytes,
+        )
+    }
+
+    fn check_alerts_with_sample<F>(
+        &self,
+        storage: &mut TrafficHistoryStorage,
+        now: DateTime<Local>,
+        sample: F,
+    ) -> Result<Vec<AlertStatus>, String>
+    where
+        F: FnOnce() -> Result<crate::platform::CounterSnapshot, String>,
+    {
+        let _guard = self.lock_transaction()?;
+        let mut alerts = self.load_alerts()?;
+        let enabled: Vec<_> = alerts.iter().filter(|alert| alert.enabled).collect();
+        if enabled.is_empty() {
+            return Ok(Vec::new());
+        }
+        for alert in enabled {
+            Self::validate_alert(alert)?;
+        }
+        let sample = sample()?;
+        // Valid traffic is persisted independently of whether alerts can be saved.
+        storage.cumulative_from_snapshot("day", &sample, now)?;
+        let anchors = storage.load_anchors()?;
         let mut statuses = Vec::new();
         let mut changed = false;
-
-        for mut alert in alerts {
-            if !alert.enabled {
-                continue;
-            }
-
-            // Evaluate per-alert period (each alert has its own window).
-            let cumulative = match storage.get_cumulative_traffic_via_counters(&alert.period) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("alert {} ({}) skipped: {}", alert.name, alert.period, e);
-                    continue;
-                }
+        for alert in alerts.iter_mut().filter(|alert| alert.enabled) {
+            let anchor = match alert.period.as_str() {
+                "week" => &anchors.week,
+                "month" => &anchors.month,
+                _ => &anchors.day,
             };
-
             let current_value = match alert.alert_type.as_str() {
-                "download" => cumulative.total_download_bytes,
-                "upload" => cumulative.total_upload_bytes,
-                "total" => cumulative.total_download_bytes + cumulative.total_upload_bytes,
-                _ => continue,
+                "download" => anchor.accrued_rx,
+                "upload" => anchor.accrued_tx,
+                _ => anchor.accrued_rx.saturating_add(anchor.accrued_tx),
             };
-
-            let triggered = current_value >= alert.threshold_bytes && alert.threshold_bytes > 0;
-            let percentage = if alert.threshold_bytes > 0 {
-                (current_value as f64 / alert.threshold_bytes as f64) * 100.0
-            } else {
-                0.0
-            };
-
-            // Track trigger state transitions.
-            if triggered && !alert.triggered {
-                alert.triggered = true;
-                alert.last_triggered = Some(Local::now().timestamp_millis());
-                changed = true;
-            } else if !triggered && alert.triggered {
-                alert.triggered = false;
+            let triggered = alert.threshold_bytes > 0 && current_value >= alert.threshold_bytes;
+            let previous_period = alert
+                .last_triggered
+                .is_none_or(|time| time < anchor.start_ts.saturating_mul(1000));
+            if triggered && (!alert.triggered || previous_period) {
+                alert.last_triggered = Some(now.timestamp_millis());
                 changed = true;
             }
-
+            if alert.triggered != triggered {
+                changed = true;
+            }
+            alert.triggered = triggered;
             statuses.push(AlertStatus {
                 alert_id: alert.id.clone(),
                 triggered,
                 current_value,
                 threshold_value: alert.threshold_bytes,
-                percentage,
+                percentage: if alert.threshold_bytes > 0 {
+                    current_value as f64 / alert.threshold_bytes as f64 * 100.0
+                } else {
+                    0.0
+                },
+                period_start_timestamp: anchor.start_ts,
             });
-
-            if changed {
-                changed = false;
-                let _ = self.update_alert(alert);
-            }
         }
-
+        if changed {
+            self.save_alerts(&alerts)?;
+        }
         Ok(statuses)
     }
 }
@@ -786,6 +839,7 @@ fn alert_manager() -> &'static TrafficAlertManager {
             tracing::error!("Failed to initialize alert manager: {}", e);
             TrafficAlertManager {
                 alerts_file: PathBuf::from("alerts.json"),
+                transaction: std::sync::Mutex::new(()),
             }
         })
     })
@@ -859,25 +913,33 @@ pub async fn record_traffic_point(
 /// Get all traffic alerts
 #[tauri::command]
 pub async fn get_traffic_alerts() -> Result<Vec<TrafficAlert>, String> {
-    alert_manager().get_alerts()
+    tokio::task::spawn_blocking(|| alert_manager().get_alerts())
+        .await
+        .map_err(|error| format!("Task join error: {}", error))?
 }
 
 /// Update a traffic alert
 #[tauri::command]
 pub async fn update_traffic_alert(alert: TrafficAlert) -> Result<(), String> {
-    alert_manager().update_alert(alert)
+    tokio::task::spawn_blocking(move || alert_manager().update_alert(alert))
+        .await
+        .map_err(|error| format!("Task join error: {}", error))?
 }
 
 /// Add a new traffic alert
 #[tauri::command]
 pub async fn add_traffic_alert(alert: TrafficAlert) -> Result<(), String> {
-    alert_manager().add_alert(alert)
+    tokio::task::spawn_blocking(move || alert_manager().add_alert(alert))
+        .await
+        .map_err(|error| format!("Task join error: {}", error))?
 }
 
 /// Delete a traffic alert
 #[tauri::command]
 pub async fn delete_traffic_alert(alert_id: String) -> Result<(), String> {
-    alert_manager().delete_alert(&alert_id)
+    tokio::task::spawn_blocking(move || alert_manager().delete_alert(&alert_id))
+        .await
+        .map_err(|error| format!("Task join error: {}", error))?
 }
 
 /// Check alert status.
@@ -889,8 +951,11 @@ pub async fn delete_traffic_alert(alert_id: String) -> Result<(), String> {
 /// It MUST stay optional: Tauri rejects a call that omits a required key
 /// ("missing required key period"), so a plain `invoke("check_traffic_alerts", {})`
 /// fails hard against a `String` parameter.
+type AlertCheckPeriod = Option<String>;
+
 #[tauri::command]
-pub async fn check_traffic_alerts(_period: Option<String>) -> Result<Vec<AlertStatus>, String> {
+pub async fn check_traffic_alerts(period: AlertCheckPeriod) -> Result<Vec<AlertStatus>, String> {
+    let _ = period;
     tokio::task::spawn_blocking(move || {
         let mut storage = history_storage()
             .lock()
@@ -1470,5 +1535,334 @@ mod tests {
             )
             .unwrap();
         assert_eq!(storage.collect_points_between(start, end).unwrap().len(), 1);
+    }
+    fn test_alert_manager(storage: &TrafficHistoryStorage) -> TrafficAlertManager {
+        TrafficAlertManager {
+            alerts_file: storage.data_dir.join("alerts.json"),
+            transaction: std::sync::Mutex::new(()),
+        }
+    }
+
+    fn rule(id: &str, period: &str, kind: &str, threshold: u64, enabled: bool) -> TrafficAlert {
+        TrafficAlert {
+            id: id.into(),
+            name: id.into(),
+            period: period.into(),
+            alert_type: kind.into(),
+            threshold_bytes: threshold,
+            enabled,
+            triggered: false,
+            last_triggered: None,
+        }
+    }
+
+    #[test]
+    fn alert_check_period_accepts_empty_tauri_ipc_arguments() {
+        use tauri::ipc::{CommandArg, CommandItem};
+        use tauri::test::{mock_builder, mock_context, noop_assets};
+        // Tie the decoder's type to the production command signature without
+        // running that command against the user's real configuration or network.
+        fn optional_signature<F, Fut>(_: F)
+        where
+            F: Fn(AlertCheckPeriod) -> Fut,
+        {
+        }
+        optional_signature(check_traffic_alerts);
+        let app = mock_builder()
+            .invoke_handler(|invoke| {
+                let period = AlertCheckPeriod::from_command(CommandItem {
+                    plugin: None,
+                    name: "check_traffic_alerts",
+                    key: "period",
+                    message: &invoke.message,
+                    acl: &invoke.acl,
+                });
+                invoke.resolver.respond(period);
+                true
+            })
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        for (body, expected) in [
+            (serde_json::json!({}), None),
+            (serde_json::json!({"period":null}), None),
+            (
+                serde_json::json!({"period":"month"}),
+                Some("month".to_string()),
+            ),
+        ] {
+            let result = tauri::test::get_ipc_response(
+                &webview,
+                tauri::webview::InvokeRequest {
+                    cmd: "check_traffic_alerts".into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: webview.url().unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(body),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.into(),
+                },
+            )
+            .unwrap()
+            .deserialize::<AlertCheckPeriod>()
+            .unwrap();
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn alerts_share_one_sample_and_use_each_enabled_rules_own_period() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let manager = test_alert_manager(&storage);
+        let now = Local::now();
+        let sample = snapshot("en0", 1000, 1000);
+        storage
+            .cumulative_from_snapshot("day", &sample, now)
+            .unwrap();
+        let mut anchors = storage.load_anchors().unwrap();
+        anchors.day.accrued_rx = 10;
+        anchors.day.accrued_tx = 20;
+        anchors.week.accrued_rx = 100;
+        anchors.week.accrued_tx = 200;
+        anchors.month.accrued_rx = 1000;
+        anchors.month.accrued_tx = 2000;
+        storage.save_anchors(&anchors).unwrap();
+        manager
+            .save_alerts(&[
+                rule("day", "day", "download", 20, true),
+                rule("week", "week", "upload", 100, true),
+                rule("month", "month", "total", 2500, true),
+                rule("disabled", "day", "total", 1, false),
+            ])
+            .unwrap();
+        let mut reads = 0;
+        let statuses = manager
+            .check_alerts_with_sample(&mut storage, now, || {
+                reads += 1;
+                Ok(sample.clone())
+            })
+            .unwrap();
+        assert_eq!(reads, 1);
+        assert_eq!(statuses.len(), 3);
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|status| status.current_value)
+                .collect::<Vec<_>>(),
+            vec![10, 200, 3000]
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|status| status.triggered)
+                .collect::<Vec<_>>(),
+            vec![false, true, true]
+        );
+        assert_eq!(statuses[1].period_start_timestamp, anchors.week.start_ts);
+        let first = fs::read(&manager.alerts_file).unwrap();
+        let next = manager
+            .check_alerts_with_sample(&mut storage, now + chrono::Duration::seconds(1), || {
+                Ok(sample)
+            })
+            .unwrap();
+        assert_eq!(next[2].current_value, 3000);
+        assert_eq!(
+            fs::read(&manager.alerts_file).unwrap(),
+            first,
+            "repeat check must not advance last_triggered"
+        );
+        assert!(!manager.get_alerts().unwrap()[3].triggered);
+    }
+
+    #[test]
+    fn failed_alert_checks_preserve_trigger_bookkeeping_and_valid_traffic() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let manager = test_alert_manager(&storage);
+        let now = Local::now();
+        storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 1000, 1000), now)
+            .unwrap();
+        manager
+            .save_alerts(&[rule("download", "day", "download", 50, true)])
+            .unwrap();
+        let alerts_before = fs::read(&manager.alerts_file).unwrap();
+        let anchors_before = fs::read(storage.anchors_file_path()).unwrap();
+        assert!(manager
+            .check_alerts_with_sample(&mut storage, now, || Err("counter unavailable".into()))
+            .is_err());
+        assert_eq!(fs::read(&manager.alerts_file).unwrap(), alerts_before);
+        assert_eq!(
+            fs::read(storage.anchors_file_path()).unwrap(),
+            anchors_before
+        );
+        let tmp = manager.alerts_file.with_extension("tmp");
+        fs::create_dir(&tmp).unwrap();
+        assert!(manager
+            .check_alerts_with_sample(&mut storage, now, || Ok(snapshot("en0", 1100, 1000)))
+            .is_err());
+        assert_eq!(fs::read(&manager.alerts_file).unwrap(), alerts_before);
+        assert_eq!(
+            storage.load_anchors().unwrap().day.accrued_rx,
+            100,
+            "valid traffic persists independently"
+        );
+        fs::remove_dir(tmp).unwrap();
+        let recovered = manager
+            .check_alerts_with_sample(&mut storage, now, || Ok(snapshot("en0", 1100, 1000)))
+            .unwrap();
+        assert!(recovered[0].triggered);
+        assert_eq!(
+            recovered[0].current_value, 100,
+            "retry must not double count"
+        );
+        let saved = fs::read(&manager.alerts_file).unwrap();
+        fs::write(storage.anchors_file_path(), "corrupt").unwrap();
+        assert!(manager
+            .check_alerts_with_sample(&mut storage, now, || Ok(snapshot("en0", 1200, 1000)))
+            .is_err());
+        assert_eq!(fs::read(&manager.alerts_file).unwrap(), saved);
+    }
+
+    #[test]
+    fn disabled_rules_do_not_sample_and_invalid_enabled_rules_are_errors() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let manager = test_alert_manager(&storage);
+        let now = Local::now();
+        manager
+            .save_alerts(&[rule("disabled", "day", "total", 1, false)])
+            .unwrap();
+        assert!(manager
+            .check_alerts_with_sample(&mut storage, now, || panic!(
+                "disabled rules must not sample"
+            ))
+            .unwrap()
+            .is_empty());
+        manager
+            .save_alerts(&[rule("invalid", "hour", "total", 1, true)])
+            .unwrap();
+        assert!(manager
+            .check_alerts_with_sample(&mut storage, now, || panic!(
+                "invalid rules must fail before sampling"
+            ))
+            .is_err());
+        assert!(manager
+            .add_alert(rule("bad", "day", "unknown", 1, true))
+            .is_err());
+    }
+
+    #[test]
+    fn alert_period_rollover_updates_trigger_time_without_an_intermediate_below_threshold_poll() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let manager = test_alert_manager(&storage);
+        let before = Local
+            .with_ymd_and_hms(2026, 10, 6, 23, 50, 0)
+            .single()
+            .unwrap();
+        let after = Local
+            .with_ymd_and_hms(2026, 10, 7, 0, 10, 0)
+            .single()
+            .unwrap();
+        manager
+            .save_alerts(&[rule("daily", "day", "download", 100, true)])
+            .unwrap();
+        storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 1000, 1000), before)
+            .unwrap();
+        let first = manager
+            .check_alerts_with_sample(&mut storage, before, || Ok(snapshot("en0", 1100, 1000)))
+            .unwrap();
+        assert!(first[0].triggered);
+        // The background recorder can establish the new day's cumulative value
+        // before the next alert check; stored triggered is still yesterday's true.
+        storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 2000, 1000), after)
+            .unwrap();
+        storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 2100, 1000), after)
+            .unwrap();
+        let next = manager
+            .check_alerts_with_sample(&mut storage, after, || Ok(snapshot("en0", 2100, 1000)))
+            .unwrap();
+        assert!(next[0].triggered);
+        assert_ne!(
+            first[0].period_start_timestamp,
+            next[0].period_start_timestamp
+        );
+        assert_eq!(
+            manager.get_alerts().unwrap()[0].last_triggered,
+            Some(after.timestamp_millis())
+        );
+        let following = after + chrono::Duration::days(1);
+        let reset = manager
+            .check_alerts_with_sample(&mut storage, following, || Ok(snapshot("en0", 2200, 1000)))
+            .unwrap();
+        assert!(!reset[0].triggered);
+    }
+
+    #[test]
+    fn total_alert_value_saturates_instead_of_overflowing() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let manager = test_alert_manager(&storage);
+        let now = Local::now();
+        let sample = snapshot("en0", 1000, 1000);
+        storage
+            .cumulative_from_snapshot("day", &sample, now)
+            .unwrap();
+        let mut anchors = storage.load_anchors().unwrap();
+        anchors.day.accrued_rx = u64::MAX - 1;
+        anchors.day.accrued_tx = 10;
+        storage.save_anchors(&anchors).unwrap();
+        manager
+            .save_alerts(&[rule("total", "day", "total", u64::MAX, true)])
+            .unwrap();
+        let statuses = manager
+            .check_alerts_with_sample(&mut storage, now, || Ok(sample))
+            .unwrap();
+        assert_eq!(statuses[0].current_value, u64::MAX);
+        assert!(statuses[0].triggered);
+    }
+
+    #[test]
+    fn background_check_and_stale_ui_edit_preserve_both_name_and_trigger_state() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let manager = std::sync::Arc::new(test_alert_manager(&storage));
+        let now = Local::now();
+        storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 1000, 1000), now)
+            .unwrap();
+        let original = rule("daily", "day", "download", 100, true);
+        manager
+            .save_alerts(std::slice::from_ref(&original))
+            .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let checking = manager.clone();
+        let check = std::thread::spawn(move || {
+            checking.check_alerts_with_sample(&mut storage, now, || {
+                entered_tx.send(()).unwrap();
+                resume_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Ok(snapshot("en0", 1100, 1000))
+            })
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let editing = manager.clone();
+        let edit = std::thread::spawn(move || {
+            let mut stale = original;
+            stale.name = "Renamed".into();
+            editing.update_alert(stale)
+        });
+        resume_tx.send(()).unwrap();
+        assert!(check.join().unwrap().unwrap()[0].triggered);
+        edit.join().unwrap().unwrap();
+        let current = manager.get_alerts().unwrap();
+        assert_eq!(current[0].name, "Renamed");
+        assert!(current[0].triggered);
+        assert_eq!(current[0].last_triggered, Some(now.timestamp_millis()));
     }
 }
