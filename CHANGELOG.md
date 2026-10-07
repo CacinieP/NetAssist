@@ -2,6 +2,20 @@
 
 本文件记录 NetAssist 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.9] — 2026-10-07
+
+### 🐛 修复
+
+- 修复流量告警命令缺少兼容参数时调用失败的问题；各条告警按自身的日、周、月周期评估（#38）。
+- 流量阈值通知跟随应用运行，切页面后继续检测；启动时建立基线，重复触发去重，解除后或进入新周期可再次通知。
+- 通知等待持久化设置加载，并在异步权限检查后重新确认开关状态，避免旧请求在通知关闭后发送。
+- 告警检测统一使用一次有效计数快照，读取和保存失败明确报错；序列化规则编辑与触发状态更新，避免相互覆盖。
+
+### 📦 依赖与验证
+
+- 升级 notify-rust 至 4.18.1、tauri-winrt-notification 至 0.8.1，移除旧 quick-xml 0.37.5 及两条 RustSec 豁免（#34）。
+- 新增依赖变更及每周运行的 RustSec 审计；新增真实 Tauri 调用、告警状态与异步通知回归测试。
+
 ## [0.3.8] — 2026-10-07
 
 ### 🐛 修复
@@ -79,6 +93,7 @@
 
 - 修复流量监控页「只有实时流量有数字」：累计流量改用 OS 接口字节计数器 + 磁盘锚点（`traffic/anchors.json`），打开页面立即显示今日/本周/本月真实流量，并自动处理周期翻篇与接口重置（Wi-Fi 切换/重启）；流量告警与历史趋势图随之恢复。
 
+[0.3.9]: https://github.com/CacinieP/NetAssist/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/CacinieP/NetAssist/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/CacinieP/NetAssist/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/CacinieP/NetAssist/compare/v0.3.5...v0.3.6

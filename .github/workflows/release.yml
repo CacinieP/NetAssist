@@ -85,9 +85,8 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # Apple code-signing is optional: only when the APPLE_CERTIFICATE
-      # secret is configured. Without it the build is ad-hoc / unsigned,
-      # which matches the current tauri.conf.json (no signingIdentity).
+      # Import the Developer ID certificate used by tauri.conf.json.
+      # Its configured signingIdentity requires that identity at build time.
       - name: Import Apple Certificate
         if: runner.os == 'macOS'
         env:
@@ -96,7 +95,7 @@ jobs:
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           if [ -z "$APPLE_CERTIFICATE" ]; then
-            echo "APPLE_CERTIFICATE secret not set — building unsigned/ad-hoc."
+            echo "APPLE_CERTIFICATE is missing; the configured signing identity must already be available."
             exit 0
           fi
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain

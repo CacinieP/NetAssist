@@ -110,6 +110,8 @@ macOS 构建配置的最低系统版本为 **11.0**。具体版本的安装包�
 
 跨日、周或月的首次采样为新周期建立基线，不猜测跨边界区间中各字节的归属；历史区间被时间窗口裁剪时，只能按区间平均速率分配。累计文件读取或解析失败会报错并保留原文件，避免把存储错误显示成零流量。
 
+流量阈值通知在设置加载完成且开启通知后，随应用运行每五秒检查，不依赖当前页面。启动时已超限的规则作为基线，避免每次启动重复通知；解除后再次超限或新周期超限可再次通知。关闭通知仍可在流量页查看规则状态，通知是否展示也取决于系统授权。
+
 ## 从源码运行
 
 ### 开发环境
@@ -154,6 +156,10 @@ npm run build
 cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check
 cargo clippy --all-targets --all-features --manifest-path src-tauri/Cargo.toml -- -D warnings
 cargo test --all --manifest-path src-tauri/Cargo.toml
+
+# 依赖漏洞审计（需先安装 cargo-audit；从锁文件目录运行）
+cd src-tauri
+cargo audit
 ```
 
 请先完成前端构建，再运行 Rust 检查，以便提供应用所需的前端资源。
