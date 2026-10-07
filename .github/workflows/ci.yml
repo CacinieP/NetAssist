@@ -1,6 +1,7 @@
 name: CI
 
-# Lightweight quality gate: lint + build + test on a single OS.
+# Lightweight quality gate: frontend on Linux/Windows, Rust on Linux.
+# Windows frontend checks catch checkout and Node platform differences early.
 # Deliberately does NOT run the full cross-platform build matrix here —
 # that lives in release.yml and is triggered manually only, to avoid the
 # excessive Actions usage that got the previous account suspended.
@@ -17,8 +18,12 @@ concurrency:
 
 jobs:
   frontend:
-    name: Frontend
-    runs-on: ubuntu-latest
+    name: Frontend (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
