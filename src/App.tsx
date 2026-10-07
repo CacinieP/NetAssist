@@ -23,7 +23,7 @@ const EmergencyKit = lazy(() => import("./components/EmergencyKit/EmergencyKit")
 const Settings = lazy(() => import("./components/Settings/Settings"));
 
 function App() {
-  const { settings, loadSettings, error: settingsError } = useSettingsStore();
+  const { settings, hydrated: settingsHydrated, loading: settingsLoading, loadSettings, error: settingsError } = useSettingsStore();
   const { t } = useTranslation();
 
   // Error state with user feedback
@@ -70,12 +70,15 @@ function App() {
     if (
       prev === "normal" &&
       current === "abnormal" &&
-      settings.notify_network_abnormal
+      settingsHydrated && !settingsLoading && settings.notify_network_abnormal
     ) {
-      void notify(t("notify.network_abnormal_title"), t("notify.network_abnormal_body"));
+      void notify(t("notify.network_abnormal_title"), t("notify.network_abnormal_body"), () => {
+        const currentSettings = useSettingsStore.getState();
+        return currentSettings.hydrated && !currentSettings.loading && currentSettings.settings.notify_network_abnormal;
+      });
     }
     prevStatusRef.current = current;
-  }, [networkStatus, settings.notify_network_abnormal]);
+  }, [networkStatus, settingsHydrated, settingsLoading, settings.notify_network_abnormal]);
 
   // Surface settings-load failures (loadSettings sets store error).
   useEffect(() => {

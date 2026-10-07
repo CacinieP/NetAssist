@@ -42,13 +42,7 @@ export interface TrafficAlert {
   last_triggered: number | null;
 }
 
-export interface AlertStatus {
-  alert_id: string;
-  triggered: boolean;
-  current_value: number;
-  threshold_value: number;
-  percentage: number;
-}
+export type { AlertStatus } from '../../utils/trafficAlerts';
 
 export type SortField = "name" | "download" | "upload" | "total";
 export type SortOrder = "asc" | "desc";
