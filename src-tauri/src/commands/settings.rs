@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Application settings
 ///
@@ -13,6 +13,8 @@ pub struct Settings {
     pub minimize_to_tray: bool,
     pub refresh_interval_secs: u32,
     pub show_geoip: bool,
+    /// Automatic external diagnostics are opt-in; local sampling is unaffected.
+    pub auto_probe_enabled: bool,
     pub primary_dns: String,
     pub secondary_dns: String,
     pub notify_network_abnormal: bool,
@@ -33,6 +35,7 @@ impl Default for Settings {
             // machine's public IPs to external services without explicit
             // opt-in. Users can enable it in Settings.
             show_geoip: false,
+            auto_probe_enabled: false,
             primary_dns: "8.8.8.8".to_string(),
             secondary_dns: "1.1.1.1".to_string(),
             notify_network_abnormal: true,
@@ -152,10 +155,12 @@ fn get_settings_path() -> anyhow::Result<PathBuf> {
 
 /// Load settings from file
 pub fn load_settings_from_file() -> anyhow::Result<Settings> {
-    let settings_path = get_settings_path()?;
+    load_settings_from_path(&get_settings_path()?)
+}
 
+fn load_settings_from_path(settings_path: &Path) -> anyhow::Result<Settings> {
     if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)?;
+        let content = fs::read_to_string(settings_path)?;
         let settings: Settings = serde_json::from_str(&content)?;
 
         // Validate loaded settings and apply defaults for invalid values
@@ -193,17 +198,20 @@ pub fn load_settings_from_file() -> anyhow::Result<Settings> {
 
 /// Save settings to file
 fn save_settings_to_file(settings: &Settings) -> anyhow::Result<()> {
+    save_settings_to_path(settings, &get_settings_path()?)
+}
+
+fn save_settings_to_path(settings: &Settings, settings_path: &Path) -> anyhow::Result<()> {
     // Validate before saving
     validate_settings(settings)
         .map_err(|e| anyhow::anyhow!("Settings validation failed: {}", e))?;
 
-    let settings_path = get_settings_path()?;
     let content = serde_json::to_string_pretty(settings)?;
     // Atomic write: write to a temp file then rename, so an interrupted
     // save can never leave a truncated settings.json behind.
     let tmp_path = settings_path.with_extension("json.tmp");
     fs::write(&tmp_path, content)?;
-    fs::rename(&tmp_path, &settings_path)?;
+    fs::rename(&tmp_path, settings_path)?;
     Ok(())
 }
 
@@ -453,5 +461,74 @@ mod keepalive_tests {
         assert!(stdout.contains(r#""RunAtLoad" : true"#) || stdout.contains(r#""RunAtLoad":true"#));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod probe_settings_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_install_and_old_settings_disable_automatic_probes_without_resetting_preferences() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        assert!(!Settings::default().auto_probe_enabled);
+        assert!(!load_settings_from_path(&path).unwrap().auto_probe_enabled);
+        fs::write(&path, serde_json::json!({
+            "auto_start": true, "minimize_to_tray": false, "refresh_interval_secs": 17,
+            "show_geoip": true, "primary_dns": "9.9.9.9", "secondary_dns": "149.112.112.112",
+            "notify_network_abnormal": false, "notify_traffic_limit": false, "traffic_limit_gb": 42.5,
+            "dark_mode": true, "language": "en-US"
+        }).to_string()).unwrap();
+        let legacy = load_settings_from_path(&path).unwrap();
+        assert!(!legacy.auto_probe_enabled);
+        assert!(legacy.auto_start && legacy.show_geoip && legacy.dark_mode);
+        assert!(
+            !legacy.minimize_to_tray
+                && !legacy.notify_network_abnormal
+                && !legacy.notify_traffic_limit
+        );
+        assert_eq!(legacy.refresh_interval_secs, 17);
+        assert_eq!(legacy.primary_dns, "9.9.9.9");
+        assert_eq!(legacy.secondary_dns, "149.112.112.112");
+        assert_eq!(legacy.traffic_limit_gb, 42.5);
+        assert_eq!(legacy.language, "en-US");
+    }
+
+    #[test]
+    fn explicit_probe_opt_in_roundtrips_and_can_be_disabled_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut settings = Settings {
+            auto_probe_enabled: true,
+            show_geoip: true,
+            refresh_interval_secs: 30,
+            ..Settings::default()
+        };
+        validate_settings(&settings).unwrap();
+        save_settings_to_path(&settings, &path).unwrap();
+        let reloaded = load_settings_from_path(&path).unwrap();
+        assert!(reloaded.auto_probe_enabled && reloaded.show_geoip);
+        assert_eq!(reloaded.refresh_interval_secs, 30);
+        settings.auto_probe_enabled = false;
+        save_settings_to_path(&settings, &path).unwrap();
+        assert!(!load_settings_from_path(&path).unwrap().auto_probe_enabled);
+    }
+
+    #[test]
+    fn invalid_update_cannot_overwrite_the_saved_probe_preference() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        save_settings_to_path(&Settings::default(), &path).unwrap();
+        let before = fs::read(&path).unwrap();
+        let invalid = Settings {
+            auto_probe_enabled: true,
+            refresh_interval_secs: 0,
+            ..Settings::default()
+        };
+        assert!(save_settings_to_path(&invalid, &path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!load_settings_from_path(&path).unwrap().auto_probe_enabled);
+        assert!(serde_json::from_str::<Settings>(r#"{"auto_probe_enabled":"true"}"#).is_err());
     }
 }

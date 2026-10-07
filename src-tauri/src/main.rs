@@ -107,6 +107,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::ip_info::get_ip_info,
+            commands::ip_info::get_local_ip_info_only,
             commands::ip_info::get_network_status,
             commands::traffic::get_realtime_traffic,
             commands::traffic::get_app_traffic_ranking,
