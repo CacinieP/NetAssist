@@ -7,6 +7,8 @@ export interface AppTraffic {
   upload_bytes: number;
   current_download_bps: number;
   current_upload_bps: number;
+  traffic_available?: boolean;
+  sample_seconds?: number | null;
 }
 
 export interface AppTrafficHistory {

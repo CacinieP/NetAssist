@@ -2,11 +2,13 @@ import { useState, useEffect, useRef } from "react";
 import * as echarts from "echarts";
 import { invoke } from "@tauri-apps/api/core";
 import { useSettingsStore } from "../../store/settingsStore";
+import { createPollingController } from "../../utils/polling";
 
 export interface TrafficHistoryPoint {
   timestamp: number;
   download_bps: number;
   upload_bps: number;
+  interval_start_ms?: number | null;
 }
 
 export interface TrafficHistory {
@@ -31,7 +33,8 @@ const HISTORY_RANGES = [
 export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrendChartProps) {
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstance = useRef<echarts.ECharts | null>(null);
-  const [history, setHistory] = useState<TrafficHistory | null>(null);
+  const [storedHistory, setHistory] = useState<(TrafficHistory & { requestedHours: number }) | null>(null);
+  const history = storedHistory?.requestedHours === hours ? storedHistory : null;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { settings } = useSettingsStore();
@@ -40,24 +43,22 @@ export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrend
   const splitColor = isDark ? "#374151" : "#e5e7eb";
   const titleColor = isDark ? "#e5e7eb" : "#374151";
 
-  // Fetch history data
-  const fetchHistory = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const data = await invoke<TrafficHistory>("get_traffic_history", { hours });
-      setHistory(data);
-    } catch (err) {
-      console.error("Failed to fetch traffic history:", err);
-      setError("加载历史数据失败");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [historyPoller] = useState(() => createPollingController({
+    fetch: async (requestedHours: number) => ({
+      ...await invoke<TrafficHistory>("get_traffic_history", { hours: requestedHours }), requestedHours,
+    }),
+    onValue: data => { setHistory(data); setError(null); },
+    onError: error => { setHistory(null); setError(`加载历史数据失败：${String(error)}`); },
+    onLoading: setLoading,
+  }));
+  const fetchHistory = historyPoller.refresh;
 
   useEffect(() => {
-    fetchHistory();
-  }, [hours]);
+    setHistory(null);
+    setError(null);
+    historyPoller.configure(hours, 5000);
+    return () => historyPoller.stop();
+  }, [historyPoller, hours]);
 
   // Initialize chart instance + resize listener (re-init on theme change).
   // The chart container div is ALWAYS rendered (loading/empty states are
@@ -207,7 +208,7 @@ export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrend
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">历史趋势图</h3>
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">历史趋势图（路由接口统计）</h3>
         <div className="flex gap-1">
           {HISTORY_RANGES.map(range => (
             <button
@@ -239,24 +240,24 @@ export default function HistoryTrendChart({ hours, onHoursChange }: HistoryTrend
       <div className="relative" style={{ width: "100%", height: "300px" }}>
         <div ref={chartRef} style={{ width: "100%", height: "100%" }} />
 
-        {loading && (
+        {loading && !history && (
           <div className="absolute inset-0 flex items-center justify-center bg-white/60 dark:bg-gray-800/60 rounded">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
           </div>
         )}
 
-        {!loading && history && history.data.length === 0 && (
+        {history && history.data.length === 0 && (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
             <div className="text-4xl mb-3 opacity-60">📊</div>
             <p className="text-gray-500 dark:text-gray-400 text-sm">暂无历史数据</p>
             <p className="text-gray-400 dark:text-gray-500 text-xs mt-1">
-              流量数据每 5 秒记录一次，请保持应用运行后稍后查看
+              应用每 5 秒采集并刷新；失败不生成新点，恢复后按前后成功读数的真实差值记录，离线期间不推算
             </p>
           </div>
         )}
       </div>
 
-      {!loading && history && history.data.length > 0 && (
+      {history && history.data.length > 0 && (
         <div className="mt-2 text-xs text-gray-500 dark:text-gray-400 text-center">
           {history.data.length} 个数据点
           {history.start_timestamp && history.end_timestamp && (

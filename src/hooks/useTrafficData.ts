@@ -1,106 +1,22 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { createTrafficMonitor } from '../utils/trafficPolling';
+import type { TrafficStats } from '../utils/trafficPolling';
+export type { TrafficStats } from '../utils/trafficPolling';
 
-// TrafficStats type shared across components
-export interface TrafficStats {
-  download_bps: number;
-  upload_bps: number;
-  timestamp?: number;
+const monitor = createTrafficMonitor({
+  fetchStats: () => invoke<TrafficStats>('get_realtime_traffic'),
+  recordPoint: () => invoke('record_traffic_point', {}),
+});
+
+/** All pages share one physical realtime request; failed samples clear stale rates. */
+export function useRealtimeTraffic(intervalMs = 1000) {
+  const [snapshot, setSnapshot] = useState(monitor.getSnapshot);
+  useEffect(() => monitor.subscribe(setSnapshot, intervalMs), [intervalMs]);
+  return snapshot;
 }
 
-// Global singleton to ensure only one polling interval per frequency bucket
-let globalTrafficData: TrafficStats | null = null;
-let globalTrafficListeners: Set<(data: TrafficStats) => void> = new Set();
-let globalTrafficInterval: ReturnType<typeof setInterval> | null = null;
-
-function startGlobalTrafficPolling(intervalMs: number = 1000) {
-  // Multiple consumers (dashboard cards etc.) mount at the same time. Only
-  // the FIRST starts the timer; later mounts must NOT restart the interval
-  // or fire an immediate poll — otherwise the backend rate (byte delta since
-  // last read) is computed over millisecond gaps and produces spikes.
-  if (globalTrafficInterval) {
-    return;
-  }
-
-  const poll = async () => {
-    try {
-      const data = await invoke<TrafficStats>('get_realtime_traffic');
-      globalTrafficData = data;
-      for (const listener of globalTrafficListeners) {
-        listener(data);
-      }
-    } catch {
-      // Silently ignore — will retry next interval
-    }
-  };
-
-  // Initial poll
-  poll();
-  globalTrafficInterval = setInterval(poll, intervalMs);
-}
-
-function stopGlobalTrafficPolling() {
-  if (globalTrafficInterval) {
-    clearInterval(globalTrafficInterval);
-    globalTrafficInterval = null;
-  }
-}
-
-/**
- * Shared hook for real-time traffic data.
- * Polls get_realtime_traffic once per second globally,
- * no matter how many components use this hook.
- */
-export function useRealtimeTraffic(intervalMs: number = 1000) {
-  const [stats, setStats] = useState<TrafficStats | null>(globalTrafficData);
-
-  useEffect(() => {
-    // Set initial data if available
-    if (globalTrafficData) {
-      setStats(globalTrafficData);
-    }
-
-    globalTrafficListeners.add(setStats);
-    startGlobalTrafficPolling(intervalMs);
-
-    return () => {
-      globalTrafficListeners.delete(setStats);
-      if (globalTrafficListeners.size === 0) {
-        stopGlobalTrafficPolling();
-      }
-    };
-  }, [intervalMs]);
-
-  return { stats };
-}
-
-/**
- * Records a traffic data point to the backend.
- * Uses a ref to always record the latest value.
- *
- * Default interval is 5s so the history trend chart starts showing points
- * soon after the page is opened (the backend keeps a 24h rolling window).
- */
-export function useRecordTrafficPoint(intervalMs: number = 5000) {
-  const { stats } = useRealtimeTraffic();
-  const statsRef = useRef(stats);
-  statsRef.current = stats;
-
-  useEffect(() => {
-    const id = setInterval(async () => {
-      const current = statsRef.current;
-      if (current) {
-        try {
-          await invoke('record_traffic_point', {
-            downloadBps: current.download_bps,
-            uploadBps: current.upload_bps,
-          });
-        } catch {
-          // Silently ignore
-        }
-      }
-    }, intervalMs);
-
-    return () => clearInterval(id);
-  }, [intervalMs]);
+/** App is the sole owner. Recording continues while users visit any route. */
+export function useRecordTrafficPoint(intervalMs = 5000) {
+  useEffect(() => monitor.startRecording(intervalMs), [intervalMs]);
 }

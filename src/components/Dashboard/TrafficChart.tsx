@@ -12,7 +12,7 @@ export default function TrafficChart() {
   const isDark = settings.dark_mode;
 
   // Use shared traffic hook
-  const { stats } = useRealtimeTraffic(1000);
+  const { stats, error: trafficError } = useRealtimeTraffic(1000);
 
   // Theme-aware palette for ECharts (text/axis colors only; series colors stay).
   const axisColor = isDark ? "#9ca3af" : "#6b7280";
@@ -28,7 +28,7 @@ export default function TrafficChart() {
     const option: echarts.EChartsOption = {
       backgroundColor: "transparent",
       title: {
-        text: "实时流量（Real-time）",
+        text: "实时流量（路由接口统计）",
         left: "left",
         textStyle: {
           fontSize: 14,
@@ -126,11 +126,14 @@ export default function TrafficChart() {
     };
   }, [isDark, axisColor, splitColor, titleColor]);
 
+  useEffect(() => { setDataError(Boolean(trafficError)); }, [trafficError]);
+
   // Update chart data when traffic stats change
   useEffect(() => {
     if (!stats || !chartInstance.current) return;
 
-    const now = Date.now();
+    const now = stats.timestamp ?? Date.now();
+    if (dataRef.current[dataRef.current.length - 1]?.time === now) return;
     const downloadKB = stats.download_bps / 1024;
     const uploadKB = stats.upload_bps / 1024;
 

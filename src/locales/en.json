@@ -195,8 +195,8 @@
     "lang_en": "English"
   },
   "notify": {
-    "network_abnormal_title": "Network Abnormal",
-    "network_abnormal_body": "A network connection abnormality was detected. Please check your network status.",
+    "network_abnormal_title": "HTTP probes unsuccessful",
+    "network_abnormal_body": "The HTTP probe targets were unsuccessful or could not be tested. Check the probe details; this does not mean every application is offline.",
     "traffic_alert_title": "Traffic Alert",
     "traffic_alert_body": "{{count}} traffic threshold(s) have been triggered. Check Traffic Monitor."
   },
