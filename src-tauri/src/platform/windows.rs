@@ -747,34 +747,50 @@ pub fn kill_connection(
     Ok(false)
 }
 
-/// Read cumulative (rx_bytes, tx_bytes) across all operational interfaces via
-/// `GetIfTable2`. Excludes loopback; VPN/tunnel interfaces are excluded by
-/// the caller (traffic.rs) so totals match user-visible traffic.
-pub fn get_interface_total_bytes() -> (u64, u64) {
+/// Read only the interface selected by the Windows route table for a public
+/// target. Querying GetBestInterfaceEx does not send traffic to that target.
+pub fn get_interface_total_bytes() -> Result<super::CounterSnapshot, String> {
     unsafe {
-        let mut if_table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-        let result = GetIfTable2(&mut if_table);
-
-        if result.0 == 0 && !if_table.is_null() {
-            let table = &*if_table;
-            let mut total_rx = 0u64;
-            let mut total_tx = 0u64;
-
-            let num_entries = table.NumEntries as usize;
-            let table_ptr = table.Table.as_ptr();
-
-            for i in 0..num_entries {
-                let row = &*table_ptr.add(i);
-                if row.OperStatus.0 == 1 && row.Type != IF_TYPE_SOFTWARE_LOOPBACK {
-                    total_rx += row.InOctets;
-                    total_tx += row.OutOctets;
-                }
-            }
-
-            FreeMibTable(if_table as *mut _);
-            (total_rx, total_tx)
-        } else {
-            (0, 0)
+        let mut index = 0u32;
+        let mut v4 = SOCKADDR_IN {
+            sin_family: AF_INET,
+            ..Default::default()
+        };
+        v4.sin_addr.S_un.S_addr = u32::from_ne_bytes([1, 1, 1, 1]);
+        let mut result = GetBestInterfaceEx((&v4 as *const SOCKADDR_IN).cast(), &mut index);
+        if result != 0 {
+            let mut v6 = SOCKADDR_IN6 {
+                sin6_family: AF_INET6,
+                ..Default::default()
+            };
+            v6.sin6_addr.u.Byte = [
+                0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+            ];
+            result = GetBestInterfaceEx((&v6 as *const SOCKADDR_IN6).cast(), &mut index);
         }
+        if result != 0 {
+            return Err(format!(
+                "Cannot determine an IPv4 or IPv6 routed interface (Windows error {result})"
+            ));
+        }
+        let mut row = MIB_IF_ROW2 {
+            InterfaceIndex: index,
+            ..Default::default()
+        };
+        let result = GetIfEntry2(&mut row);
+        if result.0 != 0 {
+            return Err(format!(
+                "Cannot read interface counters (Windows error {})",
+                result.0
+            ));
+        }
+        if row.OperStatus.0 != 1 || row.Type == IF_TYPE_SOFTWARE_LOOPBACK {
+            return Err("The routed interface is down or loopback".into());
+        }
+        Ok(super::CounterSnapshot {
+            source: format!("windows:{:?}", row.InterfaceGuid),
+            rx: row.InOctets,
+            tx: row.OutOctets,
+        })
     }
 }

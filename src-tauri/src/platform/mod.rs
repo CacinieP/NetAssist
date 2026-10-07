@@ -12,6 +12,7 @@ pub mod macos;
 
 // Common utilities available on all platforms
 pub mod common;
+mod counters;
 
 use std::net::IpAddr;
 
@@ -221,13 +222,19 @@ pub struct PermissionStatusGeneric {
     pub warnings: Vec<String>,
 }
 
-/// Read cumulative (rx_bytes, tx_bytes) counters for the active network
-/// interface. These are the OS-authoritative totals used by both real-time
-/// rate calculation and cumulative-traffic anchoring.
-///
-/// Returns `Ok((0, 0))` when the counters cannot be read rather than an
-/// error, so callers degrade gracefully instead of failing the whole page.
-pub fn get_interface_total_bytes() -> (u64, u64) {
+/// One OS-routed interface's byte counters. The source is stable across reads
+/// and changes when the selected interface changes; callers must rebaseline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CounterSnapshot {
+    pub source: String,
+    pub rx: u64,
+    pub tx: u64,
+}
+
+/// Read the interface selected by the OS route to a representative public
+/// target (IPv4 first, IPv6 fallback). This is one route's interface traffic,
+/// not a sum of every interface or all application Internet traffic.
+pub fn get_interface_total_bytes() -> Result<CounterSnapshot, String> {
     cfg_if::cfg_if! {
         if #[cfg(windows)] {
             windows::get_interface_total_bytes()
@@ -236,7 +243,7 @@ pub fn get_interface_total_bytes() -> (u64, u64) {
         } else if #[cfg(target_os = "macos")] {
             macos::get_interface_total_bytes()
         } else {
-            (0, 0)
+            Err("Interface counters are unsupported on this platform".into())
         }
     }
 }

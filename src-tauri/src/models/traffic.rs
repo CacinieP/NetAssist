@@ -27,9 +27,12 @@ pub struct AppTraffic {
     pub name: String,
     /// Process ID
     pub pid: u32,
-    /// Total download bytes
+    /// Whether a per-process measurement exists on this platform/sample.
+    pub traffic_available: bool,
+    pub sample_seconds: Option<f64>,
+    /// Download bytes during this measured interval, not process lifetime.
     pub download_bytes: u64,
-    /// Total upload bytes
+    /// Upload bytes during this measured interval, not process lifetime.
     pub upload_bytes: u64,
     /// Current download speed in bytes per second
     pub current_download_bps: f64,
@@ -55,6 +58,10 @@ pub struct CumulativeTraffic {
 /// Traffic history data point
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrafficHistoryPoint {
+    /// Start of the measured counter interval. Absent in legacy point files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_start_ms: Option<i64>,
+    /// End of the measured interval (milliseconds since Unix epoch).
     /// Timestamp
     pub timestamp: i64,
     /// Download speed in bytes per second
