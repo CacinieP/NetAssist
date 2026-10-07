@@ -10,6 +10,7 @@ export function createPollingController<Config, Value>(options: {
   let active = false;
   let generation = 0;
   let requested = false;
+  let runningGeneration = -1;
   let inFlight: Promise<void> | null = null;
   let cancelTimer: (() => void) | undefined;
   const schedule = options.schedule ?? ((callback, ms) => {
@@ -20,13 +21,19 @@ export function createPollingController<Config, Value>(options: {
   const refresh = (): Promise<void> => {
     if (!active) return Promise.resolve();
     // Timer ticks and manual refreshes share the currently running request.
-    if (inFlight) return inFlight;
+    if (inFlight) {
+      // A manual request after reconfiguration waits behind the invalidated lane.
+      if (runningGeneration !== generation) requested = true;
+      return inFlight;
+    }
     requested = true;
+    runningGeneration = generation;
     inFlight = Promise.resolve().then(async () => {
       try {
         while (active && requested) {
           requested = false;
           const requestGeneration = generation;
+          runningGeneration = requestGeneration;
           const requestConfig = config;
           options.onLoading?.(true);
           try {
@@ -48,17 +55,17 @@ export function createPollingController<Config, Value>(options: {
   };
 
   return {
-    configure(nextConfig: Config, intervalMs: number) {
+    configure(nextConfig: Config, intervalMs: number, mode: { immediate?: boolean; automatic?: boolean } = {}) {
       cancelTimer?.();
       config = nextConfig;
       active = true;
       generation += 1;
       // A setting/period change schedules exactly one replacement after the old
       // physical request settles; it must never reset the in-flight lock.
-      requested = true;
-      options.onLoading?.(true);
-      void refresh();
-      cancelTimer = schedule(() => { void refresh(); }, intervalMs);
+      requested = mode.immediate ?? true;
+      options.onLoading?.(requested);
+      if (requested) void refresh();
+      cancelTimer = mode.automatic === false ? undefined : schedule(() => { void refresh(); }, intervalMs);
     },
     refresh,
     stop() {

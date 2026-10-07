@@ -6,6 +6,7 @@ export interface Settings {
   minimize_to_tray: boolean;
   refresh_interval_secs: number;
   show_geoip: boolean;
+  auto_probe_enabled: boolean;
   primary_dns: string;
   secondary_dns: string;
   notify_network_abnormal: boolean;
@@ -22,6 +23,7 @@ const defaultSettings: Settings = {
   // Off by default: GeoIP lookups go through third-party online APIs and
   // would expose the machine's public IPs without explicit opt-in.
   show_geoip: false,
+  auto_probe_enabled: false,
   primary_dns: "8.8.8.8",
   secondary_dns: "1.1.1.1",
   notify_network_abnormal: true,

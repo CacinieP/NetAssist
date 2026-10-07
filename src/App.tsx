@@ -3,10 +3,11 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useSettingsStore } from "./store/settingsStore";
 import { useRealtimeTraffic, useRecordTrafficPoint } from "./hooks/useTrafficData";
-import { useNetworkData } from "./hooks/useNetworkData";
+import { useNetworkData, isNetworkResultCurrent } from "./hooks/useNetworkData";
 import { useTrafficAlertMonitor } from "./hooks/useTrafficAlertMonitor";
 import { notify } from "./utils/notify";
 import { geoIPDisplay, probeDescription, probeLimitations } from "./utils/diagnostics";
+import { probeSummary } from "./utils/networkProbes";
 import StatusBar from "./components/StatusBar/StatusBar";
 import Navigation from "./components/Navigation/Navigation";
 
@@ -33,13 +34,9 @@ function App() {
   const { stats: traffic } = useRealtimeTraffic(1000);
   useRecordTrafficPoint(5000);
 
-  // Use shared network data hook — the app shell owns the single global poll
-  // (interval from settings, geoip from settings). Child pages only subscribe.
-  // No hidden 5s floor: the Settings 1s/2s options must actually work. The
-  // backend caches the external public-IP/GeoIP lookups, so a fast poll
-  // cannot hammer the network.
-  const intervalSecs = Math.max(1, Math.min(settings.refresh_interval_secs || 5, 300));
-  const { networkStatus, ipInfo, loading, ipError, statusError } = useNetworkData(intervalSecs, settings.show_geoip, { owner: true });
+  // Local data always updates; outbound probes wait for a click or saved opt-in.
+  const probes = useNetworkData({ owner: true });
+  const { networkStatus, ipInfo, loading, ipError, statusError } = probes;
 
   // Traffic-threshold watchdog: app-level (not page-level) so the detection
   // and its notifications keep running on Dashboard/Settings/Emergency too —
@@ -65,7 +62,12 @@ function App() {
   // notify_network_abnormal setting.
   const prevStatusRef = useRef<string | null>(null);
   useEffect(() => {
-    const current = networkStatus?.status ?? null;
+    if (!probes.automatic || probes.stale || !probes.ready) {
+      prevStatusRef.current = null;
+      return;
+    }
+    if (loading || !probes.hasRun) return;
+    const current = statusError ? null : networkStatus?.status ?? null;
     const prev = prevStatusRef.current;
     if (
       prev === "normal" &&
@@ -74,11 +76,11 @@ function App() {
     ) {
       void notify(t("notify.network_abnormal_title"), t("notify.network_abnormal_body"), () => {
         const currentSettings = useSettingsStore.getState();
-        return currentSettings.hydrated && !currentSettings.loading && currentSettings.settings.notify_network_abnormal;
+        return currentSettings.hydrated && !currentSettings.loading && currentSettings.settings.auto_probe_enabled && currentSettings.settings.notify_network_abnormal && isNetworkResultCurrent(probes.resultId);
       });
     }
     prevStatusRef.current = current;
-  }, [networkStatus, settingsHydrated, settingsLoading, settings.notify_network_abnormal]);
+  }, [networkStatus, statusError, loading, probes.automatic, probes.stale, probes.ready, probes.hasRun, probes.resultId, settingsHydrated, settingsLoading, settings.notify_network_abnormal, t]);
 
   // Surface settings-load failures (loadSettings sets store error).
   useEffect(() => {
@@ -87,11 +89,15 @@ function App() {
     }
   }, [settingsError]);
 
-  const location = geoIPDisplay(ipInfo?.ipv4_geoip, { enabled: settings.show_geoip, loading, error: ipError });
+  const location = geoIPDisplay(ipInfo?.ipv4_geoip, { enabled: settings.show_geoip, loading, error: ipError, hasQueried: probes.geoipQueried });
   const statusBarProps = {
-    networkStatus: (statusError ? "abnormal" : !networkStatus ? "loading" : networkStatus.status === "normal" ? "normal" : "abnormal") as "normal" | "abnormal" | "loading",
-    networkMessage: statusError ? "检测失败" : networkStatus?.message,
-    ipv4: ipInfo?.ipv4 || (loading ? "获取中…" : "未获取到"),
+    networkStatus: (!probes.hasRun ? (loading ? "loading" : "idle") : statusError ? "abnormal" : networkStatus?.status === "normal" ? "normal" : "abnormal") as "normal" | "abnormal" | "loading" | "idle",
+    networkMessage: probes.hasRun ? `上次：${statusError ? "检测失败" : networkStatus?.message || "未获取结果"}` : undefined,
+    probeSummary: probeSummary(probes),
+    automatic: probes.automatic,
+    onProbe: () => { void probes.refresh(); },
+    probeDisabled: !probes.ready || loading,
+    ipv4: ipInfo?.ipv4 || (loading ? "获取中…" : probes.hasRun ? "未获取到" : "未检测"),
     ipv6: ipInfo?.ipv6 || "未检测到",
     ipv6Detail: `本地接口：${ipInfo?.ipv6_interface || "未确定"}；此地址不代表实际出口。`,
     location: location.text,

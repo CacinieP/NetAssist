@@ -5,7 +5,7 @@ import { useSettingsStore } from "../../store/settingsStore";
 import type { Settings as SettingsType } from "../../store/settingsStore";
 
 export default function Settings() {
-  const { settings, setSettings, saveSettings, loading, saving, error: storeError } = useSettingsStore();
+  const { settings, setSettings, saveSettings, hydrated, loading, saving, error: storeError } = useSettingsStore();
   const { t } = useTranslation();
 
   // Local state for form data
@@ -22,11 +22,11 @@ export default function Settings() {
   const syncedRef = useRef(false);
   useEffect(() => {
     if (syncedRef.current) return;
-    if (!loading) {
+    if (hydrated && !loading) {
       setLocalSettings(settings);
       syncedRef.current = true;
     }
-  }, [loading, settings]);
+  }, [hydrated, loading, settings]);
 
   useEffect(() => () => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -257,6 +257,15 @@ export default function Settings() {
 
         <div className="space-y-4">
           <div>
+            <label className="flex items-center justify-between cursor-pointer">
+              <span className="text-gray-700 dark:text-gray-200">{t("settings.auto_probe_enabled")}</span>
+              <input type="checkbox" checked={localSettings.auto_probe_enabled}
+                onChange={e => { setLocalSettings(prev => ({ ...prev, auto_probe_enabled: e.target.checked })); setSaveSuccess(false); }}
+                className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500" />
+            </label>
+            <p className="text-xs text-gray-500 mt-2">{t("settings.auto_probe_help")}</p>
+          </div>
+          <div>
             <label className="text-gray-700 dark:text-gray-200 block mb-2">{t("settings.refresh_interval")}</label>
             <select
               value={localSettings.refresh_interval_secs}
@@ -295,6 +304,7 @@ export default function Settings() {
               className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
             />
           </label>
+          <p className="text-xs text-gray-500">{t("settings.geoip_probe_help")}</p>
           <div>
             <label className="text-gray-700 dark:text-gray-200 block mb-2">{t("settings.traffic_limit")}</label>
             <input
