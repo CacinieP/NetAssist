@@ -18,10 +18,8 @@ fn local_from_epoch(secs: i64) -> Option<DateTime<Local>> {
 
 /// How many days of per-day history files to keep on disk.
 ///
-/// Charts read at most 14 days back (`get_traffic_history` clamps to that),
-/// and the per-point cumulative fallback spans at most the current calendar
-/// month (31 days). 45 days covers both with margin, so pruning never
-/// affects a value the UI can still display.
+/// History and export requests are bounded by this retention window. The
+/// 30-day chart fits inside it; live totals use independent counter anchors.
 const HISTORY_RETENTION_DAYS: i64 = 45;
 
 /// Traffic history storage state
@@ -31,6 +29,14 @@ struct TrafficHistoryStorage {
     /// Local date (`YYYY-MM-DD`) of the last retention sweep, so the sweep
     /// runs at most once per day no matter how often points are recorded.
     last_prune_date: Option<String>,
+    /// Persistent totals survive restarts; prior-process counter baselines do not.
+    counters_initialized: bool,
+    last_history_sample: Option<HistoryCounterSample>,
+}
+
+struct HistoryCounterSample {
+    snapshot: crate::platform::CounterSnapshot,
+    timestamp_ms: i64,
 }
 
 impl TrafficHistoryStorage {
@@ -46,6 +52,8 @@ impl TrafficHistoryStorage {
             data_dir,
             history_cache: HashMap::new(),
             last_prune_date: None,
+            counters_initialized: false,
+            last_history_sample: None,
         };
         // Sweep on startup so an install that runs for months still prunes
         // even if the day never rolls over while the app is open.
@@ -178,107 +186,92 @@ impl TrafficHistoryStorage {
         Ok(())
     }
 
-    /// Add a new traffic data point (stored under the LOCAL calendar date).
-    fn add_data_point(&mut self, download_bps: f64, upload_bps: f64) -> Result<(), String> {
-        // Once-per-day retention sweep, piggybacked on the record path so a
-        // long-running instance prunes on day rollover without a timer.
-        self.prune_old_history();
+    fn record_counter_read(
+        &mut self,
+        sample: Result<crate::platform::CounterSnapshot, String>,
+        now: DateTime<Local>,
+    ) -> Result<(), String> {
+        self.record_counter_sample(sample?, now)
+    }
 
-        let now = Local::now();
-        let date_str = now.format("%Y-%m-%d").to_string();
-        let timestamp = now.timestamp_millis();
-
-        let point = TrafficHistoryPoint {
-            timestamp,
-            download_bps,
-            upload_bps,
+    /// Record the actual OS-counter delta over this sampling interval. Rates
+    /// supplied by old clients are not integrated: a sampled instantaneous rate
+    /// cannot stand in for all traffic during the next five seconds.
+    fn record_counter_sample(
+        &mut self,
+        sample: crate::platform::CounterSnapshot,
+        now: DateTime<Local>,
+    ) -> Result<(), String> {
+        self.cumulative_from_snapshot("day", &sample, now)?;
+        let current = HistoryCounterSample {
+            snapshot: sample,
+            timestamp_ms: now.timestamp_millis(),
         };
-
-        // Load existing data for the day
-        let mut day_data = self.load_day_history(&date_str)?;
-        day_data.push(point);
-
-        // Keep only the last 24h of points (window-based, not count-based).
-        let cutoff_ms = now.timestamp_millis() - 24 * 60 * 60 * 1000;
-        day_data.retain(|p| p.timestamp >= cutoff_ms);
-        day_data.sort_by_key(|p| p.timestamp);
-
-        self.save_day_history(&date_str, &day_data)?;
-        self.history_cache.insert(date_str, day_data);
-
+        let point = self.last_history_sample.as_ref().and_then(|previous| {
+            let elapsed_ms = current.timestamp_ms - previous.timestamp_ms;
+            if elapsed_ms <= 0
+                || current.snapshot.source != previous.snapshot.source
+                || current.snapshot.rx < previous.snapshot.rx
+                || current.snapshot.tx < previous.snapshot.tx
+            {
+                return None;
+            }
+            let seconds = elapsed_ms as f64 / 1000.0;
+            Some(TrafficHistoryPoint {
+                interval_start_ms: Some(previous.timestamp_ms),
+                timestamp: current.timestamp_ms,
+                download_bps: (current.snapshot.rx - previous.snapshot.rx) as f64 / seconds,
+                upload_bps: (current.snapshot.tx - previous.snapshot.tx) as f64 / seconds,
+            })
+        });
+        if let Some(point) = point {
+            self.add_data_point(point, now)?;
+        }
+        self.last_history_sample = Some(current);
         Ok(())
     }
 
-    /// Get cumulative traffic for a time period (per-point file aggregation).
-    ///
-    /// Each sample represents a byte rate that applies until the NEXT sample
-    /// (or, for the last one, until "now" / the period end). Gaps larger than
-    /// 5 minutes are capped so an app-shutdown gap can't multiply the stale
-    /// rate across the whole downtime.
+    fn add_data_point(
+        &mut self,
+        point: TrafficHistoryPoint,
+        now: DateTime<Local>,
+    ) -> Result<(), String> {
+        self.prune_old_history();
+        let date_str = now.format("%Y-%m-%d").to_string();
+        let mut day_data = self.load_day_history(&date_str)?;
+        day_data.push(point);
+        // A local calendar day may last 25 hours at a DST transition.
+        day_data.sort_by_key(|point| point.timestamp);
+        self.save_day_history(&date_str, &day_data)?;
+        self.history_cache.insert(date_str, day_data);
+        Ok(())
+    }
+
+    /// Compatibility aggregation for historical files, not a replacement for a
+    /// failed live counter read. New points describe a preceding measured
+    /// interval. Clipping an interval assumes its measured average rate; it
+    /// cannot reconstruct when individual bytes crossed a calendar boundary.
     fn get_cumulative_traffic(&self, period: &str) -> Result<CumulativeTraffic, String> {
         let now = Local::now();
-        let (start_time, end_time, period_label) = Self::period_bounds(period, now)?;
-
-        let mut total_download = 0u64;
-        let mut total_upload = 0u64;
-
-        // Load data for each day in the period (local calendar days)
-        let start_date = local_from_epoch(start_time).unwrap_or_else(Local::now);
-        let end_date = local_from_epoch(end_time).unwrap_or_else(Local::now);
-        let mut current_date = start_date;
-
-        // Convert to milliseconds for comparison with point.timestamp
-        let start_time_ms = start_time * 1000;
-        let end_time_ms = end_time * 1000;
-
-        while current_date <= end_date {
-            let date_str = current_date.format("%Y-%m-%d").to_string();
-            if let Ok(day_data) = self.load_day_history(&date_str) {
-                // Sort by timestamp to ensure correct order
-                let mut sorted_data = day_data.clone();
-                sorted_data.sort_by_key(|p| p.timestamp);
-
-                for (i, point) in sorted_data.iter().enumerate() {
-                    if point.timestamp < start_time_ms || point.timestamp > end_time_ms {
-                        continue;
-                    }
-                    // The rate holds until the next sample; the last sample
-                    // holds until the period end (== now). Cap at 5 min so a
-                    // large sampling gap can't inflate the total.
-                    let end_eff = sorted_data
-                        .get(i + 1)
-                        .map(|n| n.timestamp)
-                        .unwrap_or(end_time_ms)
-                        .min(end_time_ms);
-                    if end_eff <= point.timestamp {
-                        continue;
-                    }
-                    let interval_seconds = ((end_eff - point.timestamp) as f64 / 1000.0).min(300.0);
-                    if interval_seconds <= 0.0 {
-                        continue;
-                    }
-
-                    total_download += (point.download_bps * interval_seconds) as u64;
-                    total_upload += (point.upload_bps * interval_seconds) as u64;
-                }
-            }
-            current_date += chrono::Duration::days(1);
-        }
-
+        let (start_time, end_time, label) = Self::period_bounds(period, now)?;
+        let start = local_from_epoch(start_time).ok_or("Invalid period start")?;
+        // A legacy rate immediately before the period may extend into it.
+        let first_file = start.date_naive().pred_opt().unwrap_or(start.date_naive());
+        let points = self.load_points_by_date(first_file, now.date_naive())?;
+        let (rx, tx) = integrate_history(&points, start_time * 1000, now.timestamp_millis());
         Ok(CumulativeTraffic {
-            total_download_bytes: total_download,
-            total_upload_bytes: total_upload,
+            total_download_bytes: rx,
+            total_upload_bytes: tx,
             start_timestamp: start_time,
             end_timestamp: end_time,
-            period: period_label,
+            period: label,
         })
     }
 
-    /// Get traffic history for a time range (hours, 1..=24*14 capped)
+    /// Get traffic history for a time range (hours, up to the 45-day retention window)
     fn get_traffic_history(&self, hours: i64) -> Result<TrafficHistory, String> {
-        // Guard: an absurd hours value would build an enormous loop / overflow
-        // chrono::Duration. Cap the useful window (14 days of points).
-        let hours = hours.clamp(1, 24 * 14);
+        // Honor the 30-day chart option while bounding disk work by retention.
+        let hours = hours.clamp(1, 24 * HISTORY_RETENTION_DAYS);
         let now = Local::now();
         let start_time = now - chrono::Duration::hours(hours);
 
@@ -295,9 +288,7 @@ impl TrafficHistoryStorage {
     /// (local calendar bounds, same semantics as the cumulative stats) or
     /// `all` (the whole retention window).
     ///
-    /// Unlike `get_traffic_history` — which is chart-facing and clamped to
-    /// 14 days — this serves exports and honors the full retention window,
-    /// so 本月 / 全部 exports aren't silently truncated.
+    /// Exports and charts both honor the full retention window.
     fn get_export_history(&self, period: &str) -> Result<TrafficHistory, String> {
         let now = Local::now();
         let start_time = match period {
@@ -330,26 +321,23 @@ impl TrafficHistoryStorage {
         start: DateTime<Local>,
         end: DateTime<Local>,
     ) -> Result<Vec<TrafficHistoryPoint>, String> {
+        let mut all_data = self.load_points_by_date(start.date_naive(), end.date_naive())?;
+        all_data.retain(|point| {
+            point.timestamp >= start.timestamp_millis() && point.timestamp <= end.timestamp_millis()
+        });
+        Ok(all_data)
+    }
+
+    fn load_points_by_date(
+        &self,
+        start: chrono::NaiveDate,
+        end: chrono::NaiveDate,
+    ) -> Result<Vec<TrafficHistoryPoint>, String> {
         let mut all_data = Vec::new();
-
-        let start_date = local_from_epoch(start.timestamp()).unwrap_or_else(Local::now);
-        let mut current_date = start_date;
-
-        while current_date <= end {
-            let date_str = current_date.format("%Y-%m-%d").to_string();
-            if let Ok(day_data) = self.load_day_history(&date_str) {
-                for point in day_data {
-                    if point.timestamp >= start.timestamp_millis()
-                        && point.timestamp <= end.timestamp_millis()
-                    {
-                        all_data.push(point);
-                    }
-                }
-            }
-            current_date += chrono::Duration::days(1);
+        for date in calendar_dates(start, end) {
+            all_data.extend(self.load_day_history(&date.format("%Y-%m-%d").to_string())?);
         }
-
-        all_data.sort_by_key(|p| p.timestamp);
+        all_data.sort_by_key(|point| point.timestamp);
         Ok(all_data)
     }
 
@@ -359,23 +347,31 @@ impl TrafficHistoryStorage {
     /// "today" for UTC+8 started at 08:00 local and the week started 8h late.
     fn period_bounds(period: &str, now: DateTime<Local>) -> Result<(i64, i64, String), String> {
         use chrono::TimeZone;
-        // Local midnight for a given date.
-        let midnight = |d: chrono::NaiveDate| -> Option<DateTime<Local>> {
-            d.and_hms_opt(0, 0, 0)
-                .and_then(|ndt| Local.from_local_datetime(&ndt).single())
+        // Some timezone transitions skip midnight or repeat it. Use the
+        // earliest valid instant of the calendar date, never the varying `now`
+        // as an anchor (that would reset totals on every sample that day).
+        let midnight = |date: chrono::NaiveDate| -> Result<DateTime<Local>, String> {
+            for minute in 0..(24 * 60) {
+                let naive = date.and_hms_opt(minute / 60, minute % 60, 0).unwrap();
+                if let Some(instant) = Local.from_local_datetime(&naive).earliest() {
+                    return Ok(instant);
+                }
+            }
+            Err(format!(
+                "Local calendar date {} has no valid instants",
+                date
+            ))
         };
 
         match period {
             "day" => {
-                let start = midnight(now.date_naive())
-                    .map(|d| d.timestamp())
-                    .unwrap_or(now.timestamp());
+                let start = midnight(now.date_naive())?.timestamp();
                 Ok((start, now.timestamp(), "day".to_string()))
             }
             "week" => {
                 let weekday = now.weekday().num_days_from_monday();
-                let today_midnight = midnight(now.date_naive()).unwrap_or(now);
-                let start = today_midnight - chrono::Duration::days(weekday as i64);
+                let monday = now.date_naive() - chrono::Duration::days(weekday as i64);
+                let start = midnight(monday)?;
                 Ok((start.timestamp(), now.timestamp(), "week".to_string()))
             }
             "month" => {
@@ -383,9 +379,7 @@ impl TrafficHistoryStorage {
                     .date_naive()
                     .with_day(1)
                     .ok_or_else(|| "Invalid month".to_string())?;
-                let start = midnight(first)
-                    .map(|d| d.timestamp())
-                    .unwrap_or(now.timestamp());
+                let start = midnight(first)?.timestamp();
                 Ok((start, now.timestamp(), "month".to_string()))
             }
             _ => Err(format!("Invalid period: {}", period)),
@@ -398,115 +392,160 @@ impl TrafficHistoryStorage {
         self.data_dir.join("anchors.json")
     }
 
-    /// Load the anchor store. Returns an empty store if the file is missing or
-    /// corrupt (we never want a bad anchor file to blank the whole page).
-    fn load_anchors(&self) -> AnchorStore {
+    /// Only a missing anchor file starts a new store. Read/parse failures are
+    /// reported without overwriting the user's persisted totals or evidence.
+    fn load_anchors(&self) -> Result<AnchorStore, String> {
         let path = self.anchors_file_path();
-        if !path.exists() {
-            return AnchorStore::default();
-        }
         match fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => AnchorStore::default(),
-        }
-    }
-
-    /// Persist the anchor store. Failures are logged but non-fatal.
-    fn save_anchors(&self, anchors: &AnchorStore) {
-        let path = self.anchors_file_path();
-        if let Ok(content) = serde_json::to_string_pretty(anchors) {
-            let tmp = path.with_extension("tmp");
-            if fs::write(&tmp, &content).is_ok() {
-                let _ = fs::rename(tmp, path);
-            } else if let Err(e) = fs::write(&path, content) {
-                tracing::warn!("Failed to write traffic anchors file: {}", e);
+            Ok(content) => serde_json::from_str(&content).map_err(|error| {
+                format!(
+                    "Failed to parse traffic anchors {}: {}",
+                    path.display(),
+                    error
+                )
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(AnchorStore::default())
             }
+            Err(error) => Err(format!(
+                "Failed to read traffic anchors {}: {}",
+                path.display(),
+                error
+            )),
         }
     }
 
-    /// Cumulative traffic driven by the OS interface byte counters.
+    fn save_anchors(&self, anchors: &AnchorStore) -> Result<(), String> {
+        let path = self.anchors_file_path();
+        let content = serde_json::to_string_pretty(anchors).map_err(|error| error.to_string())?;
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, content)
+            .map_err(|error| format!("Failed to write traffic anchors: {}", error))?;
+        fs::rename(tmp, path)
+            .map_err(|error| format!("Failed to finalize traffic anchors: {}", error))
+    }
+
     fn get_cumulative_traffic_via_counters(
         &mut self,
         period: &str,
     ) -> Result<CumulativeTraffic, String> {
-        let (current_rx, current_tx) = crate::platform::get_interface_total_bytes();
-        self.cumulative_from_counters(period, current_rx, current_tx)
+        let sample = crate::platform::get_interface_total_bytes()?;
+        self.cumulative_from_snapshot(period, &sample, Local::now())
     }
 
-    /// Pure accumulator update (explicit counters → testable).
-    ///
-    /// Robust "accrued counter" model: each period stores the last observed
-    /// counter and the traffic already accrued. Every poll adds
-    /// `current − last` when the counter only grew, and simply re-anchors
-    /// `last = current` when the counter went backwards (interface flap,
-    /// reboot, Wi-Fi switch, docker/veth removal, app restart). The accrued
-    /// total is therefore NEVER zeroed by a counter reset — only a real
-    /// period rollover (new day/week/month) starts the accumulator at 0.
-    fn cumulative_from_counters(
+    /// One successful observation updates every calendar period, independently
+    /// of the selected UI tab. Preserve accrued bytes but rebase after process
+    /// restart, interface changes or counter resets; offline bytes are unknown.
+    fn cumulative_from_snapshot(
         &mut self,
         period: &str,
-        current_rx: u64,
-        current_tx: u64,
+        sample: &crate::platform::CounterSnapshot,
+        now: DateTime<Local>,
     ) -> Result<CumulativeTraffic, String> {
-        let now = Local::now();
         let (start_ts, end_ts, label) = Self::period_bounds(period, now)?;
-
-        let mut anchors = self.load_anchors();
-
-        {
-            // Resolve the anchor for this period.
-            let anchor = match period {
-                "week" => &mut anchors.week,
-                "month" => &mut anchors.month,
-                // default to day for "day" and any unrecognized value
-                _ => &mut anchors.day,
-            };
-
-            // New period (day/week/month rollover): start the accumulator at 0.
-            if anchor.start_ts != start_ts {
-                anchor.start_ts = start_ts;
-                anchor.last_rx = current_rx;
-                anchor.last_tx = current_tx;
+        let mut anchors = self.load_anchors()?;
+        for (name, anchor) in [
+            ("day", &mut anchors.day),
+            ("week", &mut anchors.week),
+            ("month", &mut anchors.month),
+        ] {
+            let (start, _, _) = Self::period_bounds(name, now)?;
+            if anchor.start_ts != start {
+                anchor.start_ts = start;
                 anchor.accrued_rx = 0;
                 anchor.accrued_tx = 0;
-            } else {
-                // Same period: accrue only forward counter movement.
-                if current_rx >= anchor.last_rx {
-                    anchor.accrued_rx = anchor
-                        .accrued_rx
-                        .saturating_add(current_rx - anchor.last_rx);
-                }
-                if current_tx >= anchor.last_tx {
-                    anchor.accrued_tx = anchor
-                        .accrued_tx
-                        .saturating_add(current_tx - anchor.last_tx);
-                }
-                // If counters went backwards (reset/flap), we do NOT subtract —
-                // just re-anchor so future growth accrues from here.
-                anchor.last_rx = current_rx;
-                anchor.last_tx = current_tx;
+            } else if self.counters_initialized
+                && anchor.source == sample.source
+                && sample.rx >= anchor.last_rx
+                && sample.tx >= anchor.last_tx
+            {
+                anchor.accrued_rx = anchor.accrued_rx.saturating_add(sample.rx - anchor.last_rx);
+                anchor.accrued_tx = anchor.accrued_tx.saturating_add(sample.tx - anchor.last_tx);
             }
+            anchor.last_rx = sample.rx;
+            anchor.last_tx = sample.tx;
+            anchor.source = sample.source.clone();
         }
-
-        // Persist whenever anything changed (or first run).
-        self.save_anchors(&anchors);
-
+        self.save_anchors(&anchors)?;
+        self.counters_initialized = true;
+        let anchor = match period {
+            "week" => &anchors.week,
+            "month" => &anchors.month,
+            _ => &anchors.day,
+        };
         Ok(CumulativeTraffic {
-            total_download_bytes: match period {
-                "week" => anchors.week.accrued_rx,
-                "month" => anchors.month.accrued_rx,
-                _ => anchors.day.accrued_rx,
-            },
-            total_upload_bytes: match period {
-                "week" => anchors.week.accrued_tx,
-                "month" => anchors.month.accrued_tx,
-                _ => anchors.day.accrued_tx,
-            },
+            total_download_bytes: anchor.accrued_rx,
+            total_upload_bytes: anchor.accrued_tx,
             start_timestamp: start_ts,
             end_timestamp: end_ts,
             period: label,
         })
     }
+
+    #[cfg(test)]
+    fn cumulative_from_counters(
+        &mut self,
+        period: &str,
+        rx: u64,
+        tx: u64,
+    ) -> Result<CumulativeTraffic, String> {
+        self.cumulative_from_snapshot(
+            period,
+            &crate::platform::CounterSnapshot {
+                source: "test:en0".into(),
+                rx,
+                tx,
+            },
+            Local::now(),
+        )
+    }
+}
+
+/// Iterate calendar dates, never add 24 hours to a zoned datetime (DST can
+/// otherwise skip or duplicate a day file).
+fn calendar_dates(start: chrono::NaiveDate, end: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
+    let mut dates = Vec::new();
+    let mut date = start;
+    while date <= end {
+        dates.push(date);
+        let Some(next) = date.succ_opt() else {
+            break;
+        };
+        date = next;
+    }
+    dates
+}
+
+fn integrate_history(points: &[TrafficHistoryPoint], start_ms: i64, end_ms: i64) -> (u64, u64) {
+    let mut points: Vec<_> = points.iter().collect();
+    points.sort_by_key(|point| point.timestamp);
+    let mut rx = 0.0;
+    let mut tx = 0.0;
+    for (index, point) in points.iter().enumerate() {
+        let (from, to) = if let Some(from) = point.interval_start_ms {
+            (from, point.timestamp)
+        } else {
+            // Legacy samples held until the next global sample. Stop at the
+            // start of a measured next interval to avoid mixed-format overlap.
+            let next = points
+                .get(index + 1)
+                .map(|next| next.interval_start_ms.unwrap_or(next.timestamp))
+                .unwrap_or(end_ms);
+            (
+                point.timestamp,
+                next.min(point.timestamp.saturating_add(300_000)),
+            )
+        };
+        let duration_ms = to.min(end_ms).saturating_sub(from.max(start_ms)).max(0);
+        let seconds = duration_ms as f64 / 1000.0;
+        if point.download_bps.is_finite() && point.download_bps >= 0.0 {
+            rx += point.download_bps * seconds;
+        }
+        if point.upload_bps.is_finite() && point.upload_bps >= 0.0 {
+            tx += point.upload_bps * seconds;
+        }
+    }
+    (rx.round() as u64, tx.round() as u64)
 }
 
 /// Per-period accumulator state.
@@ -518,6 +557,8 @@ impl TrafficHistoryStorage {
 ///   which is only ever added to (never reset by counter flapping).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 struct PeriodAnchor {
+    #[serde(default)]
+    source: String,
     start_ts: i64,
     last_rx: u64,
     last_tx: u64,
@@ -732,6 +773,8 @@ fn history_storage() -> &'static std::sync::Mutex<TrafficHistoryStorage> {
                 data_dir: PathBuf::from("."),
                 history_cache: HashMap::new(),
                 last_prune_date: None,
+                counters_initialized: false,
+                last_history_sample: None,
             }
         }))
     })
@@ -750,9 +793,9 @@ fn alert_manager() -> &'static TrafficAlertManager {
 
 /// Get cumulative traffic for a time period.
 ///
-/// Prefers the OS interface-counter method (immediate, accurate) and falls
-/// back to the per-minute history aggregation only if the counter method
-/// errors. Both share the same period bounds via `period_bounds`.
+/// Uses successful observations of the selected interface's OS counters.
+/// A failed read is an error, not a fabricated zero or a rate extrapolation.
+/// Totals preserve recorded bytes across restarts but omit unobserved downtime.
 #[tauri::command]
 pub async fn get_cumulative_traffic(period: String) -> Result<CumulativeTraffic, String> {
     // File I/O inside mutex — run on blocking thread to avoid stalling async runtime
@@ -760,9 +803,7 @@ pub async fn get_cumulative_traffic(period: String) -> Result<CumulativeTraffic,
         let mut storage = history_storage()
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
-        storage
-            .get_cumulative_traffic_via_counters(&period)
-            .or_else(|_| storage.get_cumulative_traffic(&period))
+        storage.get_cumulative_traffic_via_counters(&period)
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -798,12 +839,18 @@ pub async fn get_export_traffic_history(period: String) -> Result<TrafficHistory
 
 /// Record a traffic data point
 #[tauri::command]
-pub async fn record_traffic_point(download_bps: f64, upload_bps: f64) -> Result<(), String> {
+pub async fn record_traffic_point(
+    download_bps: Option<f64>,
+    upload_bps: Option<f64>,
+) -> Result<(), String> {
+    // Legacy clients may still send these; sampled rates are not byte totals.
+    let _ = (download_bps, upload_bps);
     tokio::task::spawn_blocking(move || {
         let mut storage = history_storage()
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
-        storage.add_data_point(download_bps, upload_bps)
+        let sample = crate::platform::get_interface_total_bytes();
+        storage.record_counter_read(sample, Local::now())
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -865,6 +912,8 @@ mod tests {
             data_dir,
             history_cache: HashMap::new(),
             last_prune_date: None,
+            counters_initialized: false,
+            last_history_sample: None,
         };
         (storage, dir)
     }
@@ -928,7 +977,7 @@ mod tests {
         assert_eq!(result.total_upload_bytes, 0, "first read is 0");
         assert_eq!(result.period, "day");
 
-        let anchors = storage.load_anchors();
+        let anchors = storage.load_anchors().unwrap();
         assert_ne!(anchors.day.start_ts, 0, "anchor start_ts was written");
         assert_eq!(anchors.day.last_rx, 1_000_000);
         assert_eq!(anchors.day.last_tx, 2_000_000);
@@ -942,6 +991,7 @@ mod tests {
 
         let stale = AnchorStore {
             day: PeriodAnchor {
+                source: "test:en0".into(),
                 start_ts: 946_684_800, // 2000-01-01T00:00:00Z
                 last_rx: 0,
                 last_tx: 0,
@@ -950,7 +1000,7 @@ mod tests {
             },
             ..Default::default()
         };
-        storage.save_anchors(&stale);
+        storage.save_anchors(&stale).unwrap();
 
         let result = storage
             .cumulative_from_counters("day", 1_000_000, 1_000_000)
@@ -960,7 +1010,7 @@ mod tests {
         assert_eq!(result.total_download_bytes, 0);
         assert_eq!(result.total_upload_bytes, 0);
 
-        let anchors = storage.load_anchors();
+        let anchors = storage.load_anchors().unwrap();
         let (expected_start, _, _) =
             TrafficHistoryStorage::period_bounds("day", Local::now()).unwrap();
         assert_eq!(anchors.day.start_ts, expected_start);
@@ -1030,6 +1080,7 @@ mod tests {
     fn test_anchor_store_serde_roundtrip() {
         let store = AnchorStore {
             day: PeriodAnchor {
+                source: "test:en0".into(),
                 start_ts: 1_700_000_000,
                 last_rx: 1234,
                 last_tx: 5678,
@@ -1037,6 +1088,7 @@ mod tests {
                 accrued_tx: 12,
             },
             week: PeriodAnchor {
+                source: "test:en0".into(),
                 start_ts: 1_700_000_000,
                 last_rx: 9999,
                 last_tx: 0,
@@ -1055,31 +1107,100 @@ mod tests {
         assert_eq!(back.month.start_ts, 0);
     }
 
-    /// A corrupt/empty anchors.json must degrade to the default store rather
-    /// than poisoning the page (the whole point of the fallback).
     #[test]
-    fn test_load_anchors_tolerates_corrupt_file() {
+    fn missing_anchor_file_starts_an_empty_store() {
         let (storage, _dir) = storage_in_tempdir();
-        fs::write(storage.anchors_file_path(), "not valid json {{{").unwrap();
-
-        let anchors = storage.load_anchors();
-        assert_eq!(anchors.day.start_ts, 0, "corrupt file -> default anchor");
+        assert_eq!(storage.load_anchors().unwrap().day.start_ts, 0);
+        assert!(!storage.anchors_file_path().exists());
     }
 
-    /// Old anchor files from previous versions serialize differently and must
-    /// not crash loading (missing fields get Default, extra fields ignored).
     #[test]
-    fn test_anchor_load_tolerates_unknown_json() {
+    fn corrupt_or_incompatible_anchor_file_is_reported_and_preserved() {
+        for original in [
+            "not valid json {{{",
+            "",
+            r#"{"day":{"start_ts":123,"rx_bytes":1,"tx_bytes":2,"carried_rx":3}}"#,
+        ] {
+            let (mut storage, _dir) = storage_in_tempdir();
+            let path = storage.anchors_file_path();
+            fs::write(&path, original).unwrap();
+            assert!(storage
+                .load_anchors()
+                .unwrap_err()
+                .contains("Failed to parse traffic anchors"));
+            assert!(storage.cumulative_from_counters("day", 1000, 1000).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            assert!(!storage.counters_initialized);
+            assert!(!path.with_extension("tmp").exists());
+        }
+    }
+
+    #[test]
+    fn unreadable_anchor_path_is_not_treated_as_a_missing_store() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let path = storage.anchors_file_path();
+        // A directory produces a deterministic read failure even as root.
+        fs::create_dir(&path).unwrap();
+        assert!(storage
+            .load_anchors()
+            .unwrap_err()
+            .contains("Failed to read traffic anchors"));
+        assert!(storage.cumulative_from_counters("day", 1000, 1000).is_err());
+        assert!(path.is_dir());
+        assert!(!storage.counters_initialized);
+    }
+
+    #[test]
+    fn save_failure_preserves_totals_and_does_not_advance_the_baseline() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        storage.cumulative_from_counters("day", 1000, 1000).unwrap();
+        storage.cumulative_from_counters("day", 1100, 1100).unwrap();
+        let path = storage.anchors_file_path();
+        let original = fs::read(&path).unwrap();
+        let tmp = path.with_extension("tmp");
+        fs::create_dir(&tmp).unwrap();
+        let error = storage
+            .cumulative_from_counters("day", 1200, 1200)
+            .unwrap_err();
+        assert!(error.contains("Failed to write traffic anchors"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::remove_dir(tmp).unwrap();
+        let resumed = storage.cumulative_from_counters("day", 1300, 1300).unwrap();
+        assert_eq!(resumed.total_download_bytes, 300);
+        assert_eq!(resumed.total_upload_bytes, 300);
+    }
+
+    #[test]
+    fn initial_save_failure_does_not_establish_an_unpersisted_baseline() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let tmp = storage.anchors_file_path().with_extension("tmp");
+        fs::create_dir(&tmp).unwrap();
+        assert!(storage.cumulative_from_counters("day", 1000, 1000).is_err());
+        assert!(!storage.counters_initialized);
+        assert!(!storage.anchors_file_path().exists());
+        fs::remove_dir(tmp).unwrap();
+        assert_eq!(
+            storage
+                .cumulative_from_counters("day", 2000, 2000)
+                .unwrap()
+                .total_download_bytes,
+            0
+        );
+    }
+
+    #[test]
+    fn previous_complete_anchor_schema_without_source_remains_readable() {
         let (storage, _dir) = storage_in_tempdir();
+        let anchor = serde_json::json!({"start_ts":123,"last_rx":1000,"last_tx":2000,"accrued_rx":50,"accrued_tx":75});
         fs::write(
             storage.anchors_file_path(),
-            r#"{"day":{"start_ts":123,"rx_bytes":1,"tx_bytes":2,"carried_rx":3}}"#,
+            serde_json::json!({"day":anchor,"week":anchor,"month":anchor}).to_string(),
         )
         .unwrap();
-        // Default deny-unknown-fields behavior would error; we use a relaxed
-        // load that falls back to defaults on any parse failure.
-        let anchors = storage.load_anchors();
-        assert_eq!(anchors.day.start_ts, 0, "mismatched schema -> defaults");
+        let store = storage.load_anchors().unwrap();
+        assert_eq!(store.day.accrued_rx, 50);
+        assert_eq!(store.day.accrued_tx, 75);
+        assert!(store.day.source.is_empty());
     }
 
     /// The retention sweep must delete day files (and stale .json.tmp) older
@@ -1146,5 +1267,204 @@ mod tests {
             expired.exists(),
             "second same-day sweep must be skipped by the guard"
         );
+    }
+    fn snapshot(source: &str, rx: u64, tx: u64) -> crate::platform::CounterSnapshot {
+        crate::platform::CounterSnapshot {
+            source: source.into(),
+            rx,
+            tx,
+        }
+    }
+
+    #[test]
+    fn all_periods_accrue_without_being_selected_and_source_switch_rebases() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let now = Local::now();
+        storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 1000, 1000), now)
+            .unwrap();
+        storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 2000, 2000), now)
+            .unwrap();
+        for period in ["day", "week", "month"] {
+            let value = storage
+                .cumulative_from_snapshot(period, &snapshot("en0", 2000, 2000), now)
+                .unwrap();
+            assert_eq!(value.total_download_bytes, 1000);
+        }
+        let switch = storage
+            .cumulative_from_snapshot("month", &snapshot("utun0", 9_000_000, 8_000_000), now)
+            .unwrap();
+        assert_eq!(switch.total_download_bytes, 1000);
+        let growth = storage
+            .cumulative_from_snapshot("day", &snapshot("utun0", 9_000_010, 8_000_020), now)
+            .unwrap();
+        assert_eq!(growth.total_download_bytes, 1010);
+        assert_eq!(growth.total_upload_bytes, 1020);
+    }
+
+    #[test]
+    fn process_restart_preserves_accrued_but_does_not_count_offline_or_reboot_counters() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let now = Local::now();
+        storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 1000, 1000), now)
+            .unwrap();
+        storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 1100, 1100), now)
+            .unwrap();
+        storage.counters_initialized = false;
+        let restarted = storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 9_000_000, 9_000_000), now)
+            .unwrap();
+        assert_eq!(restarted.total_download_bytes, 100);
+        let growth = storage
+            .cumulative_from_snapshot("day", &snapshot("en0", 9_000_200, 9_000_200), now)
+            .unwrap();
+        assert_eq!(growth.total_download_bytes, 300);
+    }
+
+    #[test]
+    fn counter_intervals_preserve_bursts_failures_and_sleep_without_rate_extrapolation() {
+        let (mut storage, _dir) = storage_in_tempdir();
+        let start = Local::now() - chrono::Duration::hours(2);
+        storage
+            .record_counter_read(Ok(snapshot("en0", 1_000_000, 100)), start)
+            .unwrap();
+        assert!(storage
+            .record_counter_read(
+                Err("OS read failed".into()),
+                start + chrono::Duration::seconds(2)
+            )
+            .is_err());
+        // A 1000-byte burst anywhere in the five-second interval is counted once.
+        storage
+            .record_counter_read(
+                Ok(snapshot("en0", 1_001_000, 600)),
+                start + chrono::Duration::seconds(5),
+            )
+            .unwrap();
+        // Resume after an hour: only the 200 actually observed bytes are recorded.
+        storage
+            .record_counter_read(
+                Ok(snapshot("en0", 1_001_200, 600)),
+                start + chrono::Duration::seconds(3605),
+            )
+            .unwrap();
+        let end = start + chrono::Duration::seconds(4000);
+        let points = storage.collect_points_between(start, end).unwrap();
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].interval_start_ms, Some(start.timestamp_millis()));
+        assert_eq!(points[0].download_bps, 200.0);
+        assert_eq!(
+            integrate_history(&points, start.timestamp_millis(), end.timestamp_millis()),
+            (1200, 500)
+        );
+        // Source change creates a baseline, not a huge history interval.
+        storage
+            .record_counter_read(Ok(snapshot("utun0", 90_000_000, 80_000_000)), end)
+            .unwrap();
+        assert_eq!(storage.collect_points_between(start, end).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn legacy_cross_midnight_and_measured_window_clipping_do_not_overlap() {
+        let legacy = vec![
+            TrafficHistoryPoint {
+                timestamp: 0,
+                interval_start_ms: None,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            TrafficHistoryPoint {
+                timestamp: 60_000,
+                interval_start_ms: None,
+                download_bps: 0.0,
+                upload_bps: 0.0,
+            },
+        ];
+        assert_eq!(integrate_history(&legacy, 0, 3_600_000), (6000, 0));
+        let measured = vec![TrafficHistoryPoint {
+            timestamp: 10_000,
+            interval_start_ms: Some(0),
+            download_bps: 100.0,
+            upload_bps: 10.0,
+        }];
+        assert_eq!(integrate_history(&measured, 5000, 20_000), (500, 50));
+        assert_eq!(integrate_history(&measured, 10_000, 20_000), (0, 0));
+        let old: TrafficHistoryPoint =
+            serde_json::from_str(r#"{"timestamp":123,"download_bps":1,"upload_bps":2}"#).unwrap();
+        assert_eq!(old.interval_start_ms, None);
+        let new = serde_json::to_string(&measured[0]).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TrafficHistoryPoint>(&new)
+                .unwrap()
+                .interval_start_ms,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn thirty_day_history_is_not_clamped_to_fourteen_days() {
+        let (storage, _dir) = storage_in_tempdir();
+        let history = storage.get_traffic_history(24 * 30).unwrap();
+        assert_eq!(
+            history.end_timestamp - history.start_timestamp,
+            30 * 24 * 60 * 60 * 1000
+        );
+        assert_eq!(
+            calendar_dates(
+                chrono::NaiveDate::from_ymd_opt(2026, 3, 7).unwrap(),
+                chrono::NaiveDate::from_ymd_opt(2026, 3, 9).unwrap()
+            )
+            .len(),
+            3
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dst_history_includes_every_local_day() {
+        const CHILD: &str = "NETASSIST_DST_HISTORY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::traffic_history::tests::dst_history_includes_every_local_day",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("TZ", "America/New_York")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let start = Local
+            .with_ymd_and_hms(2026, 3, 7, 23, 30, 0)
+            .single()
+            .unwrap();
+        let end = Local
+            .with_ymd_and_hms(2026, 3, 9, 0, 30, 0)
+            .single()
+            .unwrap();
+        assert_eq!((end - start).num_hours(), 24);
+        let noon = Local
+            .with_ymd_and_hms(2026, 3, 8, 12, 0, 0)
+            .single()
+            .unwrap();
+        let (storage, _dir) = storage_in_tempdir();
+        storage
+            .save_day_history(
+                "2026-03-08",
+                &[TrafficHistoryPoint {
+                    timestamp: noon.timestamp_millis(),
+                    interval_start_ms: None,
+                    download_bps: 10.0,
+                    upload_bps: 0.0,
+                }],
+            )
+            .unwrap();
+        assert_eq!(storage.collect_points_between(start, end).unwrap().len(), 1);
     }
 }

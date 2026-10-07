@@ -365,32 +365,22 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
     Ok(())
 }
 
-/// Read cumulative (rx_bytes, tx_bytes) across all interfaces from
-/// `/proc/net/dev`. Columns are (0-indexed): rx_bytes=1, tx_bytes=9.
-pub fn get_interface_total_bytes() -> (u64, u64) {
-    use std::fs;
-
-    let mut total_rx = 0u64;
-    let mut total_tx = 0u64;
-
-    if let Ok(content) = fs::read_to_string("/proc/net/dev") {
-        for line in content.lines().skip(2) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 10 {
-                // Skip the loopback interface so totals reflect real traffic.
-                let name = parts[0].trim_end_matches(':');
-                if name == "lo" {
-                    continue;
-                }
-                if let Ok(rx) = parts[1].parse::<u64>() {
-                    total_rx += rx;
-                }
-                if let Ok(tx) = parts[9].parse::<u64>() {
-                    total_tx += tx;
-                }
-            }
-        }
-    }
-
-    (total_rx, total_tx)
+/// Read a single routed interface, avoiding physical + tunnel double counts.
+pub fn get_interface_total_bytes() -> Result<super::CounterSnapshot, String> {
+    let interface = [("-4", "1.1.1.1"), ("-6", "2606:4700:4700::1111")]
+        .into_iter()
+        .find_map(|(family, target)| {
+            super::common::exec_command("ip", &[family, "route", "get", target])
+                .ok()
+                .and_then(|output| super::counters::linux_route_interface(&output))
+        })
+        .ok_or("Cannot determine an IPv4 or IPv6 routed interface")?;
+    let content = std::fs::read_to_string("/proc/net/dev")
+        .map_err(|error| format!("Cannot read interface counters: {error}"))?;
+    let (rx, tx) = super::counters::linux_interface_bytes(&content, &interface)?;
+    Ok(super::CounterSnapshot {
+        source: format!("linux:{interface}"),
+        rx,
+        tx,
+    })
 }

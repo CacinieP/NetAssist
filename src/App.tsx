@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useSettingsStore } from "./store/settingsStore";
-import { useRealtimeTraffic } from "./hooks/useTrafficData";
+import { useRealtimeTraffic, useRecordTrafficPoint } from "./hooks/useTrafficData";
 import { useNetworkData } from "./hooks/useNetworkData";
 import { notify } from "./utils/notify";
+import { geoIPDisplay, probeDescription, probeLimitations } from "./utils/diagnostics";
 import StatusBar from "./components/StatusBar/StatusBar";
 import Navigation from "./components/Navigation/Navigation";
 
@@ -29,6 +30,7 @@ function App() {
 
   // Use shared traffic hook — single global 1s poll
   const { stats: traffic } = useRealtimeTraffic(1000);
+  useRecordTrafficPoint(5000);
 
   // Use shared network data hook — the app shell owns the single global poll
   // (interval from settings, geoip from settings). Child pages only subscribe.
@@ -36,7 +38,7 @@ function App() {
   // backend caches the external public-IP/GeoIP lookups, so a fast poll
   // cannot hammer the network.
   const intervalSecs = Math.max(1, Math.min(settings.refresh_interval_secs || 5, 300));
-  const { networkStatus, ipInfo } = useNetworkData(intervalSecs, settings.show_geoip, { owner: true });
+  const { networkStatus, ipInfo, loading, ipError, statusError } = useNetworkData(intervalSecs, settings.show_geoip, { owner: true });
 
   // Load persisted settings
   useEffect(() => {
@@ -75,24 +77,18 @@ function App() {
     }
   }, [settingsError]);
 
-  // Format location string
-  const getLocationString = useCallback(() => {
-    if (!settings.show_geoip) return "已关闭";
-
-    const geoip = ipInfo?.ipv4_geoip;
-    if (geoip?.country && geoip?.region && geoip?.city) {
-      return `${geoip.country} ${geoip.region} ${geoip.city}`;
-    }
-    return "正在获取位置...";
-  }, [settings.show_geoip, ipInfo?.ipv4_geoip]);
-
+  const location = geoIPDisplay(ipInfo?.ipv4_geoip, { enabled: settings.show_geoip, loading, error: ipError });
   const statusBarProps = {
-    networkStatus: (networkStatus?.status === "normal" ? "normal" : "abnormal") as "normal" | "abnormal",
-    ipv4: ipInfo?.ipv4 || "获取中...",
-    ipv6: ipInfo?.ipv6 || "未连接",
-    location: getLocationString(),
-    downloadSpeed: traffic?.download_bps || 0,
-    uploadSpeed: traffic?.upload_bps || 0,
+    networkStatus: (statusError ? "abnormal" : !networkStatus ? "loading" : networkStatus.status === "normal" ? "normal" : "abnormal") as "normal" | "abnormal" | "loading",
+    networkMessage: statusError ? "检测失败" : networkStatus?.message,
+    ipv4: ipInfo?.ipv4 || (loading ? "获取中…" : "未获取到"),
+    ipv6: ipInfo?.ipv6 || "未检测到",
+    ipv6Detail: `本地接口：${ipInfo?.ipv6_interface || "未确定"}；此地址不代表实际出口。`,
+    location: location.text,
+    locationDetail: location.detail,
+    probeDetail: [...(networkStatus?.probes?.map(probeDescription) ?? []), probeLimitations].join("\n"),
+    downloadSpeed: traffic?.download_bps ?? null,
+    uploadSpeed: traffic?.upload_bps ?? null,
   };
 
   return (

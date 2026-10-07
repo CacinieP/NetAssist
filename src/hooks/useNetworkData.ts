@@ -1,128 +1,86 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { createPollingController, settlePair } from '../utils/polling';
+import type { GeoIPInfo, HttpConnectivityResult } from '../utils/diagnostics';
 
 export interface NetworkStatus {
   status: string;
   message?: string;
   ipv4?: string;
   ipv6?: string;
+  probes?: HttpConnectivityResult[];
 }
 
 export interface IPInfo {
   ipv4?: string;
   ipv4_type?: string;
-  ipv4_geoip?: any;
+  ipv4_geoip?: GeoIPInfo | null;
   ipv6?: string;
   ipv6_type?: string;
-  ipv6_geoip?: any;
+  ipv6_geoip?: GeoIPInfo | null;
   local_ipv4?: string;
   local_ipv6?: string;
   dual_stack_enabled?: boolean;
   ipv6_priority?: boolean;
-}
-
-let globalNetworkListeners: Set<(status: NetworkStatus, ipInfo: IPInfo) => void> = new Set();
-let globalNetworkInterval: ReturnType<typeof setInterval> | null = null;
-let globalNetworkData: { status: NetworkStatus | null; ipInfo: IPInfo | null } = {
-  status: null,
-  ipInfo: null,
-};
-// Config of the running poll, used to detect owner re-config (e.g. the user
-// changed refresh_interval_secs / show_geoip in Settings).
-let globalNetworkConfig: { intervalSecs: number; includeGeoip: boolean } | null = null;
-
-function startGlobalNetworkPolling(intervalSecs: number, includeGeoip: boolean) {
-  if (globalNetworkInterval) {
-    if (
-      globalNetworkConfig &&
-      globalNetworkConfig.intervalSecs === intervalSecs &&
-      globalNetworkConfig.includeGeoip === includeGeoip
-    ) {
-      // An owner already configured an identical poll; never restart it from
-      // a child component (previously the last-mounted useNetworkData — e.g.
-      // the dashboard's NetworkStatus card with (5s, no-geoip) — would
-      // hijack the interval and drop GeoIP for the whole app).
-      return;
-    }
-    // Owner changed its configuration: restart with the new settings.
-    clearInterval(globalNetworkInterval);
-    globalNetworkInterval = null;
-  }
-
-  globalNetworkConfig = { intervalSecs, includeGeoip };
-
-  const poll = async () => {
-    try {
-      const [status, ip] = await Promise.all([
-        invoke<NetworkStatus>('get_network_status'),
-        invoke<IPInfo>('get_ip_info', { includeGeoip }),
-      ]);
-      globalNetworkData = { status, ipInfo: ip };
-      for (const listener of globalNetworkListeners) {
-        listener(status, ip);
-      }
-    } catch {
-      // Will retry next interval
-    }
+  ipv6_interface?: string | null;
+  ipv6_source?: 'interface' | 'route_fallback' | null;
+  local_addresses?: { address: string; interface: string | null; family: 'ipv4' | 'ipv6'; source: string }[];
+  public_ipv4_probe?: {
+    status: 'success' | 'error' | 'skipped'; url: string | null; error: string | null;
+    proxy_policy: string; checked_at: number | null; address_family: string | null; cache_hit: boolean;
   };
-
-  // Initial poll
-  poll();
-  globalNetworkInterval = setInterval(poll, intervalSecs * 1000);
 }
 
-function stopGlobalNetworkPolling() {
-  if (globalNetworkInterval) {
-    clearInterval(globalNetworkInterval);
-    globalNetworkInterval = null;
-  }
-  globalNetworkConfig = null;
+interface NetworkData {
+  networkStatus: NetworkStatus | null;
+  ipInfo: IPInfo | null;
+  loading: boolean;
+  ipError: string | null;
+  statusError: string | null;
 }
 
-interface UseNetworkDataOptions {
-  /** Only the owning component (App) may start/configure the shared poll. */
-  owner?: boolean;
-}
+const listeners = new Set<(data: NetworkData) => void>();
+let data: NetworkData = { networkStatus: null, ipInfo: null, loading: true, ipError: null, statusError: null };
+const update = (patch: Partial<NetworkData>) => {
+  data = { ...data, ...patch };
+  for (const listener of listeners) listener(data);
+};
+const errorText = (error: unknown) => typeof error === 'string' ? error : String(error ?? '查询失败');
+const poller = createPollingController({
+  fetch: (includeGeoip: boolean) => settlePair(
+    invoke<NetworkStatus>('get_network_status'),
+    invoke<IPInfo>('get_ip_info', { includeGeoip }),
+  ),
+  onValue: ({ first: status, second: ip }) => update({
+    ...(status.status === 'fulfilled' ? { networkStatus: status.value, statusError: null } : { statusError: errorText(status.reason) }),
+    ...(ip.status === 'fulfilled' ? { ipInfo: ip.value, ipError: null } : { ipError: errorText(ip.reason) }),
+  }),
+  onError: error => update({ ipError: errorText(error), statusError: errorText(error) }),
+  onLoading: loading => update({ loading }),
+});
 
-/**
- * Shared hook for network status and IP info.
- *
- * Exactly one owner (the app shell) configures the global poll with the
- * user's settings (`refresh_interval_secs`, `show_geoip`); every other
- * consumer only subscribes to the latest values, so entering a page can no
- * longer change the global cadence or disable GeoIP app-wide.
- */
-export function useNetworkData(
-  intervalSecs: number = 5,
-  includeGeoip: boolean = true,
-  options?: UseNetworkDataOptions
-) {
+/** Manual refresh joins the same physical request and respects the owner's current settings. */
+export const refreshNetworkData = () => poller.refresh();
+
+/** App is the sole polling owner; page subscribers never change cadence or GeoIP settings. */
+export function useNetworkData(intervalSecs = 5, includeGeoip = true, options?: { owner?: boolean }) {
   const isOwner = options?.owner ?? false;
-  const [networkStatus, setNetworkStatus] = useState<NetworkStatus | null>(globalNetworkData.status);
-  const [ipInfo, setIpInfo] = useState<IPInfo | null>(globalNetworkData.ipInfo);
+  const [snapshot, setSnapshot] = useState(data);
 
   useEffect(() => {
-    if (globalNetworkData.status) setNetworkStatus(globalNetworkData.status);
-    if (globalNetworkData.ipInfo) setIpInfo(globalNetworkData.ipInfo);
+    setSnapshot(data);
+    listeners.add(setSnapshot);
+    return () => { listeners.delete(setSnapshot); };
+  }, []);
 
-    const listener = (status: NetworkStatus, ip: IPInfo) => {
-      setNetworkStatus(status);
-      setIpInfo(ip);
-    };
+  useEffect(() => {
+    if (!isOwner) return;
+    // Clear old location results when settings change; an earlier generation
+    // can no longer put them back after GeoIP is disabled or re-enabled.
+    if (data.ipInfo) update({ ipInfo: { ...data.ipInfo, ipv4_geoip: null, ipv6_geoip: null } });
+    poller.configure(includeGeoip, Math.max(1, intervalSecs) * 1000);
+    return () => poller.stop();
+  }, [isOwner, intervalSecs, includeGeoip]);
 
-    globalNetworkListeners.add(listener);
-
-    if (isOwner) {
-      startGlobalNetworkPolling(intervalSecs, includeGeoip);
-    }
-
-    return () => {
-      globalNetworkListeners.delete(listener);
-      if (isOwner && globalNetworkListeners.size === 0) {
-        stopGlobalNetworkPolling();
-      }
-    };
-  }, [intervalSecs, includeGeoip, isOwner]);
-
-  return { networkStatus, ipInfo, setNetworkStatus, setIpInfo };
+  return { ...snapshot, refresh: refreshNetworkData };
 }

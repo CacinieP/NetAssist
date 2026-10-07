@@ -1,12 +1,15 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useRealtimeTraffic, useRecordTrafficPoint } from "../../hooks/useTrafficData";
+import { useRealtimeTraffic } from "../../hooks/useTrafficData";
 import { useSettingsStore } from "../../store/settingsStore";
 import { formatSpeed, formatBytes } from "../../utils/formatUtils";
 import NetworkStatus from "./NetworkStatus";
 import IPInfoCard from "./IPInfoCard";
 import MetricCard from "./MetricCard";
 import TrafficChart from "./TrafficChart";
+import { createPollingController } from "../../utils/polling";
+import { httpMetric, dnsMetric, probeDescription, probeLimitations } from "../../utils/diagnostics";
+import type { HttpConnectivityResult, DNSStats } from "../../utils/diagnostics";
 
 interface CumulativeTraffic {
   total_download_bytes: number;
@@ -17,19 +20,6 @@ interface CumulativeTraffic {
 }
 
 type Period = "day" | "week" | "month";
-
-interface HttpConnectivityResult {
-  url: string;
-  success: boolean;
-  latency_ms: number;
-  status_code: number | null;
-  error: string | null;
-}
-
-interface DNSStats {
-  avg_latency_ms: number;
-  success_rate: number;
-}
 
 interface ConnectionInfo {
   pid: number;
@@ -43,8 +33,9 @@ export default function Dashboard() {
   const [cumulative, setCumulative] = useState<CumulativeTraffic | null>(null);
   const [period, setPeriod] = useState<Period>("day");
   const { settings } = useSettingsStore();
-  const dnsServerRef = useRef(settings.primary_dns || "8.8.8.8");
-  dnsServerRef.current = settings.primary_dns || "8.8.8.8";
+  const [httpProbe, setHttpProbe] = useState<HttpConnectivityResult | null>(null);
+  const [latencyUnit, setLatencyUnit] = useState("");
+  const [dnsUnit, setDnsUnit] = useState("");
 
   // Individual error states for each metric
   const [errors, setErrors] = useState({
@@ -56,98 +47,64 @@ export default function Dashboard() {
   });
 
   // Use shared traffic hook — no more independent polling
-  const { stats: traffic } = useRealtimeTraffic(1000);
+  const { stats: traffic, error: trafficError, recordingError } = useRealtimeTraffic(1000);
 
-  // Record traffic points every 5 seconds using shared hook (24h window)
-  useRecordTrafficPoint(5000);
-
-  // Fetch cumulative traffic — useCallback with period ref to avoid stale closures
-  const periodRef = useRef(period);
-  periodRef.current = period;
-
-  const fetchCumulative = useCallback(async () => {
-    try {
-      const data = await invoke<CumulativeTraffic>("get_cumulative_traffic", { period: periodRef.current });
+  const [cumulativePoller] = useState(() => createPollingController({
+    fetch: (requestedPeriod: Period) => invoke<CumulativeTraffic>("get_cumulative_traffic", { period: requestedPeriod }),
+    onValue: data => {
       setCumulative(data);
       setErrors(prev => ({ ...prev, cumulative: null }));
-    } catch (error) {
-      console.error("Failed to fetch cumulative traffic:", error);
-      setErrors(prev => ({ ...prev, cumulative: "获取失败" }));
-    }
-  }, []);
+    },
+    onError: () => setErrors(prev => ({ ...prev, cumulative: "获取失败" })),
+  }));
 
-  const fetchMetrics = useCallback(async () => {
-    await Promise.allSettled([
-      invoke<HttpConnectivityResult>("test_http_connectivity", { url: null })
-        .then(http => {
-          setLatency(http.success ? `${Math.round(http.latency_ms)}` : "超时");
-          setErrors(prev => ({ ...prev, latency: null }));
-        })
-        .catch(err => {
-          console.error("HTTP connectivity fetch failed:", err);
-          setErrors(prev => ({ ...prev, latency: "检测失败" }));
-          setLatency("错误");
-        }),
+  const [metricsPoller] = useState(() => createPollingController({
+    fetch: (server: string) => Promise.allSettled([
+      invoke<HttpConnectivityResult>("test_http_connectivity", { url: null }),
+      invoke<DNSStats>("test_dns", { server }),
+      invoke<ConnectionInfo[]>("get_active_connections"),
+    ]),
+    onValue: ([httpResult, dnsResult, connectionResult]) => {
+      const http = httpResult.status === "fulfilled" ? httpMetric(httpResult.value) : { value: "检测失败", unit: "", error: String(httpResult.reason) };
+      const dnsValue = dnsResult.status === "fulfilled" ? dnsMetric(dnsResult.value) : { value: "检测失败", unit: "", error: String(dnsResult.reason) };
+      setHttpProbe(httpResult.status === "fulfilled" ? httpResult.value : null);
+      setLatency(http.value);
+      setLatencyUnit(http.unit);
+      setDns(dnsValue.value);
+      setDnsUnit(dnsValue.unit);
+      setConnections(connectionResult.status === "fulfilled" ? `${connectionResult.value.length}` : "获取失败");
+      setErrors(prev => ({ ...prev, latency: http.error, dns: dnsValue.error,
+        connections: connectionResult.status === "fulfilled" ? null : String(connectionResult.reason) }));
+    },
+    onError: error => setErrors(prev => ({ ...prev, latency: String(error), dns: String(error), connections: String(error) })),
+  }));
 
-      invoke<DNSStats>("test_dns", { server: dnsServerRef.current })
-        .then(dnsRes => {
-          setDns(`${Math.round(dnsRes.avg_latency_ms)}`);
-          setErrors(prev => ({ ...prev, dns: null }));
-        })
-        .catch(err => {
-          console.error("DNS fetch failed:", err);
-          setErrors(prev => ({ ...prev, dns: "获取失败" }));
-          setDns("错误");
-        }),
-
-      invoke<ConnectionInfo[]>("get_active_connections")
-        .then(conns => {
-          setConnections(`${conns.length}`);
-          setErrors(prev => ({ ...prev, connections: null }));
-        })
-        .catch(err => {
-          console.error("Connections fetch failed:", err);
-          setErrors(prev => ({ ...prev, connections: "获取失败" }));
-          setConnections("错误");
-        }),
-    ]);
-  }, []);
-
-  // Fetch metrics when bandwidth changes (from shared traffic hook)
   useEffect(() => {
     if (traffic) {
-      const totalBps = traffic.download_bps + traffic.upload_bps;
-      setBandwidth(formatSpeed(totalBps));
+      setBandwidth(formatSpeed(traffic.download_bps + traffic.upload_bps));
       setErrors(prev => ({ ...prev, bandwidth: null }));
+    } else {
+      setBandwidth(trafficError ? "获取失败" : "加载中...");
+      setErrors(prev => ({ ...prev, bandwidth: trafficError }));
     }
-  }, [traffic]);
+  }, [traffic, trafficError]);
 
   useEffect(() => {
-    // Initial fetch
-    fetchMetrics();
-    fetchCumulative();
+    setLatency("加载中...");
+    setDns("加载中...");
+    setConnections("加载中...");
+    setHttpProbe(null);
+    setErrors(prev => ({ ...prev, latency: null, dns: null, connections: null }));
+    metricsPoller.configure(settings.primary_dns || "8.8.8.8", Math.max(2000, (settings.refresh_interval_secs || 5) * 1000));
+    return () => metricsPoller.stop();
+  }, [metricsPoller, settings.refresh_interval_secs, settings.primary_dns]);
 
-    // Poll metrics honoring the user's refresh interval (these hit the
-    // network: HTTP probe + DNS + connection list). Minimum 2s to avoid
-    // hammering the external probes, but no longer a hard-coded 2s.
-    const metricIntervalMs = Math.max(2000, (settings.refresh_interval_secs || 5) * 1000);
-    const interval = setInterval(fetchMetrics, metricIntervalMs);
-
-    // Cumulative totals come from OS counters (cheap); poll at the same
-    // cadence but at least 5s.
-    const cumulativeIntervalMs = Math.max(5000, (settings.refresh_interval_secs || 5) * 1000);
-    const cumulativeInterval = setInterval(fetchCumulative, cumulativeIntervalMs);
-
-    return () => {
-      clearInterval(interval);
-      clearInterval(cumulativeInterval);
-    };
-  }, [fetchMetrics, fetchCumulative, settings.refresh_interval_secs]);
-
-  // Re-fetch cumulative when period changes
   useEffect(() => {
-    fetchCumulative();
-  }, [period, fetchCumulative]);
+    setCumulative(null);
+    setErrors(prev => ({ ...prev, cumulative: null }));
+    cumulativePoller.configure(period, Math.max(5000, (settings.refresh_interval_secs || 5) * 1000));
+    return () => cumulativePoller.stop();
+  }, [cumulativePoller, period, settings.refresh_interval_secs]);
 
   return (
     <div className="p-6 space-y-6">
@@ -166,7 +123,7 @@ export default function Dashboard() {
       {/* Cumulative Traffic Card */}
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">累计流量统计</h3>
+          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">累计流量（路由接口统计）</h3>
           <div className="flex gap-1">
             {[
               { key: "day" as Period, label: "今日" },
@@ -189,10 +146,10 @@ export default function Dashboard() {
         </div>
         {errors.cumulative ? (
           <div className="text-center text-red-500 py-4">{errors.cumulative}</div>
-        ) : cumulative ? (
+        ) : cumulative && cumulative.period === period ? (
           (cumulative.total_download_bytes === 0 && cumulative.total_upload_bytes === 0) ? (
             <div className="text-center text-gray-400 dark:text-gray-500 py-4 text-sm">
-              数据采集中…流量每 5 秒记录一次，请稍候查看
+              当前采集区间尚无流量；应用每 5 秒采集一次
             </div>
           ) : (
             <div className="grid grid-cols-3 gap-4">
@@ -221,33 +178,39 @@ export default function Dashboard() {
         )}
       </div>
 
+      <p className="text-xs text-gray-500 dark:text-gray-400">累计流量仅包含应用成功采集的区间，不包含未采集或离线期间的流量。{recordingError ? `最近一次历史记录失败：${recordingError}` : ""}</p>
+
       {/* Metric Cards Grid */}
       <div className="grid grid-cols-2 gap-4">
         <MetricCard
-          title="总带宽"
+          title="实时流量（路由接口）"
           value={bandwidth}
-          status={errors.bandwidth ? "abnormal" : "normal"}
+          status={bandwidth === "加载中..." ? "pending" : errors.bandwidth ? "abnormal" : "normal"}
           unit=""
         />
         <MetricCard
-          title="网络延迟"
+          title="HTTP 探测延迟"
           value={latency}
-          status={errors.latency || latency === "超时" ? "abnormal" : "normal"}
-          unit={latency === "超时" || errors.latency ? "" : "ms"}
+          status={latency === "加载中..." ? "pending" : errors.latency ? "abnormal" : "normal"}
+          unit={latency === "加载中..." ? "" : latencyUnit}
+          detail={[httpProbe && probeDescription(httpProbe), errors.latency].filter(Boolean).join(" · ")}
         />
         <MetricCard
           title="DNS响应"
           value={dns}
-          status={errors.dns ? "abnormal" : "normal"}
-          unit={errors.dns ? "" : "ms"}
+          status={dns === "加载中..." ? "pending" : errors.dns ? "abnormal" : "normal"}
+          unit={dns === "加载中..." ? "" : dnsUnit}
+          detail={`服务器：${settings.primary_dns || "8.8.8.8"}${errors.dns ? ` · ${errors.dns}` : ""}`}
         />
         <MetricCard
           title="活跃连接"
           value={connections}
-          status={errors.connections ? "abnormal" : "normal"}
+          status={connections === "加载中..." ? "pending" : errors.connections ? "abnormal" : "normal"}
           unit=""
         />
       </div>
+
+      <p className="text-xs text-gray-500 dark:text-gray-400">HTTP 延迟包含向指定目标发起请求的耗时；不能代表所有网站、游戏或应用的延迟。{probeLimitations}</p>
 
       {/* Real-time Traffic Chart */}
       <TrafficChart />

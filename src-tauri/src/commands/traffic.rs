@@ -17,6 +17,7 @@ const BATTERY_MIN_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::fr
 /// so the first poll reports 0 bps instead of "uptime bytes / uptime seconds"
 /// (which produced GB/s spikes and poisoned history).
 struct TrafficState {
+    source: Option<String>,
     last_rx_bytes: Option<u64>,
     last_tx_bytes: Option<u64>,
     last_update: Option<std::time::Instant>,
@@ -33,6 +34,7 @@ impl TrafficMonitor {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(TrafficState {
+                source: None,
                 last_rx_bytes: None,
                 last_tx_bytes: None,
                 last_update: None,
@@ -41,60 +43,61 @@ impl TrafficMonitor {
         }
     }
 
-    /// Get current traffic statistics
+    /// Serialize physical reads with their baseline update. A failed sample
+    /// never replaces a valid baseline with fabricated zero counters.
     pub async fn get_stats(&self) -> Result<TrafficStats, String> {
-        // Power detection, counter reads and the rate math are all blocking
-        // work — do everything on one blocking thread. A std::Mutex (not
-        // tokio's) is correct here: it is only ever held across cheap memory
-        // ops, never across the subprocess call.
         let state = Arc::clone(&self.state);
         tokio::task::spawn_blocking(move || {
-            // Battery throttle: answer from cache when unplugged and the last
-            // sample is fresher than BATTERY_MIN_SAMPLE_INTERVAL.
-            if crate::core::power::is_on_battery_cached() {
-                let snapshot = state.lock().map_err(|e| format!("Lock error: {}", e))?;
-                let fresh = snapshot
-                    .last_update
-                    .is_some_and(|t| t.elapsed() < BATTERY_MIN_SAMPLE_INTERVAL);
-                if fresh {
-                    if let Some(stats) = snapshot.last_stats.clone() {
-                        return Ok(stats);
-                    }
-                }
-            }
-
-            let (current_rx, current_tx) = crate::platform::get_interface_total_bytes();
-            let now = std::time::Instant::now();
+            // This mutex is used only on blocking threads; holding it over the
+            // OS read prevents an older sample from committing after a newer one.
             let mut state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
-
-            // Compute rate from the previous reading; no previous reading yet → 0.
-            let mut download_bps = 0.0f64;
-            let mut upload_bps = 0.0f64;
-            if let (Some(last_rx), Some(last_tx), Some(last_update)) =
-                (state.last_rx_bytes, state.last_tx_bytes, state.last_update)
+            if crate::core::power::is_on_battery_cached()
+                && state
+                    .last_update
+                    .is_some_and(|t| t.elapsed() < BATTERY_MIN_SAMPLE_INTERVAL)
             {
-                let elapsed = now.duration_since(last_update).as_secs_f64();
-                if elapsed > 0.001 {
-                    download_bps = (current_rx.saturating_sub(last_rx)) as f64 / elapsed;
-                    upload_bps = (current_tx.saturating_sub(last_tx)) as f64 / elapsed;
+                if let Some(stats) = state.last_stats.clone() {
+                    return Ok(stats);
                 }
             }
-
-            // Update state
-            state.last_rx_bytes = Some(current_rx);
-            state.last_tx_bytes = Some(current_tx);
-            state.last_update = Some(now);
-
-            let stats = TrafficStats {
-                download_bps,
-                upload_bps,
-                timestamp: chrono::Utc::now().timestamp_millis(),
-            };
-            state.last_stats = Some(stats.clone());
-            Ok(stats)
+            let snapshot = crate::platform::get_interface_total_bytes()?;
+            Ok(state.update(snapshot, std::time::Instant::now()))
         })
         .await
         .map_err(|e| format!("Task join error: {}", e))?
+    }
+}
+
+impl TrafficState {
+    fn update(
+        &mut self,
+        sample: crate::platform::CounterSnapshot,
+        now: std::time::Instant,
+    ) -> TrafficStats {
+        let mut download_bps = 0.0;
+        let mut upload_bps = 0.0;
+        if self.source.as_deref() == Some(sample.source.as_str()) {
+            if let (Some(last_rx), Some(last_tx), Some(last_update)) =
+                (self.last_rx_bytes, self.last_tx_bytes, self.last_update)
+            {
+                let elapsed = now.saturating_duration_since(last_update).as_secs_f64();
+                if elapsed > 0.001 && sample.rx >= last_rx && sample.tx >= last_tx {
+                    download_bps = (sample.rx - last_rx) as f64 / elapsed;
+                    upload_bps = (sample.tx - last_tx) as f64 / elapsed;
+                }
+            }
+        }
+        self.source = Some(sample.source);
+        self.last_rx_bytes = Some(sample.rx);
+        self.last_tx_bytes = Some(sample.tx);
+        self.last_update = Some(now);
+        let stats = TrafficStats {
+            download_bps,
+            upload_bps,
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        };
+        self.last_stats = Some(stats.clone());
+        stats
     }
 }
 
@@ -134,7 +137,8 @@ fn compute_app_ranking() -> Result<Vec<AppTraffic>, String> {
 
     // macOS: real per-process traffic (1s delta from nettop).
     #[cfg(target_os = "macos")]
-    let process_traffic_stats = crate::platform::get_process_traffic_stats().unwrap_or_default();
+    let process_traffic_stats =
+        crate::platform::get_process_traffic_stats().map_err(|error| error.to_string())?;
 
     // Windows / Linux: per-PID active connection counts.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -189,18 +193,27 @@ fn compute_app_ranking() -> Result<Vec<AppTraffic>, String> {
             .cloned()
             .unwrap_or_else(|| "[unknown]".to_string());
 
-        // macOS: nettop returns a 1s delta, so these values are bytes/sec.
+        // macOS: nettop returns interval bytes; divide by its measured duration.
         #[cfg(target_os = "macos")]
-        let (download_bps, upload_bps, total_download, total_upload) = {
+        let (
+            download_bps,
+            upload_bps,
+            total_download,
+            total_upload,
+            traffic_available,
+            sample_seconds,
+        ) = {
             if let Some(stats) = process_traffic_stats.get(&pid_u32) {
                 (
-                    stats.bytes_in as f64,
-                    stats.bytes_out as f64,
+                    stats.bytes_in as f64 / stats.sample_seconds,
+                    stats.bytes_out as f64 / stats.sample_seconds,
                     stats.bytes_in,
                     stats.bytes_out,
+                    true,
+                    Some(stats.sample_seconds),
                 )
             } else {
-                (0.0, 0.0, 0, 0)
+                (0.0, 0.0, 0, 0, false, None)
             }
         };
 
@@ -209,14 +222,23 @@ fn compute_app_ranking() -> Result<Vec<AppTraffic>, String> {
         // than the previous bogus "connection_count * 100" estimate. The
         // connection count is still surfaced via total bytes = 0 for honesty.
         #[cfg(not(target_os = "macos"))]
-        let (download_bps, upload_bps, total_download, total_upload) = {
+        let (
+            download_bps,
+            upload_bps,
+            total_download,
+            total_upload,
+            traffic_available,
+            sample_seconds,
+        ) = {
             let _conn_count = connection_info.get(&pid_u32).copied().unwrap_or(0);
-            (0.0, 0.0, 0u64, 0u64)
+            (0.0, 0.0, 0u64, 0u64, false, None)
         };
 
         app_traffic.push(AppTraffic {
             name,
             pid: pid_u32,
+            traffic_available,
+            sample_seconds,
             download_bytes: total_download,
             upload_bytes: total_upload,
             current_download_bps: download_bps,
@@ -249,8 +271,12 @@ pub async fn get_realtime_traffic() -> Result<TrafficStats, String> {
 /// data (nettop) is unavailable.
 #[tauri::command]
 pub async fn get_interface_counters() -> Result<(u64, u64), String> {
-    let (rx, tx) = crate::platform::get_interface_total_bytes();
-    Ok((rx, tx))
+    tokio::task::spawn_blocking(|| {
+        let snapshot = crate::platform::get_interface_total_bytes()?;
+        Ok((snapshot.rx, snapshot.tx))
+    })
+    .await
+    .map_err(|error| format!("Task join error: {}", error))?
 }
 
 /// Get application traffic ranking
@@ -266,4 +292,57 @@ pub async fn get_app_traffic_ranking() -> Result<Vec<AppTraffic>, String> {
     tokio::task::spawn_blocking(compute_app_ranking)
         .await
         .map_err(|e| format!("Task join error: {}", e))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn state() -> TrafficState {
+        TrafficState {
+            source: None,
+            last_rx_bytes: None,
+            last_tx_bytes: None,
+            last_update: None,
+            last_stats: None,
+        }
+    }
+    fn snapshot(source: &str, rx: u64, tx: u64) -> crate::platform::CounterSnapshot {
+        crate::platform::CounterSnapshot {
+            source: source.into(),
+            rx,
+            tx,
+        }
+    }
+    #[test]
+    fn realtime_rate_uses_same_source_delta_and_rebases_reset_or_switch() {
+        let mut state = state();
+        let start = std::time::Instant::now();
+        assert_eq!(
+            state
+                .update(snapshot("en0", 1_000_000, 500), start)
+                .download_bps,
+            0.0
+        );
+        let next = state.update(
+            snapshot("en0", 1_001_000, 700),
+            start + std::time::Duration::from_secs(2),
+        );
+        assert_eq!(next.download_bps, 500.0);
+        assert_eq!(next.upload_bps, 100.0);
+        let switched = state.update(
+            snapshot("utun0", 90_000_000, 80_000_000),
+            start + std::time::Duration::from_secs(3),
+        );
+        assert_eq!(switched.download_bps, 0.0);
+        let reset = state.update(
+            snapshot("utun0", 100, 50),
+            start + std::time::Duration::from_secs(4),
+        );
+        assert_eq!(reset.download_bps, 0.0);
+        let recovered = state.update(
+            snapshot("utun0", 1100, 250),
+            start + std::time::Duration::from_secs(6),
+        );
+        assert_eq!(recovered.download_bps, 500.0);
+    }
 }

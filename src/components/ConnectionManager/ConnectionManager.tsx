@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useNetworkData } from "../../hooks/useNetworkData";
 import { useSettingsStore } from "../../store/settingsStore";
+import GeoIPLocation from "../Dashboard/GeoIPLocation";
+import { probeDescription, probeLimitations } from "../../utils/diagnostics";
 
 interface ConnectionInfo {
   pid: number;
@@ -24,7 +26,8 @@ export default function ConnectionManager() {
   // IP info comes from the app-level shared poll (owned by App.tsx). This
   // page previously called get_ip_info (with GeoIP) on its own 3s timer,
   // i.e. a public-IP + GeoIP HTTP request every 3 seconds.
-  const { ipInfo } = useNetworkData();
+  const { ipInfo, loading: ipLoading, ipError } = useNetworkData();
+  const geoOptions = { enabled: settings.show_geoip, loading: ipLoading, error: ipError };
 
   // Guard against out-of-order responses: only apply the result of the most
   // recent request.
@@ -89,26 +92,28 @@ export default function ConnectionManager() {
         <div className="space-y-3">
           <div className="space-y-1">
             <div className="flex items-start gap-3">
-              <span className="text-blue-600 font-mono text-sm w-12">IPv4:</span>
-              <span className="font-mono text-sm text-gray-800 dark:text-gray-200">{ipInfo?.ipv4 || "获取中..."}</span>
+              <span className="text-blue-600 font-mono text-sm">探测 IPv4:</span>
+              <span className="font-mono text-sm text-gray-800 dark:text-gray-200">{ipInfo?.ipv4 || (ipLoading ? "获取中…" : "未获取到")}</span>
             </div>
             <div className="flex items-start gap-3 pl-16">
               <span className="text-gray-500 dark:text-gray-400 text-sm">📍</span>
-              <span className="text-gray-600 dark:text-gray-400 text-sm">{ipInfo?.ipv4_geoip?.country || "未知地区"}</span>
+              <GeoIPLocation geoip={ipInfo?.ipv4_geoip} {...geoOptions} />
             </div>
           </div>
 
           <div className="space-y-1">
             <div className="flex items-start gap-3">
-              <span className="text-purple-600 font-mono text-sm w-12">IPv6:</span>
-              <span className="font-mono text-sm text-gray-800 dark:text-gray-200">{ipInfo?.ipv6 || "未连接"}</span>
+              <span className="text-purple-600 font-mono text-sm">本地接口 IPv6:</span>
+              <span className="font-mono text-sm text-gray-800 dark:text-gray-200">{ipInfo?.ipv6 || "未检测到"}</span>
             </div>
             <div className="flex items-start gap-3 pl-16">
               <span className="text-gray-500 dark:text-gray-400 text-sm">📍</span>
-              <span className="text-gray-600 dark:text-gray-400 text-sm">{ipInfo?.ipv6_geoip?.country || "未知地区"}</span>
+              <GeoIPLocation geoip={ipInfo?.ipv6_geoip} {...geoOptions} />
             </div>
           </div>
         </div>
+        {ipInfo?.public_ipv4_probe && <p className="mt-2 text-xs text-gray-500 dark:text-gray-400 break-all">{probeDescription(ipInfo.public_ipv4_probe)}</p>}
+        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">IPv6 来自本地接口 {ipInfo?.ipv6_interface || "（未确定）"}，不代表实际出口。{probeLimitations}</p>
       </div>
 
       {/* Active Connections */}

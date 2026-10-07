@@ -5,16 +5,24 @@ import { useTranslation } from "react-i18next";
 import { formatSpeed } from "../../utils/formatUtils";
 
 interface StatusBarProps {
-  networkStatus: "normal" | "abnormal";
+  networkStatus: "normal" | "abnormal" | "loading";
+  networkMessage?: string;
+  locationDetail?: string;
+  ipv6Detail?: string;
+  probeDetail?: string;
   ipv4?: string;
   ipv6?: string;
   location?: string;
-  downloadSpeed: number;
-  uploadSpeed: number;
+  downloadSpeed: number | null;
+  uploadSpeed: number | null;
 }
 
 export default function StatusBar({
   networkStatus,
+  networkMessage,
+  locationDetail,
+  ipv6Detail,
+  probeDetail,
   ipv4 = "-",
   ipv6 = "-",
   location = "-",
@@ -30,19 +38,19 @@ export default function StatusBar({
     getVersion().then(setAppVersion).catch(() => setAppVersion(null));
   }, []);
 
-  const statusText = networkStatus === "normal" ? t("status.normal") : t("status.abnormal");
-  const statusIcon = networkStatus === "normal" ? "✓" : "✗";
+  const statusText = networkMessage || (networkStatus === "loading" ? "检测中…" : networkStatus === "normal" ? "探测目标可达" : t("status.abnormal"));
+  const statusIcon = networkStatus === "loading" ? "…" : networkStatus === "normal" ? "✓" : "✗";
 
   return (
-    <div className="h-12 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between px-4 shrink-0">
-      <div className="flex items-center gap-6 text-sm">
+    <div className="min-h-12 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between px-4 shrink-0">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 text-sm">
         {/* Network Status */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" title={probeDetail}>
           <span className="text-lg">{statusIcon}</span>
-          <span className="text-gray-600 dark:text-gray-400">{t("status.network")}:</span>
+          <span className="text-gray-600 dark:text-gray-400">目标连通性:</span>
           <span
             className={`font-medium ${
-              networkStatus === "normal" ? "text-green-600" : "text-red-600"
+              networkStatus === "loading" ? "text-gray-500" : networkStatus === "normal" ? "text-green-600" : "text-red-600"
             }`}
           >
             {statusText}
@@ -52,32 +60,32 @@ export default function StatusBar({
         {/* IP Address */}
         <div className="flex items-center gap-2">
           <Activity className="w-4 h-4 text-gray-400 dark:text-gray-500" />
-          <span className="text-gray-600 dark:text-gray-400">IPv4:</span>
+          <span className="text-gray-600 dark:text-gray-400">探测 IPv4:</span>
           <span className="font-mono text-xs">{ipv4}</span>
         </div>
 
         {/* IPv6 */}
         <div className="flex items-center gap-2">
           <Activity className="w-4 h-4 text-gray-400 dark:text-gray-500" />
-          <span className="text-gray-600 dark:text-gray-400">IPv6:</span>
-          <span className="font-mono text-xs">{ipv6}</span>
+          <span className="text-gray-600 dark:text-gray-400">本地 IPv6:</span>
+          <span className="font-mono text-xs" title={ipv6Detail}>{ipv6}</span>
         </div>
 
         {/* Location */}
         <div className="flex items-center gap-2">
           <span className="text-gray-600 dark:text-gray-400">{t("status.location")}:</span>
-          <span className="text-gray-700 dark:text-gray-300">{location}</span>
+          <span className="text-gray-700 dark:text-gray-300" title={locationDetail}>{location}</span>
         </div>
 
         {/* Real-time Speed */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4" title="路由接口实时流量；不是所有网卡相加">
           <div className="flex items-center gap-1">
             <ArrowDown className="w-4 h-4 text-blue-500" />
-            <span className="font-mono text-sm">{formatSpeed(downloadSpeed)}</span>
+            <span className="font-mono text-sm">{downloadSpeed === null ? "—" : formatSpeed(downloadSpeed)}</span>
           </div>
           <div className="flex items-center gap-1">
             <ArrowUp className="w-4 h-4 text-green-500" />
-            <span className="font-mono text-sm">{formatSpeed(uploadSpeed)}</span>
+            <span className="font-mono text-sm">{uploadSpeed === null ? "—" : formatSpeed(uploadSpeed)}</span>
           </div>
         </div>
       </div>

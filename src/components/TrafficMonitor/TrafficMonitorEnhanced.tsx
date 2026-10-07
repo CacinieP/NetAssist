@@ -4,9 +4,11 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 import * as echarts from "echarts";
 import { Activity, AlertTriangle, Download, Upload, BarChart3, PieChart, FileText, Plus, Trash2, Edit, X, Save } from "lucide-react";
-import { useRealtimeTraffic, useRecordTrafficPoint } from "../../hooks/useTrafficData";
+import { useRealtimeTraffic } from "../../hooks/useTrafficData";
 import { formatSpeed, formatBytes } from "../../utils/formatUtils";
 import { notify } from "../../utils/notify";
+import { createPollingController } from "../../utils/polling";
+import { formatAppSpeed as appSpeed, formatAppBytes as appBytes, trafficExportMetadata } from "../../utils/trafficPresentation";
 import { useSettingsStore } from "../../store/settingsStore";
 import HistoryTrendChart, { type TrafficHistory } from "./HistoryTrendChart";
 
@@ -35,6 +37,8 @@ interface AppTraffic {
   upload_bytes: number;
   current_download_bps: number;
   current_upload_bps: number;
+  traffic_available?: boolean;
+  sample_seconds?: number | null;
 }
 
 interface CumulativeTraffic {
@@ -123,11 +127,13 @@ function ThresholdInput({
 const CumulativeStatsCard = ({
   data,
   loading,
+  error,
   period,
   onPeriodChange,
 }: {
   data: CumulativeTraffic | null;
   loading: boolean;
+  error: string | null;
   period: Period;
   onPeriodChange: (period: Period) => void;
 }) => {
@@ -140,7 +146,7 @@ const CumulativeStatsCard = ({
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">累计流量统计</h3>
+        <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">累计流量（路由接口统计）</h3>
         <div className="flex gap-1">
           {periods.map(p => (
             <button
@@ -157,8 +163,10 @@ const CumulativeStatsCard = ({
           ))}
         </div>
       </div>
-      {loading ? (
-        <div className="animate-pulse h-16 bg-gray-100 dark:bg-gray-700 rounded"></div>
+      {error ? (
+        <p className="text-sm text-red-600 py-4">获取失败：{error}</p>
+      ) : loading || !data || data.period !== period ? (
+        <div className="animate-pulse h-16 bg-gray-100 dark:bg-gray-700 rounded" aria-label="加载累计流量"></div>
       ) : (
         <div className="grid grid-cols-3 gap-4">
           <div className="text-center">
@@ -365,7 +373,7 @@ const AppPieChart = ({ apps }: { apps: AppTraffic[] }) => {
         <div ref={chartRef} style={{ width: "100%", height: "100%" }} />
         {topApps.length === 0 && (
           <div className="absolute inset-0 flex items-center justify-center text-gray-500 dark:text-gray-400 text-sm">
-            暂无流量数据
+            {apps.some(app => app.traffic_available !== false) ? "采样区间内未观察到应用流量" : "没有可用的应用流量测量"}
           </div>
         )}
       </div>
@@ -383,7 +391,9 @@ let notifiedAlertIds: Set<string> = new Set();
 export default function TrafficMonitorEnhanced() {
   // State
   const [apps, setApps] = useState<AppTraffic[]>([]);
+  const [appsError, setAppsError] = useState<string | null>(null);
   const [cumulative, setCumulative] = useState<CumulativeTraffic | null>(null);
+  const [cumulativeError, setCumulativeError] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<TrafficAlert[]>([]);
   const [alertStatuses, setAlertStatuses] = useState<AlertStatus[]>([]);
   const { settings } = useSettingsStore();
@@ -429,11 +439,7 @@ export default function TrafficMonitorEnhanced() {
   const [showDetailsModal, setShowDetailsModal] = useState(false);
 
   // Use shared traffic hook — single global 1s poll
-  const { stats } = useRealtimeTraffic(1000);
-
-  // Record traffic points using shared hook (5s window keeps the 24h
-  // history trend chart populated shortly after the page is opened).
-  useRecordTrafficPoint(5000);
+  const { stats, error: trafficError, recordingError } = useRealtimeTraffic(1000);
 
   // Toast component
   const ToastComponent = () => {
@@ -447,30 +453,21 @@ export default function TrafficMonitorEnhanced() {
     );
   };
 
-  // Fetch data functions
-  const fetchApps = useCallback(async () => {
-    try {
-      setLoading(prev => ({ ...prev, apps: true }));
-      const ranking = await invoke<AppTraffic[]>("get_app_traffic_ranking");
-      setApps(ranking);
-    } catch (error) {
-      console.error("Failed to fetch app ranking:", error);
-    } finally {
-      setLoading(prev => ({ ...prev, apps: false }));
-    }
-  }, []);
+  // Independent request lanes: period changes only restart cumulative reads.
+  const [appsPoller] = useState(() => createPollingController({
+    fetch: () => invoke<AppTraffic[]>("get_app_traffic_ranking"),
+    onValue: data => { setApps(data); setAppsError(null); },
+    onError: error => { setApps([]); setAppsError(String(error)); },
+    onLoading: value => setLoading(prev => ({ ...prev, apps: value })),
+  }));
+  const fetchApps = appsPoller.refresh;
 
-  const fetchCumulative = useCallback(async () => {
-    try {
-      setLoading(prev => ({ ...prev, cumulative: true }));
-      const data = await invoke<CumulativeTraffic>("get_cumulative_traffic", { period });
-      setCumulative(data);
-    } catch (error) {
-      console.error("Failed to fetch cumulative traffic:", error);
-    } finally {
-      setLoading(prev => ({ ...prev, cumulative: false }));
-    }
-  }, [period]);
+  const [cumulativePoller] = useState(() => createPollingController({
+    fetch: (requestedPeriod: Period) => invoke<CumulativeTraffic>("get_cumulative_traffic", { period: requestedPeriod }),
+    onValue: data => { setCumulative(data); setCumulativeError(null); },
+    onError: error => { setCumulative(null); setCumulativeError(String(error)); },
+    onLoading: value => setLoading(prev => ({ ...prev, cumulative: value })),
+  }));
 
   const fetchAlerts = useCallback(async () => {
     try {
@@ -509,22 +506,23 @@ export default function TrafficMonitorEnhanced() {
     }
   }, [settings.notify_traffic_limit]);
 
-  // Effects
   useEffect(() => {
-    fetchApps();
-    fetchCumulative();
-    fetchAlerts();
+    appsPoller.configure(undefined, 3000);
+    return () => appsPoller.stop();
+  }, [appsPoller]);
 
-    const appsInterval = setInterval(fetchApps, 3000);
-    const cumulativeInterval = setInterval(fetchCumulative, 10000);
+  useEffect(() => {
+    setCumulative(null);
+    setCumulativeError(null);
+    cumulativePoller.configure(period, 10000);
+    return () => cumulativePoller.stop();
+  }, [cumulativePoller, period]);
+
+  useEffect(() => {
+    void fetchAlerts();
     const alertsInterval = setInterval(fetchAlerts, 5000);
-
-    return () => {
-      clearInterval(appsInterval);
-      clearInterval(cumulativeInterval);
-      clearInterval(alertsInterval);
-    };
-  }, [fetchApps, fetchCumulative, fetchAlerts]);
+    return () => clearInterval(alertsInterval);
+  }, [fetchAlerts]);
 
   // Filter and sort apps
   const filteredAndSortedApps = useMemo(() => {
@@ -582,6 +580,8 @@ export default function TrafficMonitorEnhanced() {
     });
   }, [filteredAndSortedApps]);
 
+  const hasAppMeasurements = filteredAndSortedApps.some(app => app.traffic_available !== false);
+
   // Get app percentage of total
   const getAppPercentage = useCallback((app: AppTraffic) => {
     if (totals.total === 0) return 0;
@@ -602,37 +602,39 @@ export default function TrafficMonitorEnhanced() {
     const data = filteredAndSortedApps.map(app => ({
       name: app.name,
       pid: app.pid,
+      traffic_available: app.traffic_available !== false,
+      sample_seconds: app.sample_seconds ?? null,
       download_bps: Math.round(app.current_download_bps),
       upload_bps: Math.round(app.current_upload_bps),
       total_bps: Math.round(app.current_download_bps + app.current_upload_bps),
       cumulative_download_bytes: app.download_bytes,
       cumulative_upload_bytes: app.upload_bytes,
       cumulative_total_bytes: app.download_bytes + app.upload_bytes,
-      download_speed: formatSpeed(app.current_download_bps),
-      upload_speed: formatSpeed(app.current_upload_bps),
-      total_speed: formatSpeed(app.current_download_bps + app.current_upload_bps),
-      cumulative_download: formatBytes(app.download_bytes),
-      cumulative_upload: formatBytes(app.upload_bytes),
-      cumulative_total: formatBytes(app.download_bytes + app.upload_bytes),
+      download_speed: appSpeed(app, app.current_download_bps),
+      upload_speed: appSpeed(app, app.current_upload_bps),
+      total_speed: appSpeed(app, app.current_download_bps + app.current_upload_bps),
+      cumulative_download: appBytes(app, app.download_bytes),
+      cumulative_upload: appBytes(app, app.upload_bytes),
+      cumulative_total: appBytes(app, app.download_bytes + app.upload_bytes),
       percentage: parseFloat(getAppPercentage(app).toFixed(2)),
     }));
 
-    // Fetch OS-level interface counters as a fallback/complement.
-    // Even when per-process data (nettop) is empty, these counters
-    // always reflect real traffic on the active interface.
-    let rxBytes = 0;
-    let txBytes = 0;
+    // Raw OS counters have a different baseline from the selected export
+    // period. Missing counters must stay unavailable rather than become 0.
+    let rxBytes: number | null = null;
+    let txBytes: number | null = null;
     try {
       const counters = await invoke<[number, number]>("get_interface_counters");
       rxBytes = counters[0];
       txBytes = counters[1];
     } catch {
-      // Interface counters unavailable; fall back to app-level totals.
+      // Preserve null: process samples cannot replace interface counters.
     }
 
     // Derive OS-level totals from interface counters.
     const osTotalDownload = rxBytes;
     const osTotalUpload = txBytes;
+    const osTotalBytes = rxBytes !== null && txBytes !== null ? rxBytes + txBytes : null;
 
     // History samples for the user-selected export range. Optional: the
     // export still succeeds (snapshot-only) if the backend history is
@@ -652,6 +654,7 @@ export default function TrafficMonitorEnhanced() {
         const exportPayload = {
           timestamp,
           period,
+          metadata: trafficExportMetadata(hasAppMeasurements),
           exported_range: {
             period: exportPeriod,
             label: rangeLabel,
@@ -675,7 +678,7 @@ export default function TrafficMonitorEnhanced() {
             // per-process data.
             os_download_bytes: osTotalDownload,
             os_upload_bytes: osTotalUpload,
-            os_total_bytes: osTotalDownload + osTotalUpload,
+            os_total_bytes: osTotalBytes,
           },
           apps: data,
         };
@@ -694,17 +697,17 @@ export default function TrafficMonitorEnhanced() {
       } else {
         const header = [
           "应用名称", "PID", "实时下载(B/s)", "实时上传(B/s)", "实时总计(B/s)",
-          "下载速度", "上传速度", "总速度", "累计下载(字节)", "累计上传(字节)",
-          "累计总计(字节)", "累计下载", "累计上传", "累计总计", "占比(%)",
+          "下载速度", "上传速度", "总速度", "采样区间下载(字节)", "采样区间上传(字节)",
+          "采样区间总计(字节)", "采样区间下载", "采样区间上传", "采样区间总计", "占比(%)", "数据可用", "采样区间(秒)",
         ];
 
         const rows = data.map(row => [
           `"${row.name.replace(/"/g, '""')}"`,
-          row.pid, row.download_bps, row.upload_bps, row.total_bps,
+          row.pid, row.traffic_available ? row.download_bps : "未提供", row.traffic_available ? row.upload_bps : "未提供", row.traffic_available ? row.total_bps : "未提供",
           `"${row.download_speed}"`, `"${row.upload_speed}"`, `"${row.total_speed}"`,
-          row.cumulative_download_bytes, row.cumulative_upload_bytes, row.cumulative_total_bytes,
+          row.traffic_available ? row.cumulative_download_bytes : "未提供", row.traffic_available ? row.cumulative_upload_bytes : "未提供", row.traffic_available ? row.cumulative_total_bytes : "未提供",
           `"${row.cumulative_download}"`, `"${row.cumulative_upload}"`, `"${row.cumulative_total}"`,
-          row.percentage,
+          row.traffic_available ? row.percentage : "未提供", row.traffic_available ? "是" : "否", row.sample_seconds ?? "未提供",
         ]);
 
         const csvContent = "﻿" +
@@ -713,15 +716,17 @@ export default function TrafficMonitorEnhanced() {
           "\n\n# 汇总\n" +
           `导出时间,${timestamp}\n统计周期,${period}\n` +
           `应用数量,${filteredAndSortedApps.length}\n` +
-          `总实时下载,${formatSpeed(totals.download)}\n` +
-          `总实时上传,${formatSpeed(totals.upload)}\n` +
-          `总实时速度,${formatSpeed(totals.total)}\n` +
-          `总累计下载,${formatBytes(totals.cumulativeDownload)}\n` +
-          `总累计上传,${formatBytes(totals.cumulativeUpload)}\n` +
-          `总累计流量,${formatBytes(totals.cumulativeDownload + totals.cumulativeUpload)}\n` +
-          `OS接口下载字节,${osTotalDownload}\n` +
-          `OS接口上传字节,${osTotalUpload}\n` +
-          `OS接口总字节,${osTotalDownload + osTotalUpload}\n` +
+          `总实时下载,${hasAppMeasurements ? formatSpeed(totals.download) : "未提供"}\n` +
+          `总实时上传,${hasAppMeasurements ? formatSpeed(totals.upload) : "未提供"}\n` +
+          `总实时速度,${hasAppMeasurements ? formatSpeed(totals.total) : "未提供"}\n` +
+          `采样区间下载合计,${hasAppMeasurements ? formatBytes(totals.cumulativeDownload) : "未提供"}\n` +
+          `采样区间上传合计,${hasAppMeasurements ? formatBytes(totals.cumulativeUpload) : "未提供"}\n` +
+          `采样区间流量合计,${hasAppMeasurements ? formatBytes(totals.cumulativeDownload + totals.cumulativeUpload) : "未提供"}\n` +
+          "应用统计说明,最近nettop采样区间约1秒的数据；不支持的平台或未成功采样的进程标未提供\n" +
+          `路由接口原始下载计数器字节,${osTotalDownload ?? "未提供"}\n` +
+          `路由接口原始上传计数器字节,${osTotalUpload ?? "未提供"}\n` +
+          `路由接口原始计数器总字节,${osTotalBytes ?? "未提供"}\n` +
+          "接口统计说明,原始计数器不代表所选导出周期累计\n" +
           `\n# 历史采样（${rangeLabel}，共 ${history?.data.length ?? 0} 点）\n` +
           "时间,下载(B/s),上传(B/s)\n" +
           (history?.data ?? [])
@@ -871,7 +876,7 @@ export default function TrafficMonitorEnhanced() {
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
         <div className="flex items-center gap-2 mb-3">
           <Activity size={16} className="text-blue-500" />
-          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">实时流量</h3>
+          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200">实时流量（路由接口统计）</h3>
         </div>
         <div className="flex gap-8">
           <div className="flex items-center gap-3">
@@ -891,11 +896,15 @@ export default function TrafficMonitorEnhanced() {
         </div>
       </div>
 
+      {(trafficError || recordingError) && <p className="text-sm text-red-600">{trafficError ? `实时流量采集失败：${trafficError}` : ""}{recordingError ? ` 历史记录失败：${recordingError}` : ""}</p>}
+      <p className="text-xs text-gray-500 dark:text-gray-400">累计流量仅包含应用成功采集的区间，不包含未采集或离线期间的流量。</p>
+
       {/* Cards Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <CumulativeStatsCard
           data={cumulative}
           loading={loading.cumulative}
+          error={cumulativeError}
           period={period}
           onPeriodChange={setPeriod}
         />
@@ -911,6 +920,9 @@ export default function TrafficMonitorEnhanced() {
         <AppPieChart apps={apps} />
         <HistoryTrendChart hours={historyHours} onHoursChange={setHistoryHours} />
       </div>
+
+      <p className="text-xs text-gray-500 dark:text-gray-400">应用流量仅表示最近一次 nettop 采样区间（约 1 秒）；Windows/Linux 或未成功采样的进程不提供流量值，不能视为流量为零。</p>
+      {appsError && <p className="text-sm text-red-600">应用流量获取失败：{appsError}</p>}
 
       {/* App Ranking Table */}
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -955,16 +967,16 @@ export default function TrafficMonitorEnhanced() {
                       </div>
                     </div>
                     <div className="text-sm">
-                      <div className="font-mono text-green-600">{formatSpeed(app.current_download_bps)}</div>
+                      <div className="font-mono text-green-600">{appSpeed(app, app.current_download_bps)}</div>
                     </div>
                     <div className="text-sm">
-                      <div className="font-mono text-blue-600">{formatSpeed(app.current_upload_bps)}</div>
+                      <div className="font-mono text-blue-600">{appSpeed(app, app.current_upload_bps)}</div>
                     </div>
                     <div className="text-sm">
-                      <div className="font-mono text-gray-700 dark:text-gray-300">{formatSpeed(app.current_download_bps + app.current_upload_bps)}</div>
+                      <div className="font-mono text-gray-700 dark:text-gray-300">{appSpeed(app, app.current_download_bps + app.current_upload_bps)}</div>
                     </div>
                     <div className="text-sm">
-                      <div className="font-mono text-gray-600 dark:text-gray-400">{percentage.toFixed(1)}%</div>
+                      <div className="font-mono text-gray-600 dark:text-gray-400">{app.traffic_available === false ? "未提供" : `${percentage.toFixed(1)}%`}</div>
                       <div className="w-full h-1 bg-gray-200 dark:bg-gray-600 rounded-full mt-1 overflow-hidden">
                         <div
                           className="h-full bg-blue-500 rounded-full"
@@ -991,18 +1003,18 @@ export default function TrafficMonitorEnhanced() {
                   <div className="text-gray-800 dark:text-gray-100 text-sm">总计</div>
                 </div>
                 <div className="text-sm">
-                  <div className="font-mono text-green-700">{formatSpeed(totals.download)}</div>
+                  <div className="font-mono text-green-700">{hasAppMeasurements ? formatSpeed(totals.download) : "未提供"}</div>
                 </div>
                 <div className="text-sm">
-                  <div className="font-mono text-blue-700">{formatSpeed(totals.upload)}</div>
+                  <div className="font-mono text-blue-700">{hasAppMeasurements ? formatSpeed(totals.upload) : "未提供"}</div>
                 </div>
                 <div className="text-sm">
-                  <div className="font-mono text-gray-900 dark:text-gray-100">{formatSpeed(totals.total)}</div>
+                  <div className="font-mono text-gray-900 dark:text-gray-100">{hasAppMeasurements ? formatSpeed(totals.total) : "未提供"}</div>
                 </div>
                 <div className="text-sm">
-                  <div className="font-mono text-gray-700 dark:text-gray-300">100%</div>
+                  <div className="font-mono text-gray-700 dark:text-gray-300">{hasAppMeasurements && totals.total > 0 ? "100%" : "—"}</div>
                   <div className="w-full h-1 bg-gray-300 dark:bg-gray-600 rounded-full mt-1 overflow-hidden">
-                    <div className="h-full bg-gray-600 dark:bg-gray-400 rounded-full" style={{ width: "100%" }} />
+                    <div className="h-full bg-gray-600 dark:bg-gray-400 rounded-full" style={{ width: hasAppMeasurements && totals.total > 0 ? "100%" : "0%" }} />
                   </div>
                 </div>
                 <div></div>
@@ -1037,11 +1049,11 @@ export default function TrafficMonitorEnhanced() {
                 </div>
                 <div className="flex-1">
                   <h4 className="text-xl font-bold text-gray-800 dark:text-gray-100">{selectedApp.name}</h4>
-                  <p className="text-sm text-gray-500 dark:text-gray-400">PID: {selectedApp.pid}</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">PID: {selectedApp.pid} · 采样区间：{selectedApp.sample_seconds ? `${selectedApp.sample_seconds.toFixed(2)} 秒` : "未提供"}</p>
                 </div>
                 <div className="text-right">
                   <div className="text-sm text-gray-500 dark:text-gray-400">占比</div>
-                  <div className="text-lg font-bold text-blue-600">{getAppPercentage(selectedApp).toFixed(2)}%</div>
+                  <div className="text-lg font-bold text-blue-600">{selectedApp.traffic_available === false ? "未提供" : `${getAppPercentage(selectedApp).toFixed(2)}%`}</div>
                 </div>
               </div>
 
@@ -1053,10 +1065,10 @@ export default function TrafficMonitorEnhanced() {
                     <span className="text-sm font-medium text-gray-700 dark:text-gray-200">实时下载</span>
                   </div>
                   <div className="text-2xl font-bold text-green-600 font-mono">
-                    {formatSpeed(selectedApp.current_download_bps)}
+                    {appSpeed(selectedApp, selectedApp.current_download_bps)}
                   </div>
                   <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    累计: {formatBytes(selectedApp.download_bytes)}
+                    采样区间: {appBytes(selectedApp, selectedApp.download_bytes)}
                   </div>
                 </div>
                 <div className="bg-blue-50 dark:bg-blue-900/30 rounded-lg p-4">
@@ -1065,10 +1077,10 @@ export default function TrafficMonitorEnhanced() {
                     <span className="text-sm font-medium text-gray-700 dark:text-gray-200">实时上传</span>
                   </div>
                   <div className="text-2xl font-bold text-blue-600 font-mono">
-                    {formatSpeed(selectedApp.current_upload_bps)}
+                    {appSpeed(selectedApp, selectedApp.current_upload_bps)}
                   </div>
                   <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    累计: {formatBytes(selectedApp.upload_bytes)}
+                    采样区间: {appBytes(selectedApp, selectedApp.upload_bytes)}
                   </div>
                 </div>
               </div>
@@ -1076,17 +1088,17 @@ export default function TrafficMonitorEnhanced() {
               {/* Total Stats */}
               <div className="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-4">
                 <div className="flex justify-between items-center mb-2">
-                  <span className="text-sm font-medium text-gray-700 dark:text-gray-200">总流量</span>
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-200">采样区间平均速率</span>
                   <span className="text-xl font-bold text-gray-800 dark:text-gray-100 font-mono">
-                    {formatSpeed(selectedApp.current_download_bps + selectedApp.current_upload_bps)}
+                    {appSpeed(selectedApp, selectedApp.current_download_bps + selectedApp.current_upload_bps)}
                   </span>
                 </div>
                 <div className="flex justify-between text-sm text-gray-600 dark:text-gray-300">
-                  <span>累计下载: {formatBytes(selectedApp.download_bytes)}</span>
-                  <span>累计上传: {formatBytes(selectedApp.upload_bytes)}</span>
+                  <span>采样区间下载: {appBytes(selectedApp, selectedApp.download_bytes)}</span>
+                  <span>采样区间上传: {appBytes(selectedApp, selectedApp.upload_bytes)}</span>
                 </div>
                 <div className="flex justify-between text-sm text-gray-600 dark:text-gray-300 mt-1">
-                  <span>累计总计: {formatBytes(selectedApp.download_bytes + selectedApp.upload_bytes)}</span>
+                  <span>采样区间总计: {appBytes(selectedApp, selectedApp.download_bytes + selectedApp.upload_bytes)}</span>
                 </div>
               </div>
             </div>

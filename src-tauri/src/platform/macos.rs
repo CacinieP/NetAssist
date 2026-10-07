@@ -782,62 +782,32 @@ pub struct PermissionStatus {
     pub warnings: Vec<String>,
 }
 
-/// Read cumulative (rx_bytes, tx_bytes) for the active interface via
-/// `netstat -b -I <iface>`.
-///
-/// macOS `netstat -b` column layout is NOT fixed: rows for interfaces without
-/// a MAC address (utun/vpn) omit the Address column, shifting every later
-/// column left. So we locate the `Ibytes`/`Obytes` column positions from the
-/// header row, then scan data rows for one that has at least that many
-/// columns. All rows of the same interface carry the same cumulative counter,
-/// so we just take the first parseable one.
-pub fn get_interface_total_bytes() -> (u64, u64) {
-    let interface = get_default_interface().unwrap_or_else(|_| "en0".to_string());
-
-    let output = std::process::Command::new("netstat")
-        .args(["-b", "-I", &interface])
-        .output();
-
-    if let Ok(result) = output {
-        let content = String::from_utf8_lossy(&result.stdout);
-        let mut lines = content.lines();
-
-        // Locate the Ibytes/Obytes column indexes from the header.
-        let (rx_idx, tx_idx, header_len) = match lines
-            .next()
-            .map(|h| h.split_whitespace().collect::<Vec<_>>())
-        {
-            Some(header) => {
-                let find = |name: &str| header.iter().position(|c| c.eq_ignore_ascii_case(name));
-                match (find("Ibytes"), find("Obytes")) {
-                    (Some(rx), Some(tx)) => (rx, tx, header.len()),
-                    _ => return (0, 0),
-                }
-            }
-            None => return (0, 0),
-        };
-
-        for line in lines {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            // A row missing the Address column (e.g. utun without a MAC) is
-            // shifted left; only full-width rows align with the header.
-            if parts.len() < header_len || parts.len() <= tx_idx.max(rx_idx) {
-                continue;
-            }
-            if let (Ok(rx), Ok(tx)) = (parts[rx_idx].parse::<u64>(), parts[tx_idx].parse::<u64>()) {
-                return (rx, tx);
-            }
-        }
-    }
-
-    (0, 0)
+/// Read the interface chosen for a public route, including split-tunnel VPNs.
+pub fn get_interface_total_bytes() -> Result<super::CounterSnapshot, String> {
+    let interface = [("-inet", "1.1.1.1"), ("-inet6", "2606:4700:4700::1111")]
+        .into_iter()
+        .find_map(|(family, target)| {
+            super::common::exec_command("route", &["-n", "get", family, target])
+                .ok()
+                .and_then(|output| super::counters::macos_route_interface(&output))
+        })
+        .ok_or("Cannot determine an IPv4 or IPv6 routed interface")?;
+    let output = super::common::exec_command("netstat", &["-b", "-I", &interface])
+        .map_err(|error| format!("Cannot read interface counters: {error}"))?;
+    let (rx, tx) = super::counters::macos_interface_bytes(&output, &interface)?;
+    Ok(super::CounterSnapshot {
+        source: format!("macos:{interface}"),
+        rx,
+        tx,
+    })
 }
 
 /// Get per-process network traffic statistics on macOS.
 ///
 /// `nettop` output is **CSV** (NOT json). With `-L 2 -s 1` it emits two
-/// samples one second apart. In delta mode (`-d`) the SECOND sample is the
-/// delta over that 1s interval — i.e. a real bytes/second rate. Without `-d`
+/// samples approximately one second apart. In delta mode (`-d`) the SECOND
+/// sample is a byte delta, divided by the measured interval by the caller.
+/// Without `-d`
 /// both samples are cumulative process-start byte counts and would be
 /// misreported as per-second rates, so `-d` is required.
 ///
@@ -846,19 +816,16 @@ pub fn get_interface_total_bytes() -> (u64, u64) {
 /// time,,interface,state,bytes_in,bytes_out,...
 /// 13:44:25,syslogd.368,,,0,5789,...
 /// ```
-/// Column 0 (1-indexed) is `time`, column 2 is `name.pid`, columns 5 and 6
+/// Columns 1 and 2 (1-indexed) are `time` and `name.pid`; columns 5 and 6
 /// are `bytes_in` / `bytes_out` deltas.
 pub fn get_process_traffic_stats(
 ) -> anyhow::Result<std::collections::HashMap<u32, ProcessTrafficStats>> {
-    use std::collections::HashMap;
-    let mut stats = HashMap::new();
-
     // -P   : per-process summaries only
     // -d   : delta mode — report bytes since the previous sample
     // -j   : append only the listed columns (case-sensitive: -j, not -J)
     // -x   : raw numbers (no human-readable suffixes)
     // -L 2 : emit exactly 2 samples
-    // -s 1 : 1 second between samples -> sample #2 is a 1s delta
+    // -s 1 : request a 1s interval; the timestamps give the measured interval
     let output = std::process::Command::new("nettop")
         .args([
             "-P",
@@ -873,116 +840,114 @@ pub fn get_process_traffic_stats(
         ])
         .output();
 
-    let content = match output {
-        Ok(result) => String::from_utf8_lossy(&result.stdout).into_owned(),
-        Err(e) => {
-            tracing::warn!(
-                "Failed to run nettop: {}; per-process traffic stats will be empty",
-                e
-            );
-            return Ok(stats);
-        }
-    };
-
-    // Debug: log nettop output size for troubleshooting
-    if content.is_empty() {
-        tracing::warn!(
-            "nettop produced empty output; check Full Disk Access or nettop permissions"
-        );
-        return Ok(stats);
+    let output = output.map_err(|error| anyhow::anyhow!("Cannot run nettop: {error}"))?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "nettop failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
+    parse_nettop_delta(&String::from_utf8_lossy(&output.stdout))
+}
 
-    // Collect only the SECOND sample block (the 1s delta). Each sample begins
-    // with a header line that starts with "time".
-    let mut blocks: Vec<Vec<&str>> = Vec::new();
-    let mut current: Vec<&str> = Vec::new();
-    for line in content.lines() {
+/// Require two complete CSV sample blocks: the first contains process-lifetime
+/// counters even in delta mode and must never be exposed as a per-second rate.
+fn parse_nettop_delta(content: &str) -> anyhow::Result<HashMap<u32, ProcessTrafficStats>> {
+    let mut blocks: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
         if line.starts_with("time,") {
-            if !current.is_empty() {
-                blocks.push(std::mem::take(&mut current));
-            }
-            current.clear();
-            continue;
-        }
-        if !line.trim().is_empty() {
-            current.push(line);
+            blocks.push((line, Vec::new()));
+        } else if let Some((_, rows)) = blocks.last_mut() {
+            rows.push(line);
         }
     }
-    if !current.is_empty() {
-        blocks.push(current);
+    if blocks.len() != 2 {
+        return Err(anyhow::anyhow!("nettop did not provide two sample blocks"));
     }
-
-    if blocks.is_empty() {
-        tracing::warn!("nettop output contained no data blocks; check macOS version compatibility with nettop flags");
+    let (header, sample) = &blocks[1];
+    let mut stats = HashMap::new();
+    if sample.is_empty() {
         return Ok(stats);
     }
-
-    // Prefer the delta (second) block; fall back to the first block.
-    let sample = blocks.last().cloned().unwrap_or_default();
-
-    let mut parsed_count = 0usize;
+    let timestamp = |rows: &[&str]| -> anyhow::Result<chrono::NaiveTime> {
+        let value = rows
+            .first()
+            .and_then(|row| row.split(',').next())
+            .ok_or_else(|| anyhow::anyhow!("Missing nettop sample timestamp"))?;
+        chrono::NaiveTime::parse_from_str(value, "%H:%M:%S%.f")
+            .map_err(|error| anyhow::anyhow!("Invalid nettop timestamp: {error}"))
+    };
+    let first = timestamp(&blocks[0].1)?;
+    let second = timestamp(sample)?;
+    let mut sample_seconds = second
+        .signed_duration_since(first)
+        .num_microseconds()
+        .unwrap_or(0) as f64
+        / 1_000_000.0;
+    if sample_seconds < 0.0 {
+        sample_seconds += 24.0 * 60.0 * 60.0;
+    }
+    if !(0.0..=60.0).contains(&sample_seconds) || sample_seconds == 0.0 {
+        return Err(anyhow::anyhow!("Invalid nettop sample interval"));
+    }
+    let columns: Vec<_> = header.split(',').collect();
+    let rx_index = columns
+        .iter()
+        .position(|name| *name == "bytes_in")
+        .ok_or_else(|| anyhow::anyhow!("Missing nettop bytes_in column"))?;
+    let tx_index = columns
+        .iter()
+        .position(|name| *name == "bytes_out")
+        .ok_or_else(|| anyhow::anyhow!("Missing nettop bytes_out column"))?;
     for line in sample {
-        // Split by comma. Verified column layout (0-indexed) for
-        // `nettop -P -d -j bytes_in,bytes_out -x`:
-        //   [0]=time  [1]="name.pid"  [2]=interface  [3]=state
-        //   [4]=bytes_in  [5]=bytes_out ...
-        let cols: Vec<&str> = line.split(',').collect();
-        if cols.len() < 6 {
+        let columns: Vec<_> = line.split(',').collect();
+        let Some(name_pid) = columns.get(1) else {
             continue;
-        }
-
-        let name_pid = cols[1].trim();
-        // Format: "<process_name>.<pid>", e.g. "syslogd.368". The process name
-        // itself may contain dots (e.g. "python3.13"), so split from the RIGHT
-        // on the last '.'.
-        let pid = match name_pid.rsplit_once('.') {
-            Some((_, pid_str)) => pid_str.trim().parse::<u32>().unwrap_or(0),
-            None => 0,
+        };
+        let Some((name, pid)) = name_pid.trim().rsplit_once('.') else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
         };
         if pid == 0 {
             continue;
         }
-        let name = name_pid
-            .rsplit_once('.')
-            .map(|(n, _)| n)
-            .unwrap_or(name_pid);
-
-        let bytes_in = cols[4].trim().parse::<u64>().unwrap_or(0);
-        let bytes_out = cols[5].trim().parse::<u64>().unwrap_or(0);
-
-        parsed_count += 1;
+        let (Some(rx), Some(tx)) = (columns.get(rx_index), columns.get(tx_index)) else {
+            continue;
+        };
+        let (Ok(bytes_in), Ok(bytes_out)) = (rx.trim().parse::<u64>(), tx.trim().parse::<u64>())
+        else {
+            continue;
+        };
         stats.insert(
             pid,
             ProcessTrafficStats {
                 pid,
-                name: name.to_string(),
-                // The second delta sample is already a 1s delta, i.e.
-                // bytes/second. We expose them as a rate.
+                name: name.into(),
                 bytes_in,
                 bytes_out,
+                sample_seconds,
             },
         );
     }
-
-    if parsed_count == 0 {
-        tracing::warn!("nettop parsed 0 process traffic entries; column layout may have changed on this macOS version");
-    } else {
-        // Success path runs on every ranking poll (~3s); keep it below the
-        // release INFO threshold so it never floods the log.
-        tracing::debug!("nettop parsed {} process traffic entries", parsed_count);
+    if stats.is_empty() {
+        return Err(anyhow::anyhow!(
+            "nettop sample contained no readable process counters"
+        ));
     }
-
     Ok(stats)
 }
 
-/// Per-process traffic statistics. On macOS the `bytes_in`/`bytes_out` are a
-/// 1-second delta from `nettop -L 2`, so they already represent bytes/sec.
+/// Per-process byte deltas and their measured interval. Consumers divide by
+/// sample_seconds to calculate bytes/sec; these are not lifetime totals.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProcessTrafficStats {
     pub pid: u32,
     pub name: String,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    pub sample_seconds: f64,
 }
 
 /// Get all running processes on macOS
@@ -1192,6 +1157,31 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+    #[test]
+    fn nettop_rejects_lifetime_only_and_parses_second_sample_by_header() {
+        let first = "time,,interface,state,bytes_in,bytes_out,rx_dupe,\n19:13:00.365987,python3.13.809,,,1000000000,500000000,0,\n";
+        assert!(parse_nettop_delta(first).is_err());
+        let data = format!("{first}time,,interface,state,bytes_out,bytes_in,rx_dupe,\n19:13:01.365987,python3.13.809,,,400,2000,0,\n");
+        let stats = parse_nettop_delta(&data).unwrap();
+        assert_eq!(stats[&809].name, "python3.13");
+        assert_eq!(stats[&809].bytes_in, 2000);
+        assert_eq!(stats[&809].bytes_out, 400);
+        assert_eq!(stats[&809].sample_seconds, 1.0);
+    }
+
+    #[test]
+    fn nettop_measures_interval_across_midnight_and_rejects_malformed_values() {
+        let data = "time,,interface,state,bytes_in,bytes_out,\n23:59:59.500000,Example.42,,,1000000,2000000,\ntime,,interface,state,bytes_in,bytes_out,\n00:00:01.000000,Example.42,,,3000,1500,\n";
+        let stats = parse_nettop_delta(data).unwrap();
+        assert_eq!(stats[&42].sample_seconds, 1.5);
+        assert_eq!(
+            stats[&42].bytes_in as f64 / stats[&42].sample_seconds,
+            2000.0
+        );
+        assert!(parse_nettop_delta(&data.replace(",3000,1500,", ",bad,bad,")).is_err());
+        assert!(parse_nettop_delta("").is_err());
+    }
+
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
     }
@@ -1305,6 +1295,7 @@ mod live_tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires host socket visibility; run explicitly on an unrestricted macOS host"]
     fn live_connections_have_sane_addresses() {
         let conns = get_active_connections().expect("netstat/lsof should run");
         // Every row must carry concrete ip/port (no hex garbage, no oversized ports).
@@ -1329,6 +1320,7 @@ mod live_tests {
     }
 
     #[test]
+    #[ignore = "requires host interface tools; run explicitly on a macOS host"]
     fn live_interface_list_nonempty() {
         let intfs = get_network_interfaces().expect("ifconfig runs");
         assert!(intfs.iter().any(|i| i.name == "lo0"), "lo0 present");

@@ -195,8 +195,8 @@
     "lang_en": "English"
   },
   "notify": {
-    "network_abnormal_title": "网络异常",
-    "network_abnormal_body": "检测到网络连接异常，请检查网络状态",
+    "network_abnormal_title": "HTTP 探测未成功",
+    "network_abnormal_body": "本次 HTTP 探测目标均未成功或无法执行探测；请查看检测详情，这不代表所有应用都无法联网。",
     "traffic_alert_title": "流量告警",
     "traffic_alert_body": "有 {{count}} 项流量阈值已触发，请查看流量监控"
   },
