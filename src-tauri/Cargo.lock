@@ -2344,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "netassist"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "cfg-if",
