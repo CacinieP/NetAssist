@@ -1,6 +1,10 @@
 use crate::models::{DiagnosticItem, DiagnosticResult, DiagnosticStatus, RepairAction, RepairType};
 use tokio::time::{timeout, Duration};
 
+/// Upper bound for one repair, including time spent on an admin
+/// authorization dialog.
+const FIX_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Apply a quick fix action
 /// Accepts snake_case format matching RepairType serialization
 ///
@@ -8,12 +12,24 @@ use tokio::time::{timeout, Duration};
 /// on a blocking thread with a generous timeout — the macOS "reset adapter"
 /// path waits on an osascript admin authorization dialog which could
 /// otherwise stall the async runtime indefinitely.
+///
+/// The timeout only releases the caller: the blocking thread (and any
+/// authorization dialog it spawned) cannot be cancelled and may still
+/// complete later.
 #[tauri::command]
 pub async fn apply_quick_fix(fix_type: String) -> Result<bool, String> {
     let fix_type_for_task = fix_type.clone();
-    tokio::task::spawn_blocking(move || apply_quick_fix_blocking(&fix_type_for_task))
-        .await
-        .map_err(|e| format!("Fix task error: {}", e))?
+    let task = tokio::task::spawn_blocking(move || apply_quick_fix_blocking(&fix_type_for_task));
+    match timeout(FIX_TIMEOUT, task).await {
+        Ok(joined) => joined.map_err(|e| format!("Fix task error: {}", e))?,
+        Err(_) => {
+            tracing::warn!("Fix {} timed out after {:?}", fix_type, FIX_TIMEOUT);
+            Err(format!(
+                "修复操作超时（{} 分钟）未完成；如果系统授权框仍未关闭，之后确认授权该操作仍可能执行",
+                FIX_TIMEOUT.as_secs() / 60
+            ))
+        }
+    }
 }
 
 fn apply_quick_fix_blocking(fix_type: &str) -> Result<bool, String> {
@@ -285,37 +301,113 @@ async fn check_ip_configuration() -> DiagnosticItem {
     }
 }
 
-/// Check DNS resolution
+/// Public resolver used when no system DNS server can be read, and as a
+/// control probe next to the system resolver.
+const CONTROL_DNS: &str = "8.8.8.8";
+
+/// First system DNS server that `test_dns` can probe directly (an IP
+/// literal, optionally bracketed). Scoped IPv6 entries such as
+/// `fe80::1%en0` are skipped because the zone cannot be carried into the
+/// probe socket address.
+fn pick_system_dns(servers: &[String]) -> Option<String> {
+    servers
+        .iter()
+        .map(|s| s.trim().trim_start_matches('[').trim_end_matches(']'))
+        .find(|s| {
+            s.parse::<std::net::IpAddr>()
+                .map(|ip| !ip.is_unspecified())
+                .unwrap_or(false)
+        })
+        .map(str::to_string)
+}
+
+/// `Some(latency_ms)` when the server answered most queries.
+async fn probe_dns(server: &str) -> Option<f64> {
+    match crate::commands::dns::test_dns(server.to_string()).await {
+        Ok(stats) if stats.avg_latency_ms > 0.0 && stats.success_rate > 0.5 => {
+            Some(stats.avg_latency_ms)
+        }
+        _ => None,
+    }
+}
+
+/// Check DNS resolution against the resolver the system is actually
+/// configured to use, with a public resolver as a control so a broken local
+/// DNS configuration is not reported as healthy.
 async fn check_dns_resolution() -> DiagnosticItem {
     let start = std::time::Instant::now();
 
-    match crate::commands::dns::test_dns("8.8.8.8".to_string()).await {
-        Ok(stats) => {
-            if stats.avg_latency_ms > 0.0 && stats.success_rate > 0.5 {
-                DiagnosticItem {
-                    status: DiagnosticStatus::Pass,
-                    message: format!("DNS解析正常 ({}ms)", stats.avg_latency_ms.round()),
-                    details: serde_json::json!({
-                        "latency_ms": stats.avg_latency_ms,
-                        "success_rate": stats.success_rate
-                    }),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                }
+    let system_servers = tokio::task::spawn_blocking(crate::platform::get_dns_servers)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+    let system_dns = pick_system_dns(&system_servers);
+    let target = system_dns
+        .clone()
+        .unwrap_or_else(|| CONTROL_DNS.to_string());
+    let source = if system_dns.is_some() {
+        "system"
+    } else {
+        "fallback"
+    };
+
+    let (target_latency, control_latency) = if target == CONTROL_DNS {
+        let latency = probe_dns(&target).await;
+        (latency, latency)
+    } else {
+        tokio::join!(probe_dns(&target), probe_dns(CONTROL_DNS))
+    };
+
+    let details = serde_json::json!({
+        "server": target,
+        "server_source": source,
+        "system_servers": system_servers,
+        "latency_ms": target_latency,
+        "control_server": CONTROL_DNS,
+        "control_latency_ms": control_latency,
+    });
+    let source_label = if system_dns.is_some() {
+        "系统 DNS"
+    } else {
+        "未读取到系统 DNS，改测"
+    };
+
+    let (status, message) = match (target_latency, control_latency) {
+        (Some(ms), _) => (
+            DiagnosticStatus::Pass,
+            format!(
+                "DNS解析正常（{} {}，{}ms）",
+                source_label,
+                target,
+                ms.round()
+            ),
+        ),
+        (None, Some(_)) => (
+            DiagnosticStatus::Fail,
+            format!(
+                "{} {} 解析失败，公共 DNS {} 可用",
+                source_label, target, CONTROL_DNS
+            ),
+        ),
+        (None, None) => (
+            DiagnosticStatus::Fail,
+            if target == CONTROL_DNS {
+                format!("DNS解析失败（{} {}）", source_label, target)
             } else {
-                DiagnosticItem {
-                    status: DiagnosticStatus::Fail,
-                    message: "DNS解析失败".to_string(),
-                    details: serde_json::json!({}),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                }
-            }
-        }
-        Err(_) => DiagnosticItem {
-            status: DiagnosticStatus::Fail,
-            message: "DNS测试失败".to_string(),
-            details: serde_json::json!({}),
-            duration_ms: start.elapsed().as_millis() as u64,
-        },
+                format!(
+                    "DNS解析失败（{} {} 与公共 DNS {} 均无响应）",
+                    source_label, target, CONTROL_DNS
+                )
+            },
+        ),
+    };
+
+    DiagnosticItem {
+        status,
+        message,
+        details,
+        duration_ms: start.elapsed().as_millis() as u64,
     }
 }
 
@@ -452,4 +544,44 @@ fn generate_recommendations(
     recommendations.truncate(3);
 
     recommendations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_system_dns;
+
+    fn servers(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn picks_first_usable_system_server() {
+        assert_eq!(
+            pick_system_dns(&servers(&["192.168.1.1", "8.8.8.8"])),
+            Some("192.168.1.1".to_string())
+        );
+        assert_eq!(
+            pick_system_dns(&servers(&["127.0.0.1"])),
+            Some("127.0.0.1".to_string())
+        );
+    }
+
+    #[test]
+    fn skips_scoped_unspecified_and_hostname_entries() {
+        assert_eq!(
+            pick_system_dns(&servers(&[
+                "fe80::1%en0",
+                "0.0.0.0",
+                "dns.local",
+                "[2001:db8::53]"
+            ])),
+            Some("2001:db8::53".to_string())
+        );
+    }
+
+    #[test]
+    fn no_usable_server_returns_none() {
+        assert_eq!(pick_system_dns(&[]), None);
+        assert_eq!(pick_system_dns(&servers(&["fe80::1%en0", "  "])), None);
+    }
 }
