@@ -364,6 +364,19 @@ pub fn parse_ip_route_default(output: &str) -> Option<super::DefaultGateway> {
     select_default_gateway(candidates)
 }
 
+/// Whether a tool's DNS server listing (separated by whitespace, `|` or `,`,
+/// possibly after a `Link 2 (eth0):` style prefix) includes `addr`.
+/// Addresses are compared parsed, so IPv6 spellings need not match.
+pub fn dns_list_contains(output: &str, addr: &str) -> bool {
+    let Ok(want) = addr.parse::<IpAddr>() else {
+        return false;
+    };
+    output
+        .split(|c: char| c.is_whitespace() || c == '|' || c == ',')
+        .filter_map(|token| token.split('%').next()?.parse::<IpAddr>().ok())
+        .any(|ip| ip == want)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,5 +532,24 @@ tcp   LISTEN 0      128    *:80               *:*            users:((\"nginx\",p
         assert_eq!(conn.local_port, 8080);
         assert_eq!(conn.state, "LISTEN");
         assert_eq!(conn.remote_port, 0);
+    }
+
+    #[test]
+    fn dns_list_contains_tool_formats() {
+        assert!(dns_list_contains(
+            "Link 2 (eth0): 1.1.1.1 8.8.8.8",
+            "8.8.8.8"
+        ));
+        assert!(dns_list_contains(
+            "223.5.5.5 | 119.29.29.29",
+            "119.29.29.29"
+        ));
+        assert!(dns_list_contains(
+            "2606:4700:4700:0::1111",
+            "2606:4700:4700::1111"
+        ));
+        assert!(!dns_list_contains("Link 2 (eth0): 11.1.1.1", "1.1.1.1"));
+        assert!(!dns_list_contains("", "1.1.1.1"));
+        assert!(!dns_list_contains("1.1.1.1", "not-an-ip"));
     }
 }

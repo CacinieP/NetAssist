@@ -594,6 +594,56 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
         ));
     }
 
+    let configured = configured_dns_servers(&service)?;
+    if !configured.iter().any(|s| s == primary) {
+        return Err(anyhow::anyhow!(
+            "设置 DNS 后回读 {} 的配置不包含 {}（当前：{}），切换未生效",
+            service,
+            primary,
+            if configured.is_empty() {
+                "自动".to_string()
+            } else {
+                configured.join(", ")
+            }
+        ));
+    }
+    Ok(())
+}
+
+/// Static DNS servers configured on a network service; empty when the
+/// service uses the DHCP-provided ones.
+fn configured_dns_servers(service: &str) -> anyhow::Result<Vec<String>> {
+    let output = super::common::exec_command("networksetup", &["-getdnsservers", service])?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.parse::<IpAddr>().is_ok())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Drop the static DNS servers of the primary network service so it uses the
+/// DHCP-provided ones again.
+pub fn restore_auto_dns() -> anyhow::Result<()> {
+    let service = default_network_service()?;
+    let output = std::process::Command::new("networksetup")
+        .args(["-setdnsservers", &service, "empty"])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to restore automatic DNS on {}: {}",
+            service,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let remaining = configured_dns_servers(&service)?;
+    if !remaining.is_empty() {
+        return Err(anyhow::anyhow!(
+            "{} 仍配置着静态 DNS（{}），恢复自动 DNS 未生效",
+            service,
+            remaining.join(", ")
+        ));
+    }
     Ok(())
 }
 

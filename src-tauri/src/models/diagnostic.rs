@@ -26,6 +26,8 @@ pub enum RepairType {
     ResetNetworkStack,
     #[serde(rename = "switch_dns")]
     SwitchDNS,
+    #[serde(rename = "restore_auto_dns")]
+    RestoreAutoDNS,
     #[serde(rename = "toggle_ipv6")]
     ToggleIPv6,
     #[serde(rename = "disconnect_abnormal")]

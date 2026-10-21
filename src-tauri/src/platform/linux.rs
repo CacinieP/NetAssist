@@ -25,6 +25,12 @@ pub fn get_default_gateway() -> anyhow::Result<Option<super::DefaultGateway>> {
 
 /// Get default network interface on Linux
 pub fn get_default_interface() -> anyhow::Result<String> {
+    if let Ok(Some(gw)) = get_default_gateway() {
+        if let Some(iface) = gw.interface {
+            return Ok(iface);
+        }
+    }
+
     // Use: ip route show default
     let output = super::common::exec_command("ip", &["route", "show", "default"])?;
 
@@ -277,87 +283,285 @@ fn validate_ip(addr: &str) -> Result<(), anyhow::Error> {
         .map_err(|_| anyhow::anyhow!("invalid IP address: {}", addr))
 }
 
-/// Set DNS servers on Linux.
+/// Quote `arg` for `/bin/sh` so it is passed through as one literal word.
+fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', r"'\''"))
+}
+
+/// Run each command in order as root, stopping at the first failure: directly
+/// when already root, otherwise behind a single `pkexec` prompt.
+fn run_as_root(commands: &[Vec<String>]) -> anyhow::Result<()> {
+    if check_root_privileges()? {
+        for argv in commands {
+            let out = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .output()?;
+            if !out.status.success() {
+                return Err(anyhow::anyhow!(
+                    "{} 失败: {}",
+                    argv.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    let script = commands
+        .iter()
+        .map(|argv| {
+            argv.iter()
+                .map(|a| shell_quote(a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let out = match std::process::Command::new("pkexec")
+        .args(["/bin/sh", "-c", &script])
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow::anyhow!(
+                "需要 root 权限，但未找到 pkexec：请安装 polkit，或以 root 身份运行 NetAssist"
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    match out.status.code() {
+        Some(0) => Ok(()),
+        Some(126) => Err(anyhow::anyhow!("授权被取消或被拒绝，未做任何修改")),
+        Some(127) => Err(anyhow::anyhow!(
+            "pkexec 未能完成授权：当前会话可能没有运行 polkit 认证代理（例如无桌面的 SSH 会话）。请在桌面会话中运行，或以 root 身份运行 NetAssist"
+        )),
+        _ => Err(anyhow::anyhow!(
+            "{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// Who owns the DNS configuration of an interface.
+enum DnsManager {
+    /// NetworkManager, with the name of the connection active on the device.
+    NetworkManager(String),
+    /// systemd-resolved per-link DNS.
+    Resolved,
+    /// Plain `/etc/resolv.conf`.
+    ResolvConf,
+}
+
+/// The NetworkManager connection active on `iface`, if NM manages it.
+/// `nmcli con mod` needs this connection name, not the device name.
+fn nm_connection(iface: &str) -> Option<String> {
+    let out = super::common::exec_command(
+        "nmcli",
+        &["-g", "GENERAL.CONNECTION", "device", "show", iface],
+    )
+    .ok()?;
+    let name = out.trim();
+    (!name.is_empty() && name != "--").then(|| name.to_string())
+}
+
+fn dns_manager(iface: &str) -> DnsManager {
+    if let Some(connection) = nm_connection(iface) {
+        DnsManager::NetworkManager(connection)
+    } else if super::common::exec_command("resolvectl", &["--help"]).is_ok() {
+        DnsManager::Resolved
+    } else {
+        DnsManager::ResolvConf
+    }
+}
+
+const RESOLV_CONF: &str = "/etc/resolv.conf";
+const RESOLV_CONF_BACKUP: &str = "/etc/resolv.conf.netassist-backup";
+
+/// Poll `read` for up to ~3 s until it reports `addr`; settings applied
+/// through NetworkManager or resolved can take a moment to show up.
+fn wait_for_dns(addr: &str, read: impl Fn() -> Option<String>) -> bool {
+    for attempt in 0..6 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if read().is_some_and(|out| super::common::dns_list_contains(&out, addr)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Set DNS servers on Linux and confirm they took effect.
 ///
-/// Prefers per-interface tools (`resolvectl`, `nmcli`) that work with
-/// systemd-resolved / NetworkManager instead of clobbering the
-/// `/etc/resolv.conf` symlink (which is usually managed by resolved). Falls
-/// back to writing `/etc/resolv.conf` only when no manager tool exists, and
-/// only after validating the inputs as real IPs (no line injection) and
-/// requiring root.
+/// NetworkManager-managed devices are changed through their connection
+/// profile (persistent, and NM would otherwise overwrite runtime changes);
+/// other links go through systemd-resolved, with `~.` as routing domain so
+/// all queries use the new servers. `/etc/resolv.conf` is only written as a
+/// last resort, after backing up the original for `restore_auto_dns`.
 pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result<()> {
     validate_ip(primary)?;
     if let Some(sec) = secondary {
         validate_ip(sec)?;
     }
-
+    let servers: Vec<&str> = std::iter::once(primary).chain(secondary).collect();
     let iface = get_default_interface()?;
 
-    // 1) systemd-resolved: resolvectl dns <iface> <primary> [secondary]
-    let mut manager: Option<(&'static str, Vec<String>)> = None;
-    if super::common::exec_command("resolvectl", &["--help"]).is_ok() {
-        let mut args: Vec<String> = vec!["dns".into(), iface.clone(), primary.to_string()];
-        if let Some(sec) = secondary {
-            args.push(sec.to_string());
+    match dns_manager(&iface) {
+        DnsManager::NetworkManager(connection) => {
+            let mut modify = vec![
+                "nmcli".to_string(),
+                "connection".into(),
+                "modify".into(),
+                connection,
+            ];
+            for (family, v6) in [("ipv4", false), ("ipv6", true)] {
+                let list: Vec<&str> = servers
+                    .iter()
+                    .copied()
+                    .filter(|s| s.contains(':') == v6)
+                    .collect();
+                if !list.is_empty() {
+                    modify.push(format!("{family}.dns"));
+                    modify.push(list.join(" "));
+                    modify.push(format!("{family}.ignore-auto-dns"));
+                    modify.push("yes".into());
+                }
+            }
+            let reapply = vec![
+                "nmcli".to_string(),
+                "device".into(),
+                "reapply".into(),
+                iface.clone(),
+            ];
+            run_as_root(&[modify, reapply])
+                .map_err(|e| anyhow::anyhow!("通过 NetworkManager 设置 DNS 失败: {}", e))?;
+            let field = if primary.contains(':') {
+                "IP6.DNS"
+            } else {
+                "IP4.DNS"
+            };
+            if !wait_for_dns(primary, || {
+                super::common::exec_command("nmcli", &["-g", field, "device", "show", &iface]).ok()
+            }) {
+                return Err(anyhow::anyhow!(
+                    "NetworkManager 已接受配置，但 {} 上未生效 {}",
+                    iface,
+                    primary
+                ));
+            }
         }
-        manager = Some(("resolvectl", args));
-    }
-
-    // 2) NetworkManager: nmcli con mod <name> ipv4.dns ...
-    if manager.is_none() && super::common::exec_command("nmcli", &["--version"]).is_ok() {
-        let mut dns = primary.to_string();
-        if let Some(sec) = secondary {
-            dns.push(' ');
-            dns.push_str(sec);
+        DnsManager::Resolved => {
+            let mut dns = vec!["resolvectl".to_string(), "dns".into(), iface.clone()];
+            dns.extend(servers.iter().map(|s| s.to_string()));
+            let domain = vec![
+                "resolvectl".to_string(),
+                "domain".into(),
+                iface.clone(),
+                "~.".into(),
+            ];
+            let default_route = vec![
+                "resolvectl".to_string(),
+                "default-route".into(),
+                iface.clone(),
+                "true".into(),
+            ];
+            run_as_root(&[dns, domain, default_route])
+                .map_err(|e| anyhow::anyhow!("通过 systemd-resolved 设置 DNS 失败: {}", e))?;
+            if !wait_for_dns(primary, || {
+                super::common::exec_command("resolvectl", &["dns", &iface]).ok()
+            }) {
+                return Err(anyhow::anyhow!(
+                    "systemd-resolved 已接受配置，但 {} 上未生效 {}",
+                    iface,
+                    primary
+                ));
+            }
         }
-        manager = Some((
-            "nmcli",
-            vec![
-                "con".to_string(),
-                "mod".to_string(),
-                iface,
-                "ipv4.dns".to_string(),
-                dns,
-                "ipv4.method".to_string(),
-                "auto".to_string(),
-            ],
-        ));
-    }
-
-    if let Some((tool, args)) = manager {
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        // Prepend pkexec when not root (matches GUI usage).
-        let out = if check_root_privileges()? {
-            std::process::Command::new(tool).args(&arg_refs).output()?
-        } else {
-            let mut cmd = std::process::Command::new("pkexec");
-            cmd.arg(tool).args(&arg_refs);
-            cmd.output()?
-        };
-        if out.status.success() {
-            return Ok(());
+        DnsManager::ResolvConf => {
+            if !check_root_privileges()? {
+                return Err(anyhow::anyhow!(
+                    "cannot write /etc/resolv.conf without root; install systemd-resolved or NetworkManager"
+                ));
+            }
+            let backup = std::path::Path::new(RESOLV_CONF_BACKUP);
+            if !backup.exists() {
+                std::fs::write(backup, std::fs::read(RESOLV_CONF).unwrap_or_default())?;
+            }
+            let mut content = String::from("# Generated by NetAssist\n");
+            for server in &servers {
+                content.push_str(&format!("nameserver {}\n", server));
+            }
+            std::fs::write(RESOLV_CONF, content)?;
+            let current = get_dns_servers()?.join(" ");
+            if !super::common::dns_list_contains(&current, primary) {
+                return Err(anyhow::anyhow!(
+                    "写入 /etc/resolv.conf 后回读未包含 {}",
+                    primary
+                ));
+            }
         }
-        return Err(anyhow::anyhow!(
-            "failed to set DNS via {}: {}",
-            tool,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
     }
+    Ok(())
+}
 
-    // 3) Fallback: direct /etc/resolv.conf write (last resort, needs root).
-    if !check_root_privileges()? {
-        return Err(anyhow::anyhow!(
-            "cannot write /etc/resolv.conf without root; install systemd-resolved or NetworkManager"
-        ));
+/// Return the default interface to the DNS servers its network provides,
+/// undoing `set_dns_servers`.
+pub fn restore_auto_dns() -> anyhow::Result<()> {
+    let iface = get_default_interface()?;
+    match dns_manager(&iface) {
+        DnsManager::NetworkManager(connection) => {
+            let modify = vec![
+                "nmcli".to_string(),
+                "connection".into(),
+                "modify".into(),
+                connection.clone(),
+                "ipv4.dns".into(),
+                String::new(),
+                "ipv4.ignore-auto-dns".into(),
+                "no".into(),
+                "ipv6.dns".into(),
+                String::new(),
+                "ipv6.ignore-auto-dns".into(),
+                "no".into(),
+            ];
+            let reapply = vec![
+                "nmcli".to_string(),
+                "device".into(),
+                "reapply".into(),
+                iface.clone(),
+            ];
+            run_as_root(&[modify, reapply])
+                .map_err(|e| anyhow::anyhow!("通过 NetworkManager 恢复自动 DNS 失败: {}", e))?;
+            let left = super::common::exec_command(
+                "nmcli",
+                &["-g", "ipv4.dns,ipv6.dns", "connection", "show", &connection],
+            )?;
+            if !left.trim().is_empty() {
+                return Err(anyhow::anyhow!(
+                    "连接 {} 仍配置着静态 DNS（{}），恢复自动 DNS 未生效",
+                    connection,
+                    left.trim()
+                ));
+            }
+        }
+        DnsManager::Resolved => {
+            run_as_root(&[vec!["resolvectl".to_string(), "revert".into(), iface]])
+                .map_err(|e| anyhow::anyhow!("通过 systemd-resolved 恢复自动 DNS 失败: {}", e))?;
+        }
+        DnsManager::ResolvConf => {
+            let backup = std::path::Path::new(RESOLV_CONF_BACKUP);
+            if !backup.exists() {
+                return Err(anyhow::anyhow!(
+                    "没有找到 NetAssist 修改前的 /etc/resolv.conf 备份，无法自动恢复"
+                ));
+            }
+            if !check_root_privileges()? {
+                return Err(anyhow::anyhow!("恢复 /etc/resolv.conf 需要 root 权限"));
+            }
+            std::fs::write(RESOLV_CONF, std::fs::read(backup)?)?;
+            std::fs::remove_file(backup)?;
+        }
     }
-
-    let resolv_path = std::path::Path::new("/etc/resolv.conf");
-    let mut content = String::from("# Generated by NetAssist\n");
-    content.push_str(&format!("nameserver {}\n", primary));
-    if let Some(secondary) = secondary {
-        content.push_str(&format!("nameserver {}\n", secondary));
-    }
-    std::fs::write(resolv_path, content)?;
     Ok(())
 }
 

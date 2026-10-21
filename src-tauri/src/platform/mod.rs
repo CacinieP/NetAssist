@@ -196,6 +196,22 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
     }
 }
 
+/// Return the primary interface to DHCP-provided DNS servers, undoing
+/// `set_dns_servers`.
+pub fn restore_auto_dns() -> anyhow::Result<()> {
+    cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+            windows::restore_auto_dns()
+        } else if #[cfg(target_os = "linux")] {
+            linux::restore_auto_dns()
+        } else if #[cfg(target_os = "macos")] {
+            macos::restore_auto_dns()
+        } else {
+            Err(anyhow::anyhow!("restore_auto_dns is not supported on this platform"))
+        }
+    }
+}
+
 /// Toggle IPv6 state on the primary interface (macOS: real toggle via
 /// networksetup; other platforms: not supported yet).
 pub fn toggle_ipv6() -> anyhow::Result<String> {

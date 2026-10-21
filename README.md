@@ -98,6 +98,12 @@ macOS 构建配置的最低系统版本为 **11.0**。具体版本的安装包�
 
 本地接口地址、活动连接、流量记录和阈值告警继续采样，不依赖外网探测开关。macOS 的本地 `netstat` / `nettop` 采样禁用地址名称解析，避免为显示名称额外查询 DNS。
 
+断网急救箱的修复操作会**修改系统网络配置**，通常需要管理员授权。其中「切换DNS服务器」是持久修改：它把默认路由所在网络服务（网卡）的 DNS 改为设置里的服务器，重启或换网络后仍然生效，直到你撤销。撤销方式是急救箱里的「恢复自动DNS」，它会改回由网络（DHCP）下发的 DNS。注意，如果你原本就手动配置过 DNS，恢复后这份手动配置也会被清除。切换前的 DNS 会记在运行日志里，方便手动还原。各平台的具体做法：
+
+- macOS：`networksetup -setdnsservers <服务>`，恢复时用 `empty`。
+- Windows：`netsh`，恢复时改为 `dhcp`。
+- Linux：NetworkManager 管理的网卡修改其连接配置；否则走 systemd-resolved 的 per-link DNS，恢复时用 `resolvectl revert`。两者都没有时才改写 `/etc/resolv.conf`，并先备份为 `/etc/resolv.conf.netassist-backup`。
+
 ## 如何理解诊断结果
 
 - 公网 IPv4 是本工具查询目标观察到的出口；IPv6 显示本地配置地址及接口，不自动等同于某个应用的实际出口。

@@ -72,8 +72,20 @@ fn apply_quick_fix_blocking(fix_type: &str) -> Result<bool, String> {
                     (s.primary_dns, sec)
                 })
                 .unwrap_or_else(|_| ("8.8.8.8".to_string(), Some("1.1.1.1".to_string())));
+            let before = crate::platform::get_dns_servers().unwrap_or_default();
+            tracing::info!(
+                "switch_dns: {:?} -> {} {:?} (undo with restore_auto_dns)",
+                before,
+                primary,
+                secondary
+            );
             crate::platform::set_dns_servers(&primary, secondary.as_deref())
-                .map_err(|e| format!("Failed to switch DNS: {}", e))?;
+                .map_err(|e| format!("切换 DNS 失败: {}", e))?;
+            Ok(true)
+        }
+        "restore_auto_dns" => {
+            tracing::info!("Executing fix: restore_auto_dns");
+            crate::platform::restore_auto_dns().map_err(|e| format!("恢复自动 DNS 失败: {}", e))?;
             Ok(true)
         }
         "toggle_ipv6" => {
@@ -107,6 +119,7 @@ fn apply_quick_fix_blocking(fix_type: &str) -> Result<bool, String> {
 const REPAIR_TYPES: &[&str] = &[
     "flush_dns_cache",
     "switch_dns",
+    "restore_auto_dns",
     "release_renew_ip",
     "toggle_ipv6",
     "reset_adapter",
@@ -749,6 +762,13 @@ fn repair_action(action_type: RepairType) -> RepairAction {
         RepairType::SwitchDNS => (
             "切换DNS服务器",
             "把主网络服务的 DNS 改为设置中配置的服务器（持久修改系统配置）".to_string(),
+            2,
+            5,
+            RepairRisk::Medium,
+        ),
+        RepairType::RestoreAutoDNS => (
+            "恢复自动DNS",
+            "撤销切换DNS，改回由网络（DHCP）自动下发的 DNS 服务器".to_string(),
             2,
             5,
             RepairRisk::Medium,

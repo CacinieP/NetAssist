@@ -143,6 +143,12 @@ pub fn get_default_gateway() -> anyhow::Result<Option<super::DefaultGateway>> {
 
 /// Get the friendly name of the default network interface.
 pub fn get_default_interface() -> anyhow::Result<String> {
+    if let Ok(Some(gw)) = get_default_gateway() {
+        if let Some(name) = gw.interface {
+            return Ok(name);
+        }
+    }
+
     let mut chosen: Option<String> = None;
     with_adapters(AF_INET.0 as u32, |head| {
         let mut cur = head;
@@ -530,57 +536,121 @@ pub fn get_dns_servers() -> anyhow::Result<Vec<String>> {
         }
     });
 
-    let base = "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\";
     for guid in &guids {
-        if guid.is_empty() {
-            continue;
-        }
-        let path = format!("{}{}\\0", base, guid);
-        unsafe {
-            let mut hkey = HKEY::default();
-            if RegOpenKeyExA(
-                HKEY_LOCAL_MACHINE,
-                PCSTR(path.as_ptr()),
-                0,
-                KEY_READ,
-                &mut hkey,
-            )
-            .0 == 0
-            {
-                for value_name in ["NameServer\0", "DhcpNameServer\0"] {
-                    let mut buf = [0u8; 2048];
-                    let mut size = buf.len() as u32;
-                    let mut ty = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
-                    let rc = RegQueryValueExA(
-                        hkey,
-                        PCSTR(value_name.as_ptr()),
-                        None,
-                        Some(&mut ty),
-                        Some(buf.as_mut_ptr()),
-                        Some(&mut size),
-                    );
-                    if rc.0 == 0 && size > 0 {
-                        let s = String::from_utf8_lossy(&buf[..size as usize])
-                            .trim_matches('\0')
-                            .trim()
-                            .to_string();
-                        for part in s.split([',', ' ']) {
-                            let part = part.trim();
-                            if !part.is_empty()
-                                && part.parse::<IpAddr>().is_ok()
-                                && !servers.contains(&part.to_string())
-                            {
-                                servers.push(part.to_string());
-                            }
-                        }
-                    }
+        for value_name in ["NameServer", "DhcpNameServer"] {
+            for server in registry_dns(TCPIP_V4, guid, value_name) {
+                if !servers.contains(&server) {
+                    servers.push(server);
                 }
-                let _ = RegCloseKey(hkey);
             }
         }
     }
 
     Ok(servers)
+}
+
+const TCPIP_V4: &str = "Tcpip";
+const TCPIP_V6: &str = "Tcpip6";
+
+/// DNS servers stored in `value_name` (`NameServer` for static servers,
+/// `DhcpNameServer` for DHCP-provided ones) of the adapter with GUID `guid`
+/// under the `Tcpip` or `Tcpip6` service.
+fn registry_dns(service: &str, guid: &str, value_name: &str) -> Vec<String> {
+    let mut servers = Vec::new();
+    if guid.is_empty() {
+        return servers;
+    }
+    let path = format!(
+        "SYSTEM\\CurrentControlSet\\Services\\{}\\Parameters\\Interfaces\\{}\0",
+        service, guid
+    );
+    let value = format!("{}\0", value_name);
+    unsafe {
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExA(
+            HKEY_LOCAL_MACHINE,
+            PCSTR(path.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        )
+        .0 != 0
+        {
+            return servers;
+        }
+        let mut buf = [0u8; 2048];
+        let mut size = buf.len() as u32;
+        let mut ty = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
+        let rc = RegQueryValueExA(
+            hkey,
+            PCSTR(value.as_ptr()),
+            None,
+            Some(&mut ty),
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        if rc.0 == 0 && size > 0 {
+            let s = String::from_utf8_lossy(&buf[..size as usize])
+                .trim_matches('\0')
+                .trim()
+                .to_string();
+            for part in s.split([',', ' ']) {
+                let part = part.trim();
+                if !part.is_empty()
+                    && part.parse::<IpAddr>().is_ok()
+                    && !servers.contains(&part.to_string())
+                {
+                    servers.push(part.to_string());
+                }
+            }
+        }
+        let _ = RegCloseKey(hkey);
+    }
+    servers
+}
+
+/// Registry GUID (`AdapterName`) of the adapter with this friendly name.
+fn adapter_guid(friendly_name: &str) -> Option<String> {
+    let mut guid = None;
+    with_adapters(0, |head| {
+        let mut cur = head;
+        while !cur.is_null() {
+            let a = unsafe { &*cur };
+            if !a.AdapterName.is_null()
+                && unsafe { wide_to_string(a.FriendlyName.0) } == friendly_name
+            {
+                guid = Some(unsafe { ansi_to_string(a.AdapterName.0) });
+                return;
+            }
+            cur = unsafe { (*cur).Next };
+        }
+    });
+    guid
+}
+
+/// Static DNS servers of one interface and address family; empty means the
+/// interface uses DHCP-provided servers.
+fn static_dns(interface: &str, v6: bool) -> Vec<String> {
+    let service = if v6 { TCPIP_V6 } else { TCPIP_V4 };
+    adapter_guid(interface)
+        .map(|guid| registry_dns(service, &guid, "NameServer"))
+        .unwrap_or_default()
+}
+
+fn run_netsh(args: &[&str], what: &str) -> anyhow::Result<()> {
+    let out = std::process::Command::new("netsh").args(args).output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let mut detail = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if detail.is_empty() {
+        detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    }
+    Err(anyhow::anyhow!(
+        "{}失败（需要以管理员身份运行？）: {}",
+        what,
+        detail
+    ))
 }
 
 /// Validate interface name to prevent command injection
@@ -601,9 +671,9 @@ fn validate_interface_name(name: &str) -> Result<(), anyhow::Error> {
 
 /// Set DNS servers on Windows using netsh with proper input validation.
 ///
-/// The active interface is found by parsing `netsh interface show interface`
-/// correctly: columns are `Admin | State | Type | Interface Name`, and the
-/// name is everything after the first three columns (may contain spaces).
+/// Targets the interface that carries the default route, not the first
+/// "Connected" one in `netsh interface show interface` (often a VPN or
+/// Hyper-V virtual switch), and reads the registry back to confirm.
 pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result<()> {
     if primary.parse::<IpAddr>().is_err() {
         return Err(anyhow::anyhow!("Invalid primary DNS server address"));
@@ -614,72 +684,90 @@ pub fn set_dns_servers(primary: &str, secondary: Option<&str>) -> anyhow::Result
         }
     }
 
-    // Get connected interface name from netsh.
-    let output = std::process::Command::new("netsh")
-        .args(&["interface", "show", "interface"])
-        .output()?;
-    let content = String::from_utf8_lossy(&output.stdout);
-
-    let mut interface_name: Option<String> = None;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("Admin State") || trimmed.starts_with('-') {
-            continue;
-        }
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.len() >= 4
-            && parts
-                .get(1)
-                .map(|s| s.eq_ignore_ascii_case("Connected"))
-                .unwrap_or(false)
-        {
-            interface_name = Some(parts[3..].join(" "));
-            break;
-        }
-    }
-
-    let interface_name =
-        interface_name.ok_or_else(|| anyhow::anyhow!("no connected network interface found"))?;
+    let interface_name = get_default_interface()?;
     validate_interface_name(&interface_name)?;
-
     let name_arg = format!("name={}", interface_name);
+    let family = |addr: &str| {
+        if addr.contains(':') {
+            "ipv6"
+        } else {
+            "ip"
+        }
+    };
 
-    let set = std::process::Command::new("netsh")
-        .args(&[
+    run_netsh(
+        &[
             "interface",
-            "ip",
+            family(primary),
             "set",
             "dns",
             &name_arg,
             "static",
             primary,
-        ])
-        .status()?;
-    if !set.success() {
-        return Err(anyhow::anyhow!(
-            "failed to set primary DNS (admin rights required?)"
-        ));
-    }
-
+        ],
+        "设置首选 DNS ",
+    )?;
     if let Some(secondary) = secondary {
-        let add = std::process::Command::new("netsh")
-            .args(&[
+        run_netsh(
+            &[
                 "interface",
-                "ip",
+                family(secondary),
                 "add",
                 "dns",
                 &name_arg,
                 secondary,
                 "index=2",
-            ])
-            .status()?;
-        if !add.success() {
-            return Err(anyhow::anyhow!(
-                "failed to set secondary DNS (admin rights required?)"
-            ));
-        }
+            ],
+            "设置备用 DNS ",
+        )?;
     }
 
+    let configured = static_dns(&interface_name, primary.contains(':'));
+    if !configured.iter().any(|s| s == primary) {
+        return Err(anyhow::anyhow!(
+            "设置 DNS 后回读 {} 的配置不包含 {}，切换未生效",
+            interface_name,
+            primary
+        ));
+    }
+    Ok(())
+}
+
+/// Switch the default interface back to DHCP-provided DNS servers for IPv4
+/// and IPv6.
+pub fn restore_auto_dns() -> anyhow::Result<()> {
+    let interface_name = get_default_interface()?;
+    validate_interface_name(&interface_name)?;
+    let name_arg = format!("name={}", interface_name);
+    run_netsh(
+        &["interface", "ip", "set", "dns", &name_arg, "dhcp"],
+        "恢复自动 DNS ",
+    )?;
+    if !static_dns(&interface_name, true).is_empty() {
+        run_netsh(
+            &[
+                "interface",
+                "ipv6",
+                "set",
+                "dnsservers",
+                &name_arg,
+                "source=dhcp",
+            ],
+            "恢复 IPv6 自动 DNS ",
+        )?;
+    }
+
+    let remaining: Vec<String> = [false, true]
+        .into_iter()
+        .flat_map(|v6| static_dns(&interface_name, v6))
+        .collect();
+    if !remaining.is_empty() {
+        return Err(anyhow::anyhow!(
+            "{} 仍配置着静态 DNS（{}），恢复自动 DNS 未生效",
+            interface_name,
+            remaining.join(", ")
+        ));
+    }
     Ok(())
 }
 
