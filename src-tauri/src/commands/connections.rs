@@ -236,7 +236,7 @@ pub async fn kill_connection(
     {
         use std::process::Command;
         let output = Command::new("taskkill")
-            .args(&["/PID", &pid.to_string(), "/F"])
+            .args(["/PID", &pid.to_string(), "/F"])
             .output()
             .map_err(|e| format!("Failed to execute taskkill: {}", e))?;
 
