@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useSettingsStore } from "./store/settingsStore";
+import i18n, { SUPPORTED_LANGUAGES } from "./i18n";
 import { useRealtimeTraffic, useRecordTrafficPoint } from "./hooks/useTrafficData";
 import { useNetworkData, isNetworkResultCurrent } from "./hooks/useNetworkData";
 import { useTrafficAlertMonitor } from "./hooks/useTrafficAlertMonitor";
@@ -48,6 +49,13 @@ function App() {
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
+
+  // Reflect the persisted language setting to i18next.
+  useEffect(() => {
+    if ((SUPPORTED_LANGUAGES as readonly string[]).includes(settings.language)) {
+      void i18n.changeLanguage(settings.language);
+    }
+  }, [settings.language]);
 
   // Apply dark mode by toggling the `dark` class on <html>.
   // The Settings checkbox writes settings.dark_mode via the store; this effect
