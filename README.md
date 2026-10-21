@@ -120,7 +120,7 @@ macOS 构建配置的最低系统版本为 **11.0**。具体版本的安装包�
 
 ### 开发环境
 
-- **Node.js 与 npm**：仓库 CI 使用 Node.js 24。
+- **Node.js 与 npm**：支持 Node.js 24–26（npm 11–12），CI 在 Node 24 与 26 上各跑一次前端检查。依赖统一从 `registry.npmjs.org` 解析；如需使用镜像，请在本地 `.npmrc` 中设置 `registry=`，不要把镜像地址提交进 `package-lock.json`（npm 12 默认拒绝 lockfile 中来自其他源的地址）。
 - **Rust stable**：包括 Cargo；代码检查还使用 `rustfmt` 和 `clippy`。
 - **Tauri 2 的系统依赖**：按系统安装原生构建工具与 WebView 依赖，参见 [Tauri 官方环境准备](https://v2.tauri.app/start/prerequisites/)。
 
