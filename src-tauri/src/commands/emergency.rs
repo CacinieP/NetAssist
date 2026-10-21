@@ -162,6 +162,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, serde::Serialize)]
 struct DiagnosticsProgress {
+    run_id: Option<u32>,
     check: &'static str,
     status: DiagnosticStatus,
     message: String,
@@ -169,6 +170,7 @@ struct DiagnosticsProgress {
 
 async fn run_check(
     app: &tauri::AppHandle,
+    run_id: Option<u32>,
     key: &'static str,
     check: impl std::future::Future<Output = DiagnosticItem>,
 ) -> DiagnosticItem {
@@ -182,6 +184,7 @@ async fn run_check(
             duration_ms: start.elapsed().as_millis() as u64,
         });
     let progress = DiagnosticsProgress {
+        run_id,
         check: key,
         status: item.status.clone(),
         message: item.message.clone(),
@@ -197,16 +200,25 @@ async fn run_check(
 /// The four checks are independent and run concurrently; each emits a
 /// `diagnostics-progress` event when it finishes and is bounded by
 /// `CHECK_TIMEOUT`, so a stuck probe yields a partial result instead of an
-/// endless wait.
+/// endless wait. `run_id` is echoed in every progress event so the caller
+/// can ignore events from a diagnosis it has already abandoned.
 #[tauri::command]
-pub async fn run_diagnostics(app: tauri::AppHandle) -> Result<DiagnosticResult, String> {
+pub async fn run_diagnostics(
+    app: tauri::AppHandle,
+    run_id: Option<u32>,
+) -> Result<DiagnosticResult, String> {
     tracing::info!("Starting network diagnostics...");
 
     let (network_connectivity, ip_configuration, dns_resolution, network_quality) = tokio::join!(
-        run_check(&app, "network_connectivity", check_network_connectivity()),
-        run_check(&app, "ip_configuration", check_ip_configuration()),
-        run_check(&app, "dns_resolution", check_dns_resolution()),
-        run_check(&app, "network_quality", check_network_quality()),
+        run_check(
+            &app,
+            run_id,
+            "network_connectivity",
+            check_network_connectivity()
+        ),
+        run_check(&app, run_id, "ip_configuration", check_ip_configuration()),
+        run_check(&app, run_id, "dns_resolution", check_dns_resolution()),
+        run_check(&app, run_id, "network_quality", check_network_quality()),
     );
 
     let checks = [

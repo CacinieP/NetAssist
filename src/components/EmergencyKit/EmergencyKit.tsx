@@ -1,36 +1,25 @@
 import { useState, useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
+import { documentDir, join } from "@tauri-apps/api/path";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import { Activity, AlertTriangle, CheckCircle, XCircle, X, Wrench, Clock, RefreshCw, Settings, Network, FileDown, ChevronDown, Square } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle, XCircle, X, Wrench, Clock, RefreshCw, Settings, Network, FileDown, ChevronDown, Square, Undo2, Info } from "lucide-react";
 import { invokeErrorMessage } from "../../utils/errors";
-
-type DiagnosticStatus = "pass" | "fail" | "warning";
-
-interface DiagnosticItem {
-  status: DiagnosticStatus;
-  message: string;
-  details: any;
-  duration_ms: number;
-}
-
-interface RepairAction {
-  action_type: string;
-  name: string;
-  description: string;
-  priority: number;
-  estimated_time_seconds: number;
-}
-
-interface DiagnosticResult {
-  overall_status: DiagnosticStatus;
-  network_connectivity: DiagnosticItem;
-  ip_configuration: DiagnosticItem;
-  dns_resolution: DiagnosticItem;
-  network_quality: DiagnosticItem;
-  recommendations: RepairAction[];
-  timestamp: number;
-}
+import {
+  CHECK_KEYS,
+  MANUAL_FIX_TYPES,
+  historyFixType,
+  isStale,
+  problemCount,
+  type CheckKey,
+  type DiagnosticStatus,
+  type RepairAction,
+  type RepairCapability,
+  type RepairRisk,
+} from "../../utils/emergency";
+import { useEmergencyStore } from "../../store/emergencyStore";
+import { useSettingsStore } from "../../store/settingsStore";
 
 interface FixHistory {
   timestamp: number;
@@ -40,55 +29,47 @@ interface FixHistory {
   error?: string;
 }
 
-type FixType = "reset_network_stack" | "flush_dns_cache" | "release_renew_ip" | "switch_dns" | "toggle_ipv6" | "reset_adapter" | "restart_network_service";
+const HISTORY_KEY = "netassist_fix_history";
 
-const FIX_ICONS: Record<FixType, JSX.Element> = {
+const FIX_ICONS: Record<string, JSX.Element> = {
   reset_network_stack: <Settings size={20} />,
   flush_dns_cache: <RefreshCw size={20} />,
   release_renew_ip: <Network size={20} />,
   switch_dns: <Network size={20} />,
+  restore_auto_dns: <Undo2 size={20} />,
   toggle_ipv6: <Activity size={20} />,
   reset_adapter: <Wrench size={20} />,
-  restart_network_service: <RefreshCw size={20} />,
 };
 
-const FIX_WARNINGS: Record<FixType, { title: string; message: string }> = {
-  reset_network_stack: {
-    title: "重置网络协议栈",
-    message: "将重置本机网络协议栈/网络服务（Windows 重置 Winsock 与 TCP/IP、macOS 重启 mDNSResponder、Linux 重启 NetworkManager），需要管理员权限，网络可能短暂中断甚至需重启系统。"
-  },
-  flush_dns_cache: {
-    title: "清空 DNS 缓存",
-    message: "此操作将清空本地 DNS 解析缓存。"
-  },
-  release_renew_ip: {
-    title: "重新获取 IP 地址",
-    message: "此操作将释放当前 IP 并向 DHCP 服务器重新请求，可能导致短暂的网络中断。"
-  },
-  switch_dns: {
-    title: "切换 DNS 服务器",
-    message: "此操作将把主网络服务切换到设置中配置的备用 DNS 服务器。"
-  },
-  toggle_ipv6: {
-    title: "切换 IPv6",
-    message: "将在主网络服务上启用或关闭 IPv6（Automatic ↔ Off），可能短暂影响网络连接。"
-  },
-  reset_adapter: {
-    title: "重置网络适配器",
-    message: "将禁用并重新启用主网络适配器（需要管理员授权，会弹出系统密码框），期间网络会短暂中断。"
-  },
-  restart_network_service: {
-    title: "重启网络服务",
-    message: "将重启本机的网络服务/协议栈（需要管理员权限），网络可能短暂中断。"
-  }
+const CHECK_LABEL_KEYS: Record<CheckKey, string> = {
+  network_connectivity: "emergency.connectivity",
+  ip_configuration: "emergency.ip_config",
+  dns_resolution: "emergency.dns_resolution",
+  network_quality: "emergency.network_quality",
 };
+
+const RISK_STYLES: Record<RepairRisk, string> = {
+  low: "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300",
+  medium: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300",
+  high: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300",
+};
+
+type Toast = { msg: string; kind: "ok" | "error" | "info" };
 
 export default function EmergencyKit() {
-  const [result, setResult] = useState<DiagnosticResult | null>(null);
-  const [isDiagnosing, setIsDiagnosing] = useState(false);
+  const { t, i18n } = useTranslation();
+  const result = useEmergencyStore(s => s.result);
+  const isDiagnosing = useEmergencyStore(s => s.isDiagnosing);
+  const progress = useEmergencyStore(s => s.progress);
+  const capabilities = useEmergencyStore(s => s.capabilities);
+  const runDiagnosis = useEmergencyStore(s => s.runDiagnosis);
+  const cancelDiagnosis = useEmergencyStore(s => s.cancelDiagnosis);
+  const loadCapabilities = useEmergencyStore(s => s.loadCapabilities);
+  const { primary_dns, secondary_dns } = useSettingsStore(s => s.settings);
+
   const [diagnosingStep, setDiagnosingStep] = useState<string>("");
   const [fixing, setFixing] = useState<string | null>(null);
-  const [showConfirm, setShowConfirm] = useState<{ type: FixType; name: string } | null>(null);
+  const [showConfirm, setShowConfirm] = useState<string | null>(null);
   const [fixError, setFixError] = useState<string | null>(null);
   const [fixHistory, setFixHistory] = useState<FixHistory[]>([]);
   const [autoFixing, setAutoFixing] = useState(false);
@@ -98,48 +79,69 @@ export default function EmergencyKit() {
   // Checked between batch steps; an in-flight repair cannot be aborted.
   const autoFixCancelled = useRef(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [exportToast, setExportToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
   // Manual tools are shown in a modal (opened on demand) instead of always
   // laid out as cards on the page, to reduce visual clutter.
   const [showManualTools, setShowManualTools] = useState(false);
   // Collapsible diagnostic detail: which item keys are expanded. Empty by
   // default so details are hidden until the user clicks a row.
   const [expandedDetails, setExpandedDetails] = useState<Set<string>>(new Set());
+  // Re-render periodically so the "may be outdated" note appears on its own.
+  const [now, setNow] = useState(() => Date.now());
 
-  const showToast = (msg: string, ok: boolean) => {
-    setExportToast({ msg, ok });
-    setTimeout(() => setExportToast(null), 3000);
+  const fixTitle = (fixType: string) => t(`emergency.fix.${historyFixType(fixType)}.title`, { defaultValue: fixType });
+  const fixMessage = (fixType: string) => t(`emergency.fix.${historyFixType(fixType)}.msg`, { defaultValue: "" });
+
+  const showToast = (msg: string, kind: Toast["kind"]) => {
+    setToast({ msg, kind });
+    setTimeout(() => setToast(null), 4000);
   };
+
+  useEffect(() => {
+    void loadCapabilities();
+  }, [loadCapabilities]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Export the latest diagnostic report to a JSON file chosen by the user.
   const exportReport = async () => {
     if (!result) {
-      showToast("请先运行诊断", false);
+      showToast(t("emergency.run_diagnosis_first"), "error");
       return;
     }
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       const fileName = `netassist_diagnostic_${timestamp}.json`;
-      const content = JSON.stringify(result, null, 2);
+      let defaultPath = fileName;
+      try {
+        defaultPath = await join(await documentDir(), fileName);
+      } catch {
+        // Fall back to the dialog's own default folder.
+      }
       const filePath = await save({
-        defaultPath: fileName,
+        defaultPath,
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
-      if (filePath) {
-        const encoder = new TextEncoder();
-        await writeFile(filePath, encoder.encode(content));
-        showToast("诊断报告导出成功", true);
+      if (!filePath) {
+        showToast(t("emergency.export_cancelled"), "info");
+        return;
       }
+      await writeFile(filePath, new TextEncoder().encode(JSON.stringify(result, null, 2)));
+      showToast(t("emergency.export_success", { path: filePath }), "ok");
     } catch (err) {
       console.error("Export report failed:", err);
-      showToast(`导出失败: ${err}`, false);
+      const error = invokeErrorMessage(err, t("emergency.unknown_error"));
+      showToast(`${t("emergency.export_failed", { error })} ${t("emergency.export_scope_hint")}`, "error");
     }
   };
 
   // Load fix history from localStorage on mount
   useEffect(() => {
     try {
-      const saved = localStorage.getItem("netassist_fix_history");
+      const saved = localStorage.getItem(HISTORY_KEY);
       if (saved) {
         setFixHistory(JSON.parse(saved));
       }
@@ -151,22 +153,20 @@ export default function EmergencyKit() {
   // Leaving the page unmounts this component; stop any remaining batch steps.
   useEffect(() => () => { autoFixCancelled.current = true; }, []);
 
-  const saveToHistory = (actionType: string, name: string, success: boolean, error?: string) => {
+  const saveToHistory = (actionType: string, success: boolean, error?: string) => {
     const entry: FixHistory = {
       timestamp: Date.now(),
       action_type: actionType,
-      name,
+      name: fixTitle(actionType),
       success,
       error,
     };
     // Functional update so repeated saves inside one loop (auto-fix) each
-    // build on the LATEST state instead of a stale render-frame snapshot
-    // (previously every entry was prepended to the same old array and only
-    // the last one survived).
+    // build on the LATEST state instead of a stale render-frame snapshot.
     setFixHistory(prev => {
       const newHistory = [entry, ...prev].slice(0, 10); // Keep last 10
       try {
-        localStorage.setItem("netassist_fix_history", JSON.stringify(newHistory));
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(newHistory));
       } catch (e) {
         console.error("Failed to save fix history:", e);
       }
@@ -174,56 +174,65 @@ export default function EmergencyKit() {
     });
   };
 
-  const startDiagnosis = async () => {
+  const clearHistory = () => {
+    setFixHistory([]);
     try {
-      setIsDiagnosing(true);
-      setResult(null);
-      setDiagnosingStep("正在检查网络连接...");
-
-      const res = await invoke<DiagnosticResult>("run_diagnostics");
-      setResult(res);
-      setDiagnosingStep("");
-    } catch (error) {
-      console.error("Diagnostic failed:", error);
-      setFixError("诊断失败: " + invokeErrorMessage(error, "未知错误"));
-    } finally {
-      setIsDiagnosing(false);
-      setDiagnosingStep("");
+      localStorage.removeItem(HISTORY_KEY);
+    } catch (e) {
+      console.error("Failed to clear fix history:", e);
     }
   };
 
-  const rediagnose = async () => {
-    setDiagnosingStep("正在重新诊断...");
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    const res = await invoke<DiagnosticResult>("run_diagnostics");
-    setResult(res);
-    setDiagnosingStep("");
+  const startDiagnosis = async () => {
+    setFixError(null);
+    try {
+      await runDiagnosis();
+    } catch (error) {
+      console.error("Diagnostic failed:", error);
+      setFixError(t("emergency.diagnosis_failed", { error: invokeErrorMessage(error, t("emergency.unknown_error")) }));
+    }
+  };
+
+  // Re-check after repairs. A failure here says nothing about the repair
+  // itself, so it is reported separately instead of as a failed fix.
+  const rediagnose = async (fixType: string) => {
+    setDiagnosingStep(t("emergency.rediagnosing"));
+    try {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      await runDiagnosis();
+    } catch (err) {
+      console.error("Re-diagnosis failed:", err);
+      showToast(
+        t("emergency.fix_done_recheck_failed", {
+          name: fixTitle(fixType),
+          error: invokeErrorMessage(err, t("emergency.unknown_error")),
+        }),
+        "error",
+      );
+    } finally {
+      setDiagnosingStep("");
+    }
   };
 
   // Returns whether the fix succeeded. Batch runs pass rediagnose=false and
   // re-diagnose once at the end instead of after every step.
   const applyFix = async (fixType: string, { rediagnose: rerun = true } = {}): Promise<boolean> => {
+    setFixing(fixType);
+    setFixError(null);
     try {
-      setFixing(fixType);
-      setFixError(null);
-
       await invoke("apply_quick_fix", { fixType });
-
-      saveToHistory(fixType, FIX_WARNINGS[fixType as FixType]?.title || fixType, true);
-
-      if (rerun) await rediagnose();
-      return true;
+      saveToHistory(fixType, true);
     } catch (err) {
-      const errorMsg = invokeErrorMessage(err, "修复操作失败");
+      const errorMsg = invokeErrorMessage(err, t("emergency.fix_error_fallback"));
       console.error("Fix failed:", err);
-      const fixName = FIX_WARNINGS[fixType as FixType]?.title || fixType;
-      setFixError(`${fixName}失败: ${errorMsg}`);
-      saveToHistory(fixType, fixName, false, errorMsg);
+      setFixError(t("emergency.fix_failed", { name: fixTitle(fixType), error: errorMsg }));
+      saveToHistory(fixType, false, errorMsg);
       return false;
     } finally {
       setFixing(null);
-      setDiagnosingStep("");
     }
+    if (rerun) await rediagnose(fixType);
+    return true;
   };
 
   const openAutoFixPlan = () => {
@@ -245,12 +254,12 @@ export default function EmergencyKit() {
     try {
       for (const [idx, action] of actions.entries()) {
         if (autoFixCancelled.current) return;
-        setAutoFixStep(`正在执行 (${idx + 1}/${actions.length}): ${action.name}...`);
+        setAutoFixStep(t("emergency.auto_fix_step", { current: idx + 1, total: actions.length, name: fixTitle(action.action_type) }));
         const ok = await applyFix(action.action_type, { rediagnose: false });
         const remaining = actions.length - idx - 1;
         if (!ok) {
           if (remaining > 0) {
-            setFixError(prev => `${prev ?? "修复失败"}（已停止，剩余 ${remaining} 项未执行）`);
+            setFixError(prev => `${prev ?? t("emergency.fix_error_fallback")}${t("emergency.auto_fix_remaining", { count: remaining })}`);
           }
           return;
         }
@@ -258,39 +267,29 @@ export default function EmergencyKit() {
         if (remaining > 0) await new Promise(resolve => setTimeout(resolve, 2000));
       }
       setAutoFixStep("");
-      await rediagnose();
-    } catch (err) {
-      setFixError("重新诊断失败: " + invokeErrorMessage(err, "未知错误"));
+      await rediagnose(actions[actions.length - 1].action_type);
     } finally {
       setAutoFixing(false);
       setAutoFixStep("");
-      setDiagnosingStep("");
     }
   };
 
   const stopAutoFix = () => {
     autoFixCancelled.current = true;
-    setAutoFixStep("正在停止：当前操作结束后不再执行后续修复...");
+    setAutoFixStep(t("emergency.stopping"));
   };
 
-  const handleFixClick = (fixType: string, fixName: string) => {
-    const typedFixType = fixType as FixType;
-    if (FIX_WARNINGS[typedFixType]) {
-      setShowConfirm({ type: typedFixType, name: fixName });
-    } else {
-      applyFix(fixType);
-    }
-  };
+  const capabilityOf = (fixType: string): RepairCapability | undefined =>
+    capabilities?.find(c => c.fix_type === fixType);
+
+  const manualFixTypes: string[] = capabilities ? capabilities.map(c => c.fix_type) : [...MANUAL_FIX_TYPES];
 
   const confirmFix = () => {
     if (showConfirm) {
+      const fixType = showConfirm;
       setShowConfirm(null);
-      applyFix(showConfirm.type);
+      applyFix(fixType);
     }
-  };
-
-  const cancelFix = () => {
-    setShowConfirm(null);
   };
 
   const renderStatusIcon = (status: DiagnosticStatus) => {
@@ -321,13 +320,18 @@ export default function EmergencyKit() {
       fail: "bg-red-100 text-red-800 border-red-200",
       warning: "bg-yellow-100 text-yellow-800 border-yellow-200",
     };
-    const labels = { pass: "正常", fail: "异常", warning: "警告" };
     return (
       <span className={`px-2 py-1 text-xs font-medium rounded-full border ${styles[status]}`}>
-        {labels[status]}
+        {t(`emergency.status_${status}`)}
       </span>
     );
   };
+
+  const getRiskBadge = (risk: RepairRisk | undefined) => risk && (
+    <span className={`px-1.5 py-0.5 text-[11px] font-normal rounded ${RISK_STYLES[risk]}`}>
+      {t(`emergency.risk_${risk}`)}
+    </span>
+  );
 
   const formatDuration = (ms: number) => {
     if (ms < 1000) return `${ms}ms`;
@@ -342,17 +346,27 @@ export default function EmergencyKit() {
     }
   };
 
+  const doneChecks = CHECK_KEYS.filter(key => progress[key]).length;
+  const progressText = isDiagnosing
+    ? t("emergency.diagnosis_progress", { done: doneChecks, total: CHECK_KEYS.length })
+    : diagnosingStep;
+  const busy = isDiagnosing || autoFixing || fixing !== null;
+  const dnsTargets = [primary_dns, secondary_dns].filter(Boolean).join(" / ");
+  const hints = result?.hints ?? [];
+
   return (
     <div className="p-6 space-y-6">
-      {/* Export Toast */}
-      {exportToast && (
-        <div className={`fixed top-4 right-4 z-[100] px-4 py-3 rounded-lg border shadow-lg text-sm flex items-center gap-2 ${
-          exportToast.ok
+      {/* Toast */}
+      {toast && (
+        <div className={`fixed top-4 right-4 z-[100] max-w-md px-4 py-3 rounded-lg border shadow-lg text-sm flex items-center gap-2 ${
+          toast.kind === "ok"
             ? "bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300"
-            : "bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300"
+            : toast.kind === "error"
+              ? "bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300"
+              : "bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200"
         }`}>
-          <span>{exportToast.msg}</span>
-          <button onClick={() => setExportToast(null)} className="ml-2 opacity-50 hover:opacity-100">&times;</button>
+          <span className="break-all">{toast.msg}</span>
+          <button onClick={() => setToast(null)} className="ml-2 opacity-50 hover:opacity-100">&times;</button>
         </div>
       )}
 
@@ -360,9 +374,9 @@ export default function EmergencyKit() {
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
           <Activity className="w-7 h-7 text-blue-600" />
-          断网急救中心
+          {t("emergency.title")}
         </h2>
-        <p className="text-gray-500 dark:text-gray-400 mt-1">智能网络故障诊断与快速修复工具</p>
+        <p className="text-gray-500 dark:text-gray-400 mt-1">{t("emergency.subtitle")}</p>
       </div>
 
       {/* Error Message */}
@@ -376,7 +390,7 @@ export default function EmergencyKit() {
             onClick={() => setFixError(null)}
             className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200 text-sm underline"
           >
-            关闭
+            {t("emergency.close_btn")}
           </button>
         </div>
       )}
@@ -389,137 +403,170 @@ export default function EmergencyKit() {
               {result ? renderStatusIcon(result.overall_status) : <Activity className="w-6 h-6 text-gray-400 dark:text-gray-500 animate-pulse" />}
             </div>
             <div>
-              <h3 className="text-lg font-medium text-gray-800 dark:text-gray-100">网络健康状态</h3>
+              <h3 className="text-lg font-medium text-gray-800 dark:text-gray-100">{t("emergency.network_health")}</h3>
               <div className="flex items-center gap-2 mt-1">
                 {result ? (
                   <>
                     {getStatusBadge(result.overall_status)}
-                    {result.overall_status === "pass" && (
-                      <span className="text-sm text-gray-500 dark:text-gray-400">所有检查项正常</span>
-                    )}
-                    {result.overall_status === "fail" && (
-                      <span className="text-sm text-gray-500 dark:text-gray-400">发现 {result.recommendations.length} 个问题</span>
-                    )}
-                    {result.overall_status === "warning" && (
-                      <span className="text-sm text-gray-500 dark:text-gray-400">部分功能异常</span>
-                    )}
+                    <span className="text-sm text-gray-500 dark:text-gray-400">
+                      {result.overall_status === "pass" && t("emergency.all_normal")}
+                      {result.overall_status === "fail" && t("emergency.issues_found", { count: problemCount(result) })}
+                      {result.overall_status === "warning" && t("emergency.warnings_found", { count: problemCount(result) })}
+                    </span>
                   </>
                 ) : (
-                  <span className="text-gray-500 dark:text-gray-400">点击下方按钮开始诊断</span>
+                  <span className="text-gray-500 dark:text-gray-400">{t("emergency.click_to_start")}</span>
                 )}
               </div>
+              {result && (
+                <div className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                  {t("emergency.diagnosed_at", { time: new Date(result.timestamp).toLocaleString(i18n.language) })}
+                  {isStale(result.timestamp, now) && (
+                    <span className="ml-2 text-amber-600 dark:text-amber-400">{t("emergency.stale")}</span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
           <div className="flex gap-2">
             <button
               onClick={exportReport}
               disabled={!result}
-              title={result ? "导出诊断报告" : "请先运行诊断"}
+              title={result ? t("emergency.export_report") : t("emergency.run_diagnosis_first")}
               className="px-4 py-2 border border-gray-300 dark:border-gray-600 dark:text-gray-200 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors text-gray-700 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <FileDown className="w-4 h-4" />
-              导出报告
+              {t("emergency.export_report")}
             </button>
             <button
               onClick={() => setShowHistory(!showHistory)}
               className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors text-gray-700 dark:text-gray-200 flex items-center gap-2"
             >
               <Clock className="w-4 h-4" />
-              历史记录
+              {t("emergency.history")}
             </button>
-            <button
-              onClick={startDiagnosis}
-              disabled={isDiagnosing || autoFixing}
-              className={`px-6 py-3 rounded-lg text-white font-medium transition-colors flex items-center gap-2 ${
-                (isDiagnosing || autoFixing) ? "bg-gray-400 dark:bg-gray-600 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-700"
-              }`}
-            >
-              {isDiagnosing ? (
-                <>
-                  <RefreshCw className="w-5 h-5 animate-spin" />
-                  诊断中...
-                </>
-              ) : (
-                <>
-                  <Activity className="w-5 h-5" />
-                  开始诊断
-                </>
-              )}
-            </button>
+            {isDiagnosing ? (
+              <button
+                onClick={cancelDiagnosis}
+                className="px-6 py-3 rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 font-medium transition-colors flex items-center gap-2"
+              >
+                <Square className="w-5 h-5" />
+                {t("emergency.cancel_diagnosis")}
+              </button>
+            ) : (
+              <button
+                onClick={startDiagnosis}
+                disabled={autoFixing || fixing !== null}
+                className={`px-6 py-3 rounded-lg text-white font-medium transition-colors flex items-center gap-2 ${
+                  (autoFixing || fixing !== null) ? "bg-gray-400 dark:bg-gray-600 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-700"
+                }`}
+              >
+                <Activity className="w-5 h-5" />
+                {t("emergency.start_diagnosis")}
+              </button>
+            )}
           </div>
         </div>
 
         {/* Diagnosis Progress */}
-        {diagnosingStep && (
+        {progressText && (
           <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg">
             <div className="flex items-center gap-2 text-blue-700 dark:text-blue-300">
               <RefreshCw className="w-4 h-4 animate-spin" />
-              <span className="text-sm">{diagnosingStep}</span>
+              <span className="text-sm">{progressText}</span>
             </div>
+            {isDiagnosing && (
+              <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2">
+                {CHECK_KEYS.map(key => {
+                  const status = progress[key];
+                  return (
+                    <div key={key} className="flex items-center gap-1.5 text-xs text-gray-700 dark:text-gray-300">
+                      {status ? renderStatusIcon(status) : <RefreshCw className="w-4 h-4 text-blue-500 animate-spin" />}
+                      <span>{t(CHECK_LABEL_KEYS[key])}</span>
+                      {!status && <span className="text-gray-400">{t("emergency.check_running")}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>
 
       {/* Fix History */}
-      {showHistory && fixHistory.length > 0 && (
+      {showHistory && (
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 shadow-sm">
-          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3 flex items-center gap-2">
-            <Clock className="w-4 h-4" />
-            修复历史记录
-          </h3>
-          <div className="space-y-2">
-            {fixHistory.map((entry, idx) => (
-              <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
-                <div className="flex items-center gap-2">
-                  {entry.success ? (
-                    <CheckCircle className="w-4 h-4 text-green-600" />
-                  ) : (
-                    <XCircle className="w-4 h-4 text-red-600" />
-                  )}
-                  <span className="text-sm text-gray-700 dark:text-gray-200">{entry.name}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500 dark:text-gray-400">
-                    {new Date(entry.timestamp).toLocaleTimeString()}
-                  </span>
-                  {entry.error && (
-                    <span className="text-xs text-red-600 dark:text-red-400">{entry.error}</span>
-                  )}
-                </div>
-              </div>
-            ))}
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 flex items-center gap-2">
+              <Clock className="w-4 h-4" />
+              {t("emergency.fix_history")}
+            </h3>
+            {fixHistory.length > 0 && (
+              <button
+                onClick={clearHistory}
+                className="text-xs text-gray-500 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 underline"
+              >
+                {t("emergency.clear_history")}
+              </button>
+            )}
           </div>
+          {fixHistory.length === 0 ? (
+            <p className="text-sm text-gray-500 dark:text-gray-400">{t("emergency.history_empty")}</p>
+          ) : (
+            <div className="space-y-2">
+              {fixHistory.map((entry, idx) => (
+                <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-700/50 rounded">
+                  <div className="flex items-center gap-2">
+                    {entry.success ? (
+                      <CheckCircle className="w-4 h-4 text-green-600" />
+                    ) : (
+                      <XCircle className="w-4 h-4 text-red-600" />
+                    )}
+                    <span className="text-sm text-gray-700 dark:text-gray-200">
+                      {t(`emergency.fix.${historyFixType(entry.action_type)}.title`, { defaultValue: entry.name })}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-500 dark:text-gray-400">
+                      {new Date(entry.timestamp).toLocaleString(i18n.language)}
+                    </span>
+                    {entry.error && (
+                      <span className="text-xs text-red-600 dark:text-red-400">{entry.error}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="mt-3 text-xs text-gray-400 dark:text-gray-500">{t("emergency.history_storage_note")}</p>
         </div>
       )}
 
       {/* Diagnostic Results — collapsible rows */}
       {result && (
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 shadow-sm">
-          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3">诊断详情</h3>
+          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 mb-3">{t("emergency.diagnostic_detail")}</h3>
 
           <div className="space-y-2">
-            {([
-              { key: "connectivity", title: "网络连接", item: result.network_connectivity, extra: null as null | JSX.Element },
-              { key: "ip", title: "IP 配置", item: result.ip_configuration, extra: (
+            {CHECK_KEYS.map(key => {
+              const item = result[key];
+              const open = expandedDetails.has(key);
+              const extra = key === "ip_configuration" && (
                 <div className="ml-7 mt-2 p-2 bg-gray-50 dark:bg-gray-700/50 rounded text-sm">
-                  {result.ip_configuration.details.local_ipv4 && (
+                  {item.details.local_ipv4 && (
                     <div>
-                      <span className="text-gray-500 dark:text-gray-400">本地 IPv4: </span>
-                      <span className="font-mono text-gray-800 dark:text-gray-200">{result.ip_configuration.details.local_ipv4}</span>
+                      <span className="text-gray-500 dark:text-gray-400">{t("emergency.local_ipv4")}: </span>
+                      <span className="font-mono text-gray-800 dark:text-gray-200">{item.details.local_ipv4}</span>
                     </div>
                   )}
-                  {result.ip_configuration.details.local_ipv6 && (
+                  {item.details.local_ipv6 && (
                     <div>
-                      <span className="text-gray-500 dark:text-gray-400">本地 IPv6: </span>
-                      <span className="font-mono text-gray-800 dark:text-gray-200">{result.ip_configuration.details.local_ipv6}</span>
+                      <span className="text-gray-500 dark:text-gray-400">{t("emergency.local_ipv6")}: </span>
+                      <span className="font-mono text-gray-800 dark:text-gray-200">{item.details.local_ipv6}</span>
                     </div>
                   )}
                 </div>
-              ) },
-              { key: "dns", title: "DNS 解析", item: result.dns_resolution, extra: null },
-              { key: "quality", title: "网络质量", item: result.network_quality, extra: null },
-            ]).map(({ key, title, item, extra }) => {
-              const open = expandedDetails.has(key);
+              );
               return (
                 <div key={key} className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
                   <button
@@ -528,7 +575,7 @@ export default function EmergencyKit() {
                   >
                     <div className="flex items-center gap-2">
                       {renderStatusIcon(item.status)}
-                      <span className="font-medium text-gray-800 dark:text-gray-100">{title}</span>
+                      <span className="font-medium text-gray-800 dark:text-gray-100">{t(CHECK_LABEL_KEYS[key])}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       {getStatusBadge(item.status)}
@@ -549,22 +596,35 @@ export default function EmergencyKit() {
         </div>
       )}
 
+      {/* Hints that are not automated fixes */}
+      {hints.length > 0 && (
+        <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800 p-4">
+          <h3 className="text-sm font-medium text-gray-800 dark:text-gray-100 flex items-center gap-2 mb-2">
+            <Info className="w-4 h-4 text-blue-600" />
+            {t("emergency.hints_title")}
+          </h3>
+          <ul className="list-disc ml-6 space-y-1 text-sm text-gray-700 dark:text-gray-300">
+            {hints.map((hint, idx) => <li key={idx}>{hint}</li>)}
+          </ul>
+        </div>
+      )}
+
       {/* Quick Fixes - Auto Fix */}
       {result && result.recommendations.length > 0 && (
         <div className="bg-gradient-to-r from-orange-50 to-red-50 dark:from-orange-900/30 dark:to-red-900/30 rounded-lg border border-orange-200 dark:border-orange-800 p-4">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-medium text-gray-800 dark:text-gray-100 flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-orange-600" />
-              检测到 {result.recommendations.length} 个问题
+              <Wrench className="w-4 h-4 text-orange-600" />
+              {t("emergency.available_fixes", { count: result.recommendations.length })}
             </h3>
             {!autoFixing && (
               <button
                 onClick={openAutoFixPlan}
-                disabled={isDiagnosing || fixing !== null}
+                disabled={busy}
                 className="px-3 py-1.5 text-xs bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors disabled:opacity-50 flex items-center gap-1"
               >
                 <Wrench className="w-3 h-3" />
-                一键修复全部
+                {t("emergency.auto_fix_all")}
               </button>
             )}
           </div>
@@ -573,14 +633,14 @@ export default function EmergencyKit() {
             <div className="mb-3 p-2 bg-white dark:bg-gray-800 rounded border border-orange-200 dark:border-orange-800 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-orange-700 dark:text-orange-300 text-sm">
                 <RefreshCw className="w-4 h-4 animate-spin" />
-                {autoFixStep || diagnosingStep}
+                {autoFixStep || progressText}
               </div>
               <button
                 onClick={stopAutoFix}
                 className="px-2 py-1 text-xs border border-orange-300 dark:border-orange-700 text-orange-700 dark:text-orange-300 rounded hover:bg-orange-50 dark:hover:bg-gray-700 flex items-center gap-1"
               >
                 <Square className="w-3 h-3" />
-                停止
+                {t("emergency.stop")}
               </button>
             </div>
           )}
@@ -589,13 +649,15 @@ export default function EmergencyKit() {
             {result.recommendations.map((action, idx) => (
               <button
                 key={idx}
-                onClick={() => handleFixClick(action.action_type, action.name)}
-                disabled={fixing !== null || autoFixing}
+                onClick={() => setShowConfirm(action.action_type)}
+                disabled={busy}
+                title={fixMessage(action.action_type) || action.description}
                 className="p-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:border-orange-300 dark:hover:border-orange-700 hover:bg-orange-50 dark:hover:bg-gray-700 transition-all text-left disabled:opacity-50"
               >
                 <div className="flex items-center gap-2">
-                  {FIX_ICONS[action.action_type as FixType] || <Wrench className="w-4 h-4" />}
-                  <span className="font-medium text-gray-800 dark:text-gray-100">{action.name}</span>
+                  {FIX_ICONS[historyFixType(action.action_type)] || <Wrench className="w-4 h-4" />}
+                  <span className="font-medium text-gray-800 dark:text-gray-100">{fixTitle(action.action_type)}</span>
+                  {getRiskBadge(action.risk)}
                 </div>
               </button>
             ))}
@@ -608,17 +670,17 @@ export default function EmergencyKit() {
         <div>
           <h3 className="text-sm font-medium text-gray-700 dark:text-gray-200 flex items-center gap-2">
             <Wrench className="w-4 h-4" />
-            手动修复工具
+            {t("emergency.manual_tools")}
           </h3>
-          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">DNS 缓存、IP 续租、IPv6、适配器重置等</p>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{t("emergency.manual_tools_desc")}</p>
         </div>
         <button
           onClick={() => setShowManualTools(true)}
-          disabled={fixing !== null || autoFixing}
+          disabled={busy}
           className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-50 flex items-center gap-2"
         >
           <Wrench className="w-4 h-4" />
-          打开工具
+          {t("emergency.open_tools")}
         </button>
       </div>
 
@@ -629,7 +691,7 @@ export default function EmergencyKit() {
             <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center sticky top-0 bg-white dark:bg-gray-800 z-10">
               <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100 flex items-center gap-2">
                 <Wrench size={20} className="text-blue-500" />
-                手动修复工具
+                {t("emergency.manual_tools")}
               </h3>
               <button
                 onClick={() => setShowManualTools(false)}
@@ -639,23 +701,30 @@ export default function EmergencyKit() {
               </button>
             </div>
             <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-              {Object.entries(FIX_WARNINGS).map(([type, info]) => (
-                <button
-                  key={type}
-                  onClick={() => {
-                    setShowManualTools(false);
-                    handleFixClick(type as FixType, info.title);
-                  }}
-                  disabled={fixing !== null || autoFixing}
-                  className="p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 hover:border-gray-300 dark:hover:border-gray-600 transition-all text-left disabled:opacity-50"
-                >
-                  <div className="flex items-center gap-2 mb-1">
-                    {FIX_ICONS[type as FixType]}
-                    <span className="font-medium text-gray-800 dark:text-gray-100">{info.title}</span>
-                  </div>
-                  <p className="text-sm text-gray-600 dark:text-gray-300 line-clamp-2">{info.message}</p>
-                </button>
-              ))}
+              {manualFixTypes.map(type => {
+                const capability = capabilityOf(type);
+                const unsupported = capability ? !capability.supported : false;
+                return (
+                  <button
+                    key={type}
+                    onClick={() => {
+                      setShowManualTools(false);
+                      setShowConfirm(type);
+                    }}
+                    disabled={busy || unsupported}
+                    title={unsupported ? capability?.reason ?? t("emergency.unsupported") : undefined}
+                    className="p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 hover:border-gray-300 dark:hover:border-gray-600 transition-all text-left disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      {FIX_ICONS[type]}
+                      <span className="font-medium text-gray-800 dark:text-gray-100">{fixTitle(type)}</span>
+                    </div>
+                    <p className="text-sm text-gray-600 dark:text-gray-300 line-clamp-2">
+                      {unsupported ? capability?.reason ?? t("emergency.unsupported") : fixMessage(type)}
+                    </p>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -667,41 +736,42 @@ export default function EmergencyKit() {
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 p-6 max-h-[85vh] overflow-y-auto">
             <div className="flex items-center gap-3 mb-2">
               <AlertTriangle className="w-6 h-6 text-amber-500" />
-              <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">一键修复：将依次执行以下操作</h3>
+              <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">{t("emergency.auto_fix_plan_title")}</h3>
             </div>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              可取消勾选不想执行的项。任一项失败会停止后续操作；执行中可随时停止，但已开始的操作无法中断。
-            </p>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">{t("emergency.auto_fix_plan_desc")}</p>
             <div className="space-y-2 mb-6">
-              {autoFixPlan.map(({ action, selected }, idx) => {
-                const warning = FIX_WARNINGS[action.action_type as FixType];
-                return (
-                  <label key={idx} className="flex items-start gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                    <input type="checkbox" checked={selected} onChange={() => toggleAutoFixItem(idx)} className="mt-1" />
-                    <div>
-                      <div className="font-medium text-gray-800 dark:text-gray-100">
-                        {action.name}
-                        <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">约 {action.estimated_time_seconds} 秒</span>
-                      </div>
-                      <p className="text-sm text-gray-600 dark:text-gray-300">{warning?.message || action.description}</p>
+              {autoFixPlan.map(({ action, selected }, idx) => (
+                <label key={idx} className="flex items-start gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                  <input type="checkbox" checked={selected} onChange={() => toggleAutoFixItem(idx)} className="mt-1" />
+                  <div>
+                    <div className="font-medium text-gray-800 dark:text-gray-100 flex items-center gap-2 flex-wrap">
+                      {fixTitle(action.action_type)}
+                      {getRiskBadge(action.risk)}
+                      <span className="text-xs font-normal text-gray-500 dark:text-gray-400">
+                        {t("emergency.est_seconds", { count: action.estimated_time_seconds })}
+                      </span>
                     </div>
-                  </label>
-                );
-              })}
+                    <p className="text-sm text-gray-600 dark:text-gray-300">{fixMessage(action.action_type) || action.description}</p>
+                    {action.action_type === "switch_dns" && dnsTargets && (
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{t("emergency.switch_dns_targets", { servers: dnsTargets })}</p>
+                    )}
+                  </div>
+                </label>
+              ))}
             </div>
             <div className="flex gap-3 justify-end">
               <button
                 onClick={() => setAutoFixPlan(null)}
                 className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
               >
-                取消
+                {t("emergency.cancel")}
               </button>
               <button
                 onClick={runAutoFix}
                 disabled={!autoFixPlan.some(item => item.selected)}
                 className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors disabled:opacity-50"
               >
-                执行所选（{autoFixPlan.filter(item => item.selected).length} 项）
+                {t("emergency.run_selected", { count: autoFixPlan.filter(item => item.selected).length })}
               </button>
             </div>
           </div>
@@ -715,27 +785,28 @@ export default function EmergencyKit() {
             <div className="flex items-center gap-3 mb-4">
               <AlertTriangle className="w-6 h-6 text-amber-500" />
               <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">
-                {FIX_WARNINGS[showConfirm.type].title}
+                {fixTitle(showConfirm)}
               </h3>
             </div>
-            <p className="text-gray-600 dark:text-gray-300 mb-6">
-              {FIX_WARNINGS[showConfirm.type].message}
-            </p>
-            <div className="flex gap-3 justify-end">
+            <p className="text-gray-600 dark:text-gray-300 mb-2">{fixMessage(showConfirm)}</p>
+            {showConfirm === "switch_dns" && dnsTargets && (
+              <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">{t("emergency.switch_dns_targets", { servers: dnsTargets })}</p>
+            )}
+            <div className="flex gap-3 justify-end mt-6">
               <button
-                onClick={cancelFix}
+                onClick={() => setShowConfirm(null)}
                 disabled={fixing !== null}
                 className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
               >
-                取消
+                {t("emergency.cancel")}
               </button>
               <button
                 onClick={confirmFix}
                 disabled={fixing !== null}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center gap-2"
               >
-                {fixing === showConfirm.type && <RefreshCw className="w-4 h-4 animate-spin" />}
-                {fixing === showConfirm.type ? "执行中..." : "确认执行"}
+                {fixing === showConfirm && <RefreshCw className="w-4 h-4 animate-spin" />}
+                {fixing === showConfirm ? t("emergency.executing") : t("emergency.confirm_execute")}
               </button>
             </div>
           </div>
