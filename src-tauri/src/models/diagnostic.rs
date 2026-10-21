@@ -40,6 +40,18 @@ pub enum RepairType {
     RestartNetworkService,
 }
 
+/// How disruptive a repair is; recommendations are ordered safest first.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum RepairRisk {
+    /// No connectivity interruption (e.g. flushing a cache).
+    Low,
+    /// Brief interruption or a persistent but reversible setting change.
+    Medium,
+    /// Needs admin rights and may drop the connection or require a reboot.
+    High,
+}
+
 /// Recommended repair action
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepairAction {
@@ -48,6 +60,15 @@ pub struct RepairAction {
     pub description: String,
     pub priority: u8, // 1-10, lower is higher priority
     pub estimated_time_seconds: u64,
+    pub risk: RepairRisk,
+}
+
+/// Whether a quick-fix type is implemented on the running platform.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairCapability {
+    pub fix_type: String,
+    pub supported: bool,
+    pub reason: Option<String>,
 }
 
 /// Complete diagnostic result
@@ -58,6 +79,13 @@ pub struct DiagnosticResult {
     pub ip_configuration: DiagnosticItem,
     pub dns_resolution: DiagnosticItem,
     pub network_quality: DiagnosticItem,
+    /// Keys of the checks whose status is not `pass`
+    /// (`network_connectivity`, `ip_configuration`, `dns_resolution`,
+    /// `network_quality`). This, not `recommendations.len()`, is the number
+    /// of problems found.
+    pub problem_checks: Vec<String>,
     pub recommendations: Vec<RepairAction>,
+    /// Guidance that is not an automated action (e.g. check the cable).
+    pub hints: Vec<String>,
     pub timestamp: i64,
 }

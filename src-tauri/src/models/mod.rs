@@ -9,7 +9,8 @@ pub mod traffic;
 // Re-export commonly used types
 pub use connection::{ConnectionInfo, ConnectionState};
 pub use diagnostic::{
-    DiagnosticItem, DiagnosticResult, DiagnosticStatus, RepairAction, RepairType,
+    DiagnosticItem, DiagnosticResult, DiagnosticStatus, RepairAction, RepairCapability, RepairRisk,
+    RepairType,
 };
 pub use dns::DNSStats;
 pub use network::{GeoIPInfo, IPInfo, IPType, NetworkStatus};

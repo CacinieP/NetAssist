@@ -106,22 +106,31 @@ unsafe fn ansi_to_string(mut ptr: *const u8) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Get default gateway on Windows (the default-route gateway of the first
-/// usable adapter).
-pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
-    let mut found: Option<IpAddr> = None;
-    with_adapters(AF_INET.0 as u32, |head| {
+/// Get the default-route gateway on Windows across IPv4 and IPv6 adapters.
+/// Among operational adapters with a gateway, the one with the lowest
+/// interface metric for that address family wins (IPv4 preferred), which is
+/// how Windows orders default routes; link-local IPv6 gateways keep the
+/// adapter's IPv6 interface index as their zone.
+pub fn get_default_gateway() -> anyhow::Result<Option<super::DefaultGateway>> {
+    let mut candidates: Vec<(super::DefaultGateway, u32)> = Vec::new();
+    with_adapters(AF_UNSPEC.0 as u32, |head| {
         let mut cur = head;
         while !cur.is_null() {
             let a = unsafe { &*cur };
-            // Only operational adapters are considered.
             if a.OperStatus.0 == 1 {
+                let name = unsafe { wide_to_string(a.FriendlyName.0) };
                 let mut gw = a.FirstGatewayAddress;
                 while !gw.is_null() {
                     let g = unsafe { &*gw };
                     if let Some(ip) = unsafe { sockaddr_to_ip(g.Address.lpSockaddr) } {
-                        found = Some(ip);
-                        return;
+                        let (raw, metric) = match ip {
+                            IpAddr::V4(_) => (ip.to_string(), a.Ipv4Metric),
+                            IpAddr::V6(_) => (format!("{}%{}", ip, a.Ipv6IfIndex), a.Ipv6Metric),
+                        };
+                        if let Some(mut parsed) = super::common::parse_gateway_addr(&raw, None) {
+                            parsed.interface = Some(name.clone());
+                            candidates.push((parsed, metric));
+                        }
                     }
                     gw = g.Next;
                 }
@@ -129,7 +138,7 @@ pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
             cur = unsafe { (*cur).Next };
         }
     });
-    Ok(found)
+    Ok(super::common::select_default_gateway(candidates))
 }
 
 /// Get the friendly name of the default network interface.
