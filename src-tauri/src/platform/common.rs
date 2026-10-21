@@ -274,10 +274,164 @@ pub fn parse_proc_hex_addr(addr: &str, v6: bool) -> Option<(IpAddr, u16)> {
     Some((ip, port))
 }
 
+fn is_link_local_v6(ip: &std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
+/// Build a gateway from a route table entry such as `192.168.1.1`,
+/// `fe80::1%en0` or (with `iface`) `fe80::1`.
+///
+/// Rejects addresses that cannot be a usable next hop: unspecified, a
+/// link-local IPv6 address with no known scope, and the bare `fe80::`
+/// prefix that tunnel interfaces (utun) list as their "gateway".
+pub fn parse_gateway_addr(raw: &str, iface: Option<&str>) -> Option<super::DefaultGateway> {
+    let (addr_part, zone) = match raw.split_once('%') {
+        Some((addr, zone)) if !zone.is_empty() => (addr, Some(zone.to_string())),
+        Some((addr, _)) => (addr, None),
+        None => (raw, None),
+    };
+    let addr: IpAddr = addr_part.parse().ok()?;
+    if addr.is_unspecified() {
+        return None;
+    }
+    let iface = iface.filter(|i| !i.is_empty()).map(str::to_string);
+    let zone = match addr {
+        IpAddr::V6(v6) if is_link_local_v6(&v6) => {
+            if v6.segments()[1..].iter().all(|s| *s == 0) {
+                return None;
+            }
+            Some(zone.or_else(|| iface.clone())?)
+        }
+        _ => None,
+    };
+    Some(super::DefaultGateway {
+        addr,
+        zone,
+        interface: iface,
+    })
+}
+
+/// Pick the default gateway among candidates: IPv4 before IPv6, then the
+/// lowest route/interface metric; ties keep the original order.
+pub fn select_default_gateway(
+    mut candidates: Vec<(super::DefaultGateway, u32)>,
+) -> Option<super::DefaultGateway> {
+    candidates.sort_by_key(|(gw, metric)| (gw.addr.is_ipv6(), *metric));
+    candidates.into_iter().next().map(|(gw, _)| gw)
+}
+
+/// Parse macOS `route -n get [-inet6] default`:
+/// ```text
+///     gateway: fe80::1%en1
+///   interface: en1
+/// ```
+pub fn parse_macos_route_get(output: &str) -> Option<super::DefaultGateway> {
+    let field = |name: &str| {
+        output.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == name).then(|| value.trim().to_string())
+        })
+    };
+    let gateway = field("gateway")?;
+    let iface = field("interface");
+    parse_gateway_addr(&gateway, iface.as_deref())
+}
+
+/// Parse `ip route show default` / `ip -6 route show default` and keep the
+/// route with the lowest metric (a missing metric is 0, as in the kernel).
+pub fn parse_ip_route_default(output: &str) -> Option<super::DefaultGateway> {
+    let candidates = output
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.first() != Some(&"default") {
+                return None;
+            }
+            let value_after = |key: &str| {
+                parts
+                    .iter()
+                    .position(|p| *p == key)
+                    .and_then(|i| parts.get(i + 1).copied())
+            };
+            let via = value_after("via")?;
+            let dev = value_after("dev");
+            let metric = value_after("metric")
+                .and_then(|m| m.parse::<u32>().ok())
+                .unwrap_or(0);
+            Some((parse_gateway_addr(via, dev)?, metric))
+        })
+        .collect();
+    select_default_gateway(candidates)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn gateway_keeps_ipv6_zone_and_rejects_unusable_hops() {
+        let gw = parse_gateway_addr("fe80::1234%en1", Some("en1")).unwrap();
+        assert_eq!(gw.ping_target(), "fe80::1234%en1");
+        // Zone taken from the route's interface when the address lacks one.
+        assert_eq!(
+            parse_gateway_addr("fe80::1", Some("eth0"))
+                .unwrap()
+                .ping_target(),
+            "fe80::1%eth0"
+        );
+        assert_eq!(parse_gateway_addr("fe80::1", None), None);
+        assert_eq!(parse_gateway_addr("fe80::%utun0", Some("utun0")), None);
+        assert_eq!(parse_gateway_addr("0.0.0.0", None), None);
+        assert_eq!(parse_gateway_addr("link#12", None), None);
+        let v4 = parse_gateway_addr("192.168.1.1", Some("en0")).unwrap();
+        assert_eq!(v4.ping_target(), "192.168.1.1");
+        assert_eq!(v4.interface.as_deref(), Some("en0"));
+    }
+
+    #[test]
+    fn macos_route_get_reads_gateway_and_interface() {
+        let out = "   route to: default\ndestination: default\n       mask: default\n    gateway: 192.168.0.1\n  interface: en1\n      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>\n";
+        let gw = parse_macos_route_get(out).unwrap();
+        assert_eq!(gw.addr, IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)));
+        assert_eq!(gw.interface.as_deref(), Some("en1"));
+
+        let v6 = "    gateway: fe80::d07d:afff:fe7b:d4d2%en1\n  interface: en1\n";
+        assert_eq!(
+            parse_macos_route_get(v6).unwrap().ping_target(),
+            "fe80::d07d:afff:fe7b:d4d2%en1"
+        );
+        // Tunnel default route without a gateway line.
+        assert_eq!(parse_macos_route_get("  interface: utun3\n"), None);
+    }
+
+    #[test]
+    fn ip_route_picks_lowest_metric() {
+        let out = "default via 10.0.0.1 dev wlan0 proto dhcp metric 600\ndefault via 192.168.1.1 dev eth0 proto dhcp metric 100\n";
+        let gw = parse_ip_route_default(out).unwrap();
+        assert_eq!(gw.addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(gw.interface.as_deref(), Some("eth0"));
+
+        let v6 = "default via fe80::1 dev eth0 proto ra metric 1024 pref medium\n";
+        assert_eq!(
+            parse_ip_route_default(v6).unwrap().ping_target(),
+            "fe80::1%eth0"
+        );
+        assert_eq!(parse_ip_route_default("default dev wg0 scope link\n"), None);
+    }
+
+    #[test]
+    fn selection_prefers_ipv4_then_metric() {
+        let gw = |s: &str| parse_gateway_addr(s, Some("x")).unwrap();
+        let picked = select_default_gateway(vec![
+            (gw("fe80::1"), 1),
+            (gw("10.0.0.1"), 50),
+            (gw("192.168.1.1"), 25),
+        ])
+        .unwrap();
+        assert_eq!(picked.addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(select_default_gateway(vec![]), None);
+    }
 
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))

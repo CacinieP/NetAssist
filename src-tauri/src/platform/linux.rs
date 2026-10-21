@@ -7,23 +7,19 @@
 use super::{ConnectionRawInfo, NetworkInterfaceInfo};
 use std::net::IpAddr;
 
-/// Get default gateway on Linux
-pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
-    // Read from /proc/net/route or use netlink
-    let output = super::common::exec_command("ip", &["route", "show", "default"])?;
-
-    // Parse output to find gateway
-    for line in output.lines() {
-        if line.contains("default via") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if let Some(gw_str) = parts.get(2) {
-                if let Ok(gw) = gw_str.parse::<IpAddr>() {
-                    return Ok(Some(gw));
-                }
+/// Get the default-route gateway on Linux: the lowest-metric IPv4 default
+/// route, else the lowest-metric IPv6 one.
+pub fn get_default_gateway() -> anyhow::Result<Option<super::DefaultGateway>> {
+    for args in [
+        &["route", "show", "default"][..],
+        &["-6", "route", "show", "default"][..],
+    ] {
+        if let Ok(output) = super::common::exec_command("ip", args) {
+            if let Some(gw) = super::common::parse_ip_route_default(&output) {
+                return Ok(Some(gw));
             }
         }
     }
-
     Ok(None)
 }
 

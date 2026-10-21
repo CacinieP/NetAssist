@@ -130,6 +130,7 @@ fn main() {
             commands::connections::kill_connection,
             commands::emergency::run_diagnostics,
             commands::emergency::apply_quick_fix,
+            commands::emergency::get_repair_capabilities,
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::settings::reset_settings,

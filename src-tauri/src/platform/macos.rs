@@ -4,24 +4,21 @@ use super::{ConnectionRawInfo, NetworkInterfaceInfo};
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-/// Get default gateway on macOS
-pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
-    // Use: netstat -nr | grep default
-    let output = super::common::exec_command("netstat", &["-nr"])?;
-
-    for line in output.lines() {
-        if line.contains("default") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() > 1 {
-                // IPv6 gateways may carry a %zone suffix (fe80::1%en0).
-                let gw = parts[1].split('%').next().unwrap_or(parts[1]);
-                if let Ok(gw) = gw.parse::<IpAddr>() {
-                    return Ok(Some(gw));
-                }
+/// Get the default-route gateway on macOS: the IPv4 default route, else the
+/// IPv6 one. `route -n get` resolves the route the kernel would actually
+/// use, unlike scanning `netstat -nr` for the first "default" line (which
+/// can hit a utun tunnel's `fe80::%utun0`).
+pub fn get_default_gateway() -> anyhow::Result<Option<super::DefaultGateway>> {
+    for args in [
+        &["-n", "get", "default"][..],
+        &["-n", "get", "-inet6", "default"][..],
+    ] {
+        if let Ok(output) = super::common::exec_command("route", args) {
+            if let Some(gw) = super::common::parse_macos_route_get(&output) {
+                return Ok(Some(gw));
             }
         }
     }
-
     Ok(None)
 }
 

@@ -41,8 +41,28 @@ pub struct ConnectionRawInfo {
     pub process_name: Option<String>,
 }
 
+/// Gateway of the default route. `zone` is the scope a link-local IPv6
+/// gateway needs to be reachable at all (`en0` on Unix, the interface index
+/// on Windows); it must be kept when probing the gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultGateway {
+    pub addr: IpAddr,
+    pub zone: Option<String>,
+    pub interface: Option<String>,
+}
+
+impl DefaultGateway {
+    /// Address as accepted by the platform `ping` (`fe80::1%en0`).
+    pub fn ping_target(&self) -> String {
+        match &self.zone {
+            Some(zone) => format!("{}%{}", self.addr, zone),
+            None => self.addr.to_string(),
+        }
+    }
+}
+
 /// Get default gateway (cross-platform abstraction)
-pub fn get_default_gateway() -> anyhow::Result<Option<IpAddr>> {
+pub fn get_default_gateway() -> anyhow::Result<Option<DefaultGateway>> {
     cfg_if::cfg_if! {
         if #[cfg(windows)] {
             windows::get_default_gateway()
