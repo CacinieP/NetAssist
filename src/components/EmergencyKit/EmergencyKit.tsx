@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import { Activity, AlertTriangle, CheckCircle, XCircle, X, Wrench, Clock, RefreshCw, Settings, Network, FileDown, ChevronDown } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle, XCircle, X, Wrench, Clock, RefreshCw, Settings, Network, FileDown, ChevronDown, Square } from "lucide-react";
+import { invokeErrorMessage } from "../../utils/errors";
 
 type DiagnosticStatus = "pass" | "fail" | "warning";
 
@@ -91,6 +92,11 @@ export default function EmergencyKit() {
   const [fixError, setFixError] = useState<string | null>(null);
   const [fixHistory, setFixHistory] = useState<FixHistory[]>([]);
   const [autoFixing, setAutoFixing] = useState(false);
+  const [autoFixStep, setAutoFixStep] = useState("");
+  // Batch fix plan awaiting confirmation; each recommendation can be unticked.
+  const [autoFixPlan, setAutoFixPlan] = useState<{ action: RepairAction; selected: boolean }[] | null>(null);
+  // Checked between batch steps; an in-flight repair cannot be aborted.
+  const autoFixCancelled = useRef(false);
   const [showHistory, setShowHistory] = useState(false);
   const [exportToast, setExportToast] = useState<{ msg: string; ok: boolean } | null>(null);
   // Manual tools are shown in a modal (opened on demand) instead of always
@@ -142,6 +148,9 @@ export default function EmergencyKit() {
     }
   }, []);
 
+  // Leaving the page unmounts this component; stop any remaining batch steps.
+  useEffect(() => () => { autoFixCancelled.current = true; }, []);
+
   const saveToHistory = (actionType: string, name: string, success: boolean, error?: string) => {
     const entry: FixHistory = {
       timestamp: Date.now(),
@@ -176,14 +185,24 @@ export default function EmergencyKit() {
       setDiagnosingStep("");
     } catch (error) {
       console.error("Diagnostic failed:", error);
-      setFixError("诊断失败: " + (error instanceof Error ? error.message : String(error)));
+      setFixError("诊断失败: " + invokeErrorMessage(error, "未知错误"));
     } finally {
       setIsDiagnosing(false);
       setDiagnosingStep("");
     }
   };
 
-  const applyFix = async (fixType: string) => {
+  const rediagnose = async () => {
+    setDiagnosingStep("正在重新诊断...");
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const res = await invoke<DiagnosticResult>("run_diagnostics");
+    setResult(res);
+    setDiagnosingStep("");
+  };
+
+  // Returns whether the fix succeeded. Batch runs pass rediagnose=false and
+  // re-diagnose once at the end instead of after every step.
+  const applyFix = async (fixType: string, { rediagnose: rerun = true } = {}): Promise<boolean> => {
     try {
       setFixing(fixType);
       setFixError(null);
@@ -192,37 +211,66 @@ export default function EmergencyKit() {
 
       saveToHistory(fixType, FIX_WARNINGS[fixType as FixType]?.title || fixType, true);
 
-      // Re-run diagnostics after fix
-      setDiagnosingStep("正在重新诊断...");
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      const res = await invoke<DiagnosticResult>("run_diagnostics");
-      setResult(res);
-      setDiagnosingStep("");
+      if (rerun) await rediagnose();
+      return true;
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "修复操作失败";
+      const errorMsg = invokeErrorMessage(err, "修复操作失败");
       console.error("Fix failed:", err);
       const fixName = FIX_WARNINGS[fixType as FixType]?.title || fixType;
       setFixError(`${fixName}失败: ${errorMsg}`);
       saveToHistory(fixType, fixName, false, errorMsg);
+      return false;
     } finally {
       setFixing(null);
       setDiagnosingStep("");
     }
   };
 
-  const applyAutoFix = async () => {
+  const openAutoFixPlan = () => {
     if (!result || result.recommendations.length === 0) return;
+    setAutoFixPlan(result.recommendations.map(action => ({ action, selected: true })));
+  };
 
+  const toggleAutoFixItem = (idx: number) => {
+    setAutoFixPlan(plan => plan && plan.map((item, i) => (i === idx ? { ...item, selected: !item.selected } : item)));
+  };
+
+  const runAutoFix = async () => {
+    const actions = (autoFixPlan ?? []).filter(item => item.selected).map(item => item.action);
+    setAutoFixPlan(null);
+    if (actions.length === 0) return;
+
+    autoFixCancelled.current = false;
     setAutoFixing(true);
-    const actions = [...result.recommendations];
-
-    for (const action of actions) {
-      setDiagnosingStep(`正在执行: ${action.name}...`);
-      await applyFix(action.action_type);
-      await new Promise(resolve => setTimeout(resolve, 2000)); // Wait between fixes
+    try {
+      for (const [idx, action] of actions.entries()) {
+        if (autoFixCancelled.current) return;
+        setAutoFixStep(`正在执行 (${idx + 1}/${actions.length}): ${action.name}...`);
+        const ok = await applyFix(action.action_type, { rediagnose: false });
+        const remaining = actions.length - idx - 1;
+        if (!ok) {
+          if (remaining > 0) {
+            setFixError(prev => `${prev ?? "修复失败"}（已停止，剩余 ${remaining} 项未执行）`);
+          }
+          return;
+        }
+        if (autoFixCancelled.current) return;
+        if (remaining > 0) await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+      setAutoFixStep("");
+      await rediagnose();
+    } catch (err) {
+      setFixError("重新诊断失败: " + invokeErrorMessage(err, "未知错误"));
+    } finally {
+      setAutoFixing(false);
+      setAutoFixStep("");
+      setDiagnosingStep("");
     }
+  };
 
-    setAutoFixing(false);
+  const stopAutoFix = () => {
+    autoFixCancelled.current = true;
+    setAutoFixStep("正在停止：当前操作结束后不再执行后续修复...");
   };
 
   const handleFixClick = (fixType: string, fixName: string) => {
@@ -511,7 +559,7 @@ export default function EmergencyKit() {
             </h3>
             {!autoFixing && (
               <button
-                onClick={applyAutoFix}
+                onClick={openAutoFixPlan}
                 disabled={isDiagnosing || fixing !== null}
                 className="px-3 py-1.5 text-xs bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors disabled:opacity-50 flex items-center gap-1"
               >
@@ -522,11 +570,18 @@ export default function EmergencyKit() {
           </div>
 
           {autoFixing && (
-            <div className="mb-3 p-2 bg-white dark:bg-gray-800 rounded border border-orange-200 dark:border-orange-800">
+            <div className="mb-3 p-2 bg-white dark:bg-gray-800 rounded border border-orange-200 dark:border-orange-800 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-orange-700 dark:text-orange-300 text-sm">
                 <RefreshCw className="w-4 h-4 animate-spin" />
-                {diagnosingStep}
+                {autoFixStep || diagnosingStep}
               </div>
+              <button
+                onClick={stopAutoFix}
+                className="px-2 py-1 text-xs border border-orange-300 dark:border-orange-700 text-orange-700 dark:text-orange-300 rounded hover:bg-orange-50 dark:hover:bg-gray-700 flex items-center gap-1"
+              >
+                <Square className="w-3 h-3" />
+                停止
+              </button>
             </div>
           )}
 
@@ -601,6 +656,53 @@ export default function EmergencyKit() {
                   <p className="text-sm text-gray-600 dark:text-gray-300 line-clamp-2">{info.message}</p>
                 </button>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Batch Fix Confirmation Modal */}
+      {autoFixPlan && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 p-6 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center gap-3 mb-2">
+              <AlertTriangle className="w-6 h-6 text-amber-500" />
+              <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100">一键修复：将依次执行以下操作</h3>
+            </div>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+              可取消勾选不想执行的项。任一项失败会停止后续操作；执行中可随时停止，但已开始的操作无法中断。
+            </p>
+            <div className="space-y-2 mb-6">
+              {autoFixPlan.map(({ action, selected }, idx) => {
+                const warning = FIX_WARNINGS[action.action_type as FixType];
+                return (
+                  <label key={idx} className="flex items-start gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                    <input type="checkbox" checked={selected} onChange={() => toggleAutoFixItem(idx)} className="mt-1" />
+                    <div>
+                      <div className="font-medium text-gray-800 dark:text-gray-100">
+                        {action.name}
+                        <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">约 {action.estimated_time_seconds} 秒</span>
+                      </div>
+                      <p className="text-sm text-gray-600 dark:text-gray-300">{warning?.message || action.description}</p>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setAutoFixPlan(null)}
+                className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={runAutoFix}
+                disabled={!autoFixPlan.some(item => item.selected)}
+                className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors disabled:opacity-50"
+              >
+                执行所选（{autoFixPlan.filter(item => item.selected).length} 项）
+              </button>
             </div>
           </div>
         </div>
