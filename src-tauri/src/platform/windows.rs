@@ -35,7 +35,7 @@ fn with_adapters<R>(
                 return None;
             }
             // Guard against size == 0 (defensive; never observed in practice).
-            let mut buf: Vec<u64> = vec![0; (size.max(1) as usize + 7) / 8];
+            let mut buf: Vec<u64> = vec![0; (size.max(1) as usize).div_ceil(8)];
             let ptr = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
             let rc = GetAdaptersAddresses(family, GAA_FLAGS, None, Some(ptr), &mut size);
             if rc == 0 {
@@ -272,7 +272,7 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
             0,
         );
         if rc == 122 {
-            let mut buf: Vec<u64> = vec![0; (size as usize + 7) / 8];
+            let mut buf: Vec<u64> = vec![0; (size as usize).div_ceil(8)];
             let table = buf.as_mut_ptr() as *mut MIB_TCPTABLE_OWNER_PID;
             rc = GetExtendedTcpTable(
                 Some(table as *mut _),
@@ -316,7 +316,7 @@ pub fn get_active_connections() -> anyhow::Result<Vec<ConnectionRawInfo>> {
             0,
         );
         if rc == 122 {
-            let mut buf: Vec<u64> = vec![0; (size as usize + 7) / 8];
+            let mut buf: Vec<u64> = vec![0; (size as usize).div_ceil(8)];
             let table = buf.as_mut_ptr() as *mut MIB_UDPTABLE_OWNER_PID;
             rc = GetExtendedUdpTable(
                 Some(table as *mut _),
@@ -439,7 +439,7 @@ fn try_get_process_image_name(pid: u32) -> Option<String> {
             return Some(
                 full_path
                     .split('\\')
-                    .last()
+                    .next_back()
                     .filter(|f| !f.is_empty())
                     .map(str::to_string)
                     .unwrap_or(full_path),
@@ -460,7 +460,7 @@ fn get_process_name(pid: u32) -> Option<String> {
 /// Flush DNS cache on Windows
 pub fn flush_dns_cache() -> anyhow::Result<()> {
     let output = std::process::Command::new("ipconfig")
-        .args(&["/flushdns"])
+        .args(["/flushdns"])
         .output()?;
 
     if output.status.success() {
@@ -794,7 +794,7 @@ pub fn kill_connection(
             0,
         );
         if rc == 122 {
-            let mut buf: Vec<u64> = vec![0; (size as usize + 7) / 8];
+            let mut buf: Vec<u64> = vec![0; (size as usize).div_ceil(8)];
             let table = buf.as_mut_ptr() as *mut MIB_TCPTABLE_OWNER_PID;
             rc = GetExtendedTcpTable(
                 Some(table as *mut _),
@@ -818,7 +818,7 @@ pub fn kill_connection(
                         && mib_port(row.dwRemotePort) == remote_port
                     {
                         // Prefer resetting just this connection.
-                        let mut tcp_row = MIB_TCPROW_LH {
+                        let tcp_row = MIB_TCPROW_LH {
                             Anonymous: MIB_TCPROW_LH_0 {
                                 dwState: MIB_TCP_STATE_DELETE_TCB.0 as u32,
                             },
@@ -827,7 +827,7 @@ pub fn kill_connection(
                             dwRemoteAddr: row.dwRemoteAddr,
                             dwRemotePort: row.dwRemotePort,
                         };
-                        if SetTcpEntry(&mut tcp_row) == 0 {
+                        if SetTcpEntry(&tcp_row) == 0 {
                             return Ok(true);
                         }
                         // Fallback: kill the owning process.
